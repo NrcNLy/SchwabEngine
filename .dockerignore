@@ -1,0 +1,20 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.venv
+venv/
+ENV/
+
+# Source control
+.git/
+.gitignore
+
+# Android Edge Kotlin files (not needed in Python container)
+android_edge/
+
+# Do NOT ignore config/config.yaml (needed for engine configuration)
+# Do NOT ignore schwab_tokens_vault.json (it will be handled via a volume mount, but ignoring it entirely can complicate things if it's referenced during build contexts)

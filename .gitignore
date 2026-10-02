@@ -1,0 +1,43 @@
+# Security & Credentials
+.env
+*.vault.json
+schwab_tokens_vault.json
+*.pem
+*.key
+*.p12
+
+# OS Files
+desktop.ini
+Thumbs.db
+.DS_Store
+
+# Node / Web Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Android & Gradle Builds
+build/
+.gradle/
+*.apk
+*.aab
+local.properties
+android_edge/.gradle/
+android_edge/app/build/
+
+# Python Cache & Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# IDE / Editor artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
