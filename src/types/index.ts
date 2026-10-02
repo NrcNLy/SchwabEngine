@@ -57,7 +57,7 @@ export interface StrategyConfig {
   ci_threshold_regime_c: number;
   rvol_min_regime_a: number;
   rsi_oversold: number;
-  llm_mode: 'pro' | 'flash' | 'disabled';
+  llm_mode: 'gemini-2.5-pro' | 'gemini-2.5-flash' | 'disabled';
 }
 
 export interface TradeOrder {
