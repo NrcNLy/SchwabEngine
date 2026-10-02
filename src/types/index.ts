@@ -4,8 +4,12 @@ export interface EngineStatus {
   uptime_seconds: number;
   active_positions: number;
   today_pnl: number;
+  circuit_breaker_limit: number;
+  circuit_breaker_triggered: boolean;
   external_positions_detected: boolean;
   timestamp_edt: string;
+  is_connected: boolean;
+  engine_mode: 'LIVE_DAEMON' | 'SANDBOX_SIMULATION';
 }
 
 export interface Position {
@@ -13,11 +17,18 @@ export interface Position {
   quantity: number;
   entry_price: number;
   current_price: number;
-  stop_price?: number;
+  notional_value: number;
+  exposure_pct: number;
+  max_exposure_cap: number;
+  hard_stop_price?: number;
+  trailing_stop_price?: number;
+  stop_price?: number; // legacy fallback
   target_price?: number;
   unrealized_pnl: number;
   regime?: 'A' | 'B' | 'C' | 'UNKNOWN';
   managed: boolean;
+  rotation_pair?: string;
+  wash_sale_armed?: boolean;
   stop_order_id?: string;
   avg_cost?: number;
 }
@@ -31,7 +42,14 @@ export interface LedgerSnapshot {
   bucket1_settled: number;
   bucket2_unsettled: number;
   bucket3_pending: number;
+  total_equity: number;
+  max_single_exposure: number;
   max_order_value: number;
+  max_risk_per_trade: number;
+  daily_drawdown_limit: number;
+  quarter_kelly_size: number;
+  safe_daytrade_buying_power: number;
+  gfv_risk_flag: boolean;
 }
 
 export interface StrategyConfig {
@@ -50,6 +68,8 @@ export interface TradeOrder {
   cost: number;
   timestamp: string;
   status: string;
+  regime?: string;
+  risk_notional?: number;
 }
 
 export interface MacroBlackout {
@@ -58,3 +78,4 @@ export interface MacroBlackout {
   next_event?: string;
   event_time?: string;
 }
+
