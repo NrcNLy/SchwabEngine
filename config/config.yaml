@@ -1,0 +1,302 @@
+# =============================================================================
+# Schwab Automated Day-Trading Engine — Master Configuration
+# Phase 1: Configuration Matrix
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Account & Firewall Settings
+# ---------------------------------------------------------------------------
+account:
+  # Mandatory suffix for account number whitelist (ends with "015")
+  required_suffix: "015"
+
+  # Advisory keyword blocklist — any linked account matching these strings
+  # will be refused all order routing.
+  blocked_keywords:
+    - "ROBO"
+    - "INTELLIGENT"
+    - "IRA"
+    - "PORTFOLIO_MANAGED"
+
+# ---------------------------------------------------------------------------
+# Capital & Risk Parameters
+# ---------------------------------------------------------------------------
+risk:
+  # Initial sandbox / baseline account value
+  sandbox_baseline: 1000.00
+
+  # Hard cash buffer: orders are blocked if Bucket 1 <= this amount
+  cash_buffer: 10.00
+
+  # Maximum loss per trade (used in Quarter-Kelly sizing)
+  max_loss_per_trade: 10.00
+
+  # Tier-2 broker-side catastrophe stop: percentage below entry price
+  tier2_stop_pct: 0.04   # 4.0%
+
+  # Breakeven trigger: move stop to entry once price gains this multiple of R
+  breakeven_trigger_r: 1.0
+
+  # ATR trailing step: activate ATR trail once price gains this multiple of R
+  atr_trail_trigger_r: 1.5
+
+# ---------------------------------------------------------------------------
+# Trading Universe & Wash-Sale Rotation Map
+# ---------------------------------------------------------------------------
+universe:
+  # Primary swing symbols that may be masked for day-trading (IRC §1091)
+  active_swing_symbols:
+    - "SOXL"
+    - "TQQQ"
+    - "TNA"
+
+  # Rotation partners when swing symbol is masked
+  wash_sale_rotations:
+    SOXL: "FNGU"
+    TQQQ: "CONL"
+    TNA:  "DPST"
+
+  # Default active day-trading universe (pre-mask-check)
+  day_trade_candidates:
+    - "SOXL"
+    - "TQQQ"
+    - "TNA"
+    - "FNGU"
+    - "CONL"
+    - "DPST"
+
+# ---------------------------------------------------------------------------
+# Regime Detection Thresholds
+# ---------------------------------------------------------------------------
+regime:
+  # Choppiness Index (CI) regime boundaries
+  ci_trend_threshold: 38.2      # CI < 38.2  => Trend Expansion (Regime A)
+  ci_chop_threshold: 61.8       # CI > 61.8  => High-Noise Chop (Regime C)
+                                 # 38.2 <= CI <= 61.8 => Range-Bound (Regime B)
+
+  # VWAP slope regression window (seconds)
+  vwap_slope_window_sec: 900     # 15-minute rolling regression
+
+  # VWAP slope confirmation threshold (degrees)
+  vwap_slope_min_degrees: 15.0
+
+  # Relative Volume (RVOL) thresholds
+  rvol_breakout_min: 1.5         # Confirms Regime A breakouts
+  rvol_compression_max: 1.0      # Upper bound for Regime B
+
+  # Regime evaluation interval (seconds)
+  evaluation_interval_sec: 180   # Every 3 minutes
+
+  # ATR / NATR lookback period (1m bars)
+  natr_period: 14
+
+  # Choppiness Index lookback period
+  ci_period: 14
+
+# ---------------------------------------------------------------------------
+# Strategy Parameters
+# ---------------------------------------------------------------------------
+strategies:
+  orb_15m:
+    # Opening Range Breakout — 15-minute
+    name: "15m ORB"
+    entry_rvol_min: 1.5          # Minimum RVOL for breakout confirmation
+    risk_reward_target: 2.5      # Target R:R ratio
+
+  vwap_mean_reversion:
+    # VWAP Mean-Reversion
+    name: "VWAP MR"
+    vwap_band_sigma: 2.2         # Lower VWAP envelope (standard deviations)
+    rsi_oversold_threshold: 28   # RSI entry filter
+    rsi_period: 14
+    target: "vwap"               # Exit at VWAP midline
+
+# ---------------------------------------------------------------------------
+# Macro Gatekeeper & LLM Settings
+# ---------------------------------------------------------------------------
+macro:
+  # Gemini model identifier
+  gemini_model: "gemini-3.1-pro-preview"
+
+  # LLM API call timeout (milliseconds) — 3.1 Pro needs more headroom than Flash
+  llm_timeout_ms: 6000
+
+  # LLM rate limit (Requests Per Minute)
+  llm_rpm_limit: 8
+
+  # Scheduled hard-lockout windows (EDT — 24h HH:MM:SS format)
+  lockout_windows:
+    - name: "CPI/PPI/PCE/NFP/GDP"
+      start: "08:25:00"
+      end:   "08:45:00"
+      days:  ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+
+    - name: "FOMC Rate Decision/Presser"
+      start: "13:55:00"
+      end:   "15:30:00"
+      days:  ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+
+    - name: "EIA NatGas (BOIL)"
+      start: "10:25:00"
+      end:   "10:45:00"
+      days:  ["Thursday"]
+      symbols: ["BOIL"]
+
+  # Semantic cache settings (ChromaDB)
+  semantic_cache:
+    model: "all-MiniLM-L6-v2"
+    similarity_threshold: 0.92   # Cosine similarity for cache hit
+    ttl_minutes: 30              # Cache entry time-to-live
+
+# ---------------------------------------------------------------------------
+# API Rate Limiting (Schwab REST / WebSocket)
+# ---------------------------------------------------------------------------
+rate_limiter:
+  # Token bucket: capacity and refill rate
+  # Set to 50% of Schwab's 120 RPM limit
+  capacity: 60.0
+  refill_rate: 1.0               # Tokens per second (= 60 RPM)
+
+# ---------------------------------------------------------------------------
+# WebSocket Streamer
+# ---------------------------------------------------------------------------
+streamer:
+  url: "wss://streamer-api.schwabapi.com/ws"
+  user_preference_endpoint: "/trader/v1/userPreference"
+
+  # Level 1 equity fields to subscribe
+  # 0=Symbol,1=BidPrice,2=AskPrice,3=LastPrice,4=BidSize,5=AskSize,
+  # 8=TotalVolume,10=HighPrice,11=LowPrice
+  levelone_equities_fields: "0,1,2,3,4,5,8,10,11"
+
+# ---------------------------------------------------------------------------
+# REST API Endpoints
+# ---------------------------------------------------------------------------
+api:
+  base_url: "https://api.schwabapi.com"
+  trader_base: "https://api.schwabapi.com/trader/v1"
+  market_data_base: "https://api.schwabapi.com/marketdata/v1"
+  token_url: "https://api.schwabapi.com/v1/oauth/token"
+  callback_url: "https://127.0.0.1"
+
+# ---------------------------------------------------------------------------
+# OAuth / Token Management
+# ---------------------------------------------------------------------------
+auth:
+  # Access token lifetime (seconds)
+  access_token_ttl_sec: 1800     # 30 minutes
+
+  # Refresh token lifetime (seconds)
+  refresh_token_ttl_sec: 604800  # 7 calendar days
+
+  # Weekend maintenance: day and local time (EDT) to re-authorize
+  weekend_reauth_day: "Saturday"
+  weekend_reauth_time: "10:00:00"
+
+  # Local loopback OAuth callback server
+  callback_host: "127.0.0.1"
+  callback_port: 5556
+
+  # Token vault file path (relative to project root)
+  vault_file: "schwab_tokens_vault.json"
+
+  # PBKDF2 key derivation iterations
+  pbkdf2_iterations: 600000
+
+# ---------------------------------------------------------------------------
+# Scheduling / Hard Time-Stops (EDT)
+# ---------------------------------------------------------------------------
+schedule:
+  # T+1 rollover: transfer Bucket 2 -> Bucket 1 (matches NSCC clearing)
+  t1_rollover_time: "09:00:00"
+
+  # Broker telemetry sync: verify internal ledger vs broker cashBalance
+  telemetry_sync_time: "09:15:00"
+
+  # Wash-sale mask evaluation time
+  wash_sale_mask_time: "09:15:00"
+
+  # End-of-day liquidation sweep — flatten all positions to cash (5 min buffer before 15:55)
+  eod_liquidation_time: "15:50:00"
+
+  # Timezone for all scheduled events
+  timezone: "America/New_York"
+
+# ---------------------------------------------------------------------------
+# Telemetry / FCM (Firebase Cloud Messaging)
+# ---------------------------------------------------------------------------
+telemetry:
+  # HITL staged approval timeout (seconds)
+  hitl_approval_timeout_sec: 45
+
+  # FCM event types
+  events:
+    - "PRE_MARKET_DIAGNOSTIC"
+    - "REGIME_CHANGE"
+    - "SIGNAL_GENERATED"
+    - "ORDER_LIFECYCLE"
+    - "RISK_BREACH"
+    - "PORTFOLIO_SWEEP"
+    - "EXTERNAL_POSITION_DETECTED"
+    - "PHANTOM_POSITION_CLEARED"
+    - "PORTFOLIO_RECOMMENDATION"
+    - "COMPRESSION_REPORT_READY"
+    - "HITL_APPROVAL_REQUESTED"
+
+# ---------------------------------------------------------------------------
+# News Aggregator (Finviz RSS)
+# ---------------------------------------------------------------------------
+news:
+  enabled: true
+  fetch_interval_sec: 300          # Every 5 minutes during market hours
+  window_minutes: 30               # Headlines older than 30 min are excluded
+
+# ---------------------------------------------------------------------------
+# Portfolio Manager (Take-Profit for non-universe holdings)
+# ---------------------------------------------------------------------------
+portfolio_manager:
+  enabled: true
+  # "advisory"           - notify only, no orders
+  # "auto_with_approval" - 60s HITL window, then auto-execute
+  # "auto"               - immediate execution (use with caution)
+  mode: "auto_with_approval"
+  evaluation_time: "09:20:00"      # EDT — 5 minutes after wash-sale mask
+  hitl_timeout_sec: 60             # Seconds to wait for veto before auto-executing
+  auto_max_value: 10000.0          # Max position value for auto execution ($)
+  min_confidence: 0.75             # Minimum LLM confidence for auto execution
+  log_dir: "/app/logs"
+  exclude_symbols:                 # Never auto-trade these
+    - "SOXL"
+    - "TQQQ"
+    - "TNA"
+    - "FNGU"
+    - "CONL"
+    - "DPST"
+
+# ---------------------------------------------------------------------------
+# Reconciliation Monitor (External order/position detection)
+# ---------------------------------------------------------------------------
+reconciliation:
+  enabled: true
+  poll_interval_sec: 30            # How often to poll Schwab for drift
+  protect_unmanaged: true          # Auto-place a protective stop on external positions
+  unmanaged_stop_pct: 0.05         # Emergency stop at 5% below avg cost
+
+# ---------------------------------------------------------------------------
+# Research / Compression Agent
+# ---------------------------------------------------------------------------
+research:
+  compression_agent_enabled: true  # Runs Sat/Sun 22:00 EDT
+  decision_log_dir: "/app/logs"    # Where macro_decisions.jsonl is written
+  performance_log_dir: "/app/logs/performance"
+  compression_report_dir: "/app/logs/compression_reports"
+
+# ---------------------------------------------------------------------------
+# API Server (FastAPI — Android dashboard backend)
+# ---------------------------------------------------------------------------
+api:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+  # Schwab OAuth callback URL — must match the registered app exactly (no port)
+  callback_url: "https://127.0.0.1"
