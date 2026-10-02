@@ -1,6 +1,6 @@
 import { EngineStatus, PositionsResponse, LedgerSnapshot, StrategyConfig, TradeOrder } from '../types';
 
-const API_BASE = import.meta.env.VITE_ENGINE_BASE_URL || '/api';
+const API_BASE = '/api';
 
 // Fallback mock data when running in standalone preview or AI Studio Build Mode
 const MOCK_STATUS: EngineStatus = {

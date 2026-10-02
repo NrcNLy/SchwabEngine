@@ -1,0 +1,11 @@
+{
+  "name": "SchwabEngine Dashboard",
+  "description": "Live trading dashboard, ETF position tracker, macro gatekeeper, and settled cash ledger monitoring.",
+  "request": {
+    "query": "SchwabEngine Live Trading Dashboard"
+  },
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ],
+  "permissions": []
+}
