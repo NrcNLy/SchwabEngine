@@ -171,9 +171,9 @@ def build_app(ctx: "EngineContext"):
         active = getattr(ctx.risk_manager, "_active_positions", {}) if ctx.risk_manager else {}
         if not active:
             return [
-                {"symbol": "SOXL", "quantity": 5, "entry_price": 36.40, "current_price": 37.25, "stop_price": 36.80, "target_price": 39.20, "unrealized_pnl": 4.25, "regime": "A", "managed": True},
-                {"symbol": "TQQQ", "quantity": 2, "entry_price": 82.50, "current_price": 84.10, "stop_price": 83.10, "target_price": 86.50, "unrealized_pnl": 3.20, "regime": "A", "managed": True},
-                {"symbol": "TNA", "quantity": 4, "entry_price": 44.10, "current_price": 43.85, "stop_price": 42.80, "target_price": 46.00, "unrealized_pnl": -1.00, "regime": "C", "managed": True}
+                {"symbol": "SOXL", "quantity": 1, "entry_price": 165.88, "current_price": 167.25, "stop_price": 164.80, "target_price": 172.20, "unrealized_pnl": 1.37, "regime": "A", "managed": True},
+                {"symbol": "TQQQ", "quantity": 2, "entry_price": 80.96, "current_price": 84.10, "stop_price": 83.10, "target_price": 86.50, "unrealized_pnl": 6.28, "regime": "A", "managed": True},
+                {"symbol": "TNA", "quantity": 3, "entry_price": 59.84, "current_price": 60.10, "stop_price": 58.80, "target_price": 62.00, "unrealized_pnl": 0.78, "regime": "C", "managed": True}
             ]
         for sym, pos in active.items():
             positions.append({
