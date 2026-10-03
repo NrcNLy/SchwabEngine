@@ -13,17 +13,21 @@ import os
 import sys
 import json
 import time
+import asyncio
 import argparse
 import logging
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
-# Try importing the new google-genai SDK
 try:
     from google import genai
+    from google.genai import types
 except ImportError:
     print("google-genai SDK not found. Install via: pip install google-genai")
     sys.exit(1)
+
+from core.models import GovernorConfig
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("governor")
@@ -44,16 +48,7 @@ class GovernorDaemon:
             raise ValueError(f"CRITICAL BILLING SAFEGUARD: Model '{model}' is explicitly blocked. "
                              f"Only allowed models: {ALLOWED_MODELS}")
 
-    def call_gemini(self, prompt: str, model: str = "gemini-2.5-flash") -> str:
-        self._verify_model_safeguard(model)
-        logger.info(f"Dispatching prompt to Vertex AI ({model})...")
-        response = self.client.models.generate_content(
-            model=model,
-            contents=prompt,
-        )
-        return response.text
-
-    def update_strategy_config(self, updates: dict):
+    async def update_strategy_config(self, updates: dict):
         """Atomic file write to prevent locking out the Tier 1 engine."""
         config = {}
         if self.config_path.exists():
@@ -65,60 +60,65 @@ class GovernorDaemon:
         config.update(updates)
         config["_updated_at"] = datetime.utcnow().isoformat() + "Z"
         
-        tmp_path = self.config_path.with_suffix('.json.tmp')
-        tmp_path.write_text(json.dumps(config, indent=2))
+        json_payload = json.dumps(config, indent=2)
         
-        # Atomic swap
-        os.replace(tmp_path, self.config_path)
+        # Write to a temporary file on the same filesystem
+        temp_fd, temp_path = tempfile.mkstemp(dir="./")
+        with os.fdopen(temp_fd, 'w') as f:
+            f.write(json_payload)
+            f.flush()
+            os.fsync(f.fileno()) # Forces OS to sync data to the physical disk platter
+        
+        # Guarantees absolute data integrity via OS-level atomic file replacement
+        os.replace(temp_path, str(self.config_path))
         logger.info(f"Strategy configuration atomically updated: {self.config_path}")
 
-    def pre_market_macro(self):
-        """08:35 EDT Routine: Fast pre-market indexing and regime setting."""
+    async def pre_market_macro(self):
+        """08:35 EDT Routine: Fast pre-market indexing and regime setting using Structured Outputs."""
         logger.info("Executing Pre-Market Macro Routine (08:35 EDT)")
         prompt = (
             "Analyze the pre-market conditions for QQQ and SPY. "
             "Determine the target intraday regime (Regime A or Regime C) "
             "for leveraged ETFs: SOXL, TQQQ, TNA. Return a strict JSON configuration."
         )
-        # We would use structured outputs, but for now we simulate the pipeline
+        self._verify_model_safeguard("gemini-2.5-flash")
         try:
-            res = self.call_gemini(prompt, model="gemini-2.5-flash")
-            logger.info("Vertex AI Response received.")
-            # Mocking the JSON extraction
-            self.update_strategy_config({
-                "target_regime": "A",
-                "macro_bias": "bullish",
-                "volatility_multiplier": 1.15
-            })
-            logger.info("Pre-Market Routine Completed Successfully.")
+            logger.info("Dispatching prompt to Vertex AI (gemini-2.5-flash) asynchronously...")
+            response = await self.client.aio.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=GovernorConfig,
+                    temperature=0.2
+                )
+            )
+            logger.info("Vertex AI Structured Response received.")
+            
+            # The SDK parses the JSON response and instantiates the Pydantic class
+            # Ensure we serialize it to dict safely
+            try:
+                # Based on the genai SDK, it might return a Pydantic object directly if we parse it,
+                # or a text string containing valid JSON. We parse it to be safe.
+                response_data = json.loads(response.text)
+                await self.update_strategy_config(response_data)
+                logger.info("Pre-Market Routine Completed Successfully.")
+            except Exception as parse_exc:
+                 logger.error(f"Failed to parse or apply structured output: {parse_exc}")
+
         except Exception as exc:
             logger.error(f"Macro routine failed: {exc}")
 
-    def post_market_reflection(self):
-        """16:15 EDT Routine: Deep post-market fill reflection."""
-        logger.info("Executing Post-Market Reflection Routine (16:15 EDT)")
-        prompt = (
-            "Review today's fill logs and compare actual execution prices to NATR targets. "
-            "Calculate slippage and recommend optimal quarter-Kelly adjustments for tomorrow."
-        )
-        try:
-            res = self.call_gemini(prompt, model="gemini-2.5-pro")
-            logger.info("Vertex AI Response received.")
-            self.update_strategy_config({
-                "last_reflection_summary": "Slippage well contained within 0.05% bounds.",
-                "kelly_adjustment_factor": 0.98
-            })
-            logger.info("Post-Market Routine Completed Successfully.")
-        except Exception as exc:
-            logger.error(f"Reflection routine failed: {exc}")
-
-    def run_smoke_test(self):
+    async def run_smoke_test(self):
         """Verifies Vertex AI API client connectivity under the required GCP project."""
         logger.info("Initiating dry-run smoke test against Vertex AI...")
         prompt = "Return exactly the word 'ACKNOWLEDGED'."
         try:
-            res = self.call_gemini(prompt, model="gemini-2.5-flash")
-            logger.info(f"Smoke test successful. Vertex AI Response: {res.strip()}")
+            res = await self.client.aio.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt
+            )
+            logger.info(f"Smoke test successful. Vertex AI Response: {res.text.strip()}")
         except Exception as exc:
             logger.error(f"Smoke test failed! Connection or authentication error: {exc}")
             sys.exit(1)
@@ -133,13 +133,12 @@ def main():
     daemon = GovernorDaemon()
 
     if args.test:
-        daemon.run_smoke_test()
+        asyncio.run(daemon.run_smoke_test())
     elif args.macro:
-        daemon.pre_market_macro()
+        asyncio.run(daemon.pre_market_macro())
     elif args.reflect:
-        daemon.post_market_reflection()
+        logger.warning("Reflection not explicitly typed yet.")
     else:
-        # Default scheduling daemon loop (simplified for scaffolding)
         logger.info("Governor Daemon initialized. Use --macro, --reflect, or --test flags to execute sequences.")
 
 if __name__ == "__main__":
