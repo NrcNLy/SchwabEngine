@@ -12,30 +12,46 @@ export const MOCK_STATUS: EngineStatus = {
   auth_status: 'AUTHORIZED',
   uptime_seconds: 14250,
   active_positions: 3,
-  today_pnl: 14.20, // Net +1.42% daily gain on $1,000 sandbox
-  circuit_breaker_limit: -30.00, // -3.0% daily circuit breaker
+  today_pnl: 45.80, 
+  circuit_breaker_limit: -112.42, // -3.0% daily circuit breaker
   circuit_breaker_triggered: false,
   external_positions_detected: true,
   timestamp_edt: new Date().toISOString(),
-  is_connected: false, // Default to sandbox emulation mode unless daemon responds
-  engine_mode: 'SANDBOX_SIMULATION',
+  is_connected: true, 
+  engine_mode: 'LIVE_TRADING',
+  bayesian_kelly_confidence: 0.82,
+  almgren_chriss_slices_executed: 2,
+  almgren_chriss_slices_total: 4,
+  lifecycle_phase: 'CORE_SESSION',
+  vm_stats: {
+    cpu_pct: 12.4,
+    mem_pct: 48.2,
+    api_ping_ms: 34,
+    uptime_string: '3d 14h 22m'
+  },
+  llm_insight: {
+    last_prompt: "Analyze the pre-market conditions for QQQ and SPY. Determine the target intraday regime (Regime A or Regime C) for leveraged ETFs: SOXL, TQQQ, TNA. Return a strict JSON configuration.",
+    last_response: "{\n  \"target_regime\": \"A\",\n  \"macro_bias\": \"bullish\",\n  \"volatility_multiplier\": 1.15\n}",
+    latency_ms: 1450,
+    model: "gemini-2.5-flash"
+  }
 };
 
 export const MOCK_POSITIONS: PositionsResponse = {
   managed: [
     {
       symbol: 'SOXL',
-      quantity: 5,
+      quantity: 10,
       entry_price: 36.40,
       current_price: 37.25,
-      notional_value: 186.25, // 18.63% of $1,000 equity (within 20% / $200 cap)
-      exposure_pct: 18.63,
-      max_exposure_cap: 200.00,
-      hard_stop_price: 35.60, // NATR initial hard stop (-$0.80/sh = -$4.00 trade risk, < $10.00 limit)
-      trailing_stop_price: 36.80, // Trailing stop ratcheted into profit
+      notional_value: 372.50, 
+      exposure_pct: 9.93,
+      max_exposure_cap: 749.50,
+      hard_stop_price: 35.60, 
+      trailing_stop_price: 36.80, 
       stop_price: 36.80,
-      target_price: 39.20, // 15m ORB +2.2R expansion target
-      unrealized_pnl: 4.25,
+      target_price: 39.20, 
+      unrealized_pnl: 8.50,
       regime: 'A',
       managed: true,
       rotation_pair: 'FNGU',
@@ -43,34 +59,35 @@ export const MOCK_POSITIONS: PositionsResponse = {
     },
     {
       symbol: 'TQQQ',
-      quantity: 2,
+      quantity: 9,
       entry_price: 82.50,
-      current_price: 84.10,
-      notional_value: 168.20, // 16.82% of $1,000 equity (within 20% / $200 cap)
-      exposure_pct: 16.82,
-      max_exposure_cap: 200.00,
-      hard_stop_price: 80.25, // NATR initial hard stop (-$2.25/sh = -$4.50 trade risk, < $10.00 limit)
-      trailing_stop_price: 83.10, // Ratcheted high-water mark trailing stop
-      stop_price: 83.10,
-      target_price: 86.50, // ORB breakout target
-      unrealized_pnl: 3.20,
+      current_price: 87.72,
+      notional_value: 789.48, // Exceeds $749.50 cap
+      exposure_pct: 21.06,
+      max_exposure_cap: 749.50,
+      hard_stop_price: 80.25, 
+      trailing_stop_price: 87.10, 
+      stop_price: 87.10,
+      target_price: 89.50, 
+      unrealized_pnl: 46.98,
       regime: 'A',
       managed: true,
       rotation_pair: 'CONL',
       wash_sale_armed: false,
+      status_flag: 'OVERWEIGHT_TRIM_QUEUED'
     },
     {
       symbol: 'TNA',
       quantity: 4,
       entry_price: 44.10,
       current_price: 43.85,
-      notional_value: 175.40, // 17.54% of $1,000 equity (within 20% / $200 cap)
-      exposure_pct: 17.54,
-      max_exposure_cap: 200.00,
-      hard_stop_price: 42.80, // NATR stop (-$1.30/sh = -$5.20 trade risk, < $10.00 limit)
+      notional_value: 175.40, 
+      exposure_pct: 4.68,
+      max_exposure_cap: 749.50,
+      hard_stop_price: 42.80, 
       trailing_stop_price: 43.50,
       stop_price: 42.80,
-      target_price: 46.00, // Regime C VWAP mean-reversion midline target
+      target_price: 46.00, 
       unrealized_pnl: -1.00,
       regime: 'C',
       managed: true,
@@ -86,7 +103,7 @@ export const MOCK_POSITIONS: PositionsResponse = {
       entry_price: 28.50,
       current_price: 29.80,
       notional_value: 298.00,
-      exposure_pct: 29.80,
+      exposure_pct: 7.95,
       max_exposure_cap: 0,
       unrealized_pnl: 13.00,
       managed: false,
@@ -96,17 +113,18 @@ export const MOCK_POSITIONS: PositionsResponse = {
 };
 
 export const MOCK_LEDGER: LedgerSnapshot = {
-  bucket1_settled: 720.00, // Day-trade safe buying power (72% of capital)
-  bucket2_unsettled: 240.00, // Proceeds from closed swing positions in T+1 NSCC clearing
-  bucket3_pending: 40.00, // ACH deposit in transit (excluded from active risk)
-  total_equity: 1000.00, // Hard baseline sandbox
-  max_single_exposure: 200.00, // Strict 20.0% single-ticker exposure ceiling
-  max_order_value: 200.00, // Maximum allowed order value per trade
-  max_risk_per_trade: 10.00, // 1.0% maximum risk cap per trade
-  daily_drawdown_limit: -30.00, // -3.0% daily circuit breaker
-  quarter_kelly_size: 185.00, // Recommended Quarter-Kelly position size against NATR
-  safe_daytrade_buying_power: 720.00, // Bucket 1 settled capital available
-  gfv_risk_flag: false, // Protected against SEC Good Faith Violations
+  total_nlv: 3747.50,
+  bucket1_settled: 1210.00, 
+  bucket2_unsettled: 852.00, 
+  bucket3_pending: 50.00, 
+  total_equity: 3747.50, 
+  max_single_exposure: 749.50, 
+  max_order_value: 749.50, 
+  max_risk_per_trade: 37.47, 
+  daily_drawdown_limit: -112.42, 
+  quarter_kelly_size: 185.00, 
+  safe_daytrade_buying_power: 1210.00, 
+  gfv_risk_flag: false, 
 };
 
 export const MOCK_ORDERS: TradeOrder[] = [

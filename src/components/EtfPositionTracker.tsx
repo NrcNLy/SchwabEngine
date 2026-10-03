@@ -7,7 +7,6 @@ import {
   Layers, 
   ExternalLink,
   Target,
-  Shield,
   Activity,
   ArrowRightLeft
 } from 'lucide-react';
@@ -47,11 +46,11 @@ export const EtfPositionTracker: React.FC<EtfPositionTrackerProps> = ({ position
                   High-Beta ETF Portfolio & Risk Guard
                 </h2>
                 <span className="px-2 py-0.5 text-[10px] font-mono font-bold bg-cyan-950 text-cyan-300 rounded border border-cyan-800">
-                  $1,000 Sandbox
+                  Dynamic NLV Matrix
                 </span>
               </div>
               <p className="text-xs text-gray-400 mt-0.5">
-                Enforcing 20% single-ticker exposure ($200.00 cap), dual-tier stops, and IRC §1091 wash-sale pivots
+                Enforcing 20% single-ticker exposure ($749.50 cap), dual-tier stops, and IRC §1091 wash-sale pivots
               </p>
             </div>
           </div>
@@ -63,7 +62,7 @@ export const EtfPositionTracker: React.FC<EtfPositionTrackerProps> = ({ position
           <div className="hidden sm:flex items-center space-x-2 bg-gray-900/90 border border-gray-800 px-3 py-1.5 rounded-lg text-xs font-mono">
             <span className="text-gray-400">Deployed:</span>
             <span className="text-cyan-300 font-semibold">${totalManagedNotional.toFixed(2)}</span>
-            <span className="text-gray-500">/ $1,000</span>
+            <span className="text-gray-500">/ $3,747.50</span>
           </div>
 
           <div className="bg-gray-900 p-1 rounded-lg border border-gray-800 flex text-xs font-mono">
@@ -146,11 +145,11 @@ export const EtfPositionTracker: React.FC<EtfPositionTrackerProps> = ({ position
               <th className="py-3 px-4">Portfolio Segregation</th>
               <th className="py-3 px-4 text-right">Shares</th>
               <th className="py-3 px-4 text-right">Entry / Last</th>
-              <th className="py-3 px-4">20% Exposure Gauge ($200 Cap)</th>
+              <th className="py-3 px-4">20% Exposure Gauge ($749.50 Cap)</th>
               <th className="py-3 px-4 text-right">Dual-Tier Stops</th>
               <th className="py-3 px-4 text-right">Target</th>
               <th className="py-3 px-4 text-right">Unrealized P&L</th>
-              <th className="py-3 px-4 text-center">Reconciliation Guard</th>
+              <th className="py-3 px-4 text-center">Execution Engine</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-800/80 font-mono">
@@ -164,7 +163,6 @@ export const EtfPositionTracker: React.FC<EtfPositionTrackerProps> = ({ position
               displayList.map((pos) => {
                 const cost = pos.entry_price || pos.avg_cost || 0;
                 const notional = pos.notional_value || (pos.quantity * pos.current_price);
-                const exposurePct = pos.exposure_pct || ((notional / 1000.0) * 100);
                 const pnl = pos.unrealized_pnl || 0;
                 const pnlPct = cost > 0 ? ((pos.current_price - cost) / cost) * 100 : 0;
                 const isProfitable = pnl >= 0;
@@ -172,7 +170,7 @@ export const EtfPositionTracker: React.FC<EtfPositionTrackerProps> = ({ position
                 const hardStop = pos.hard_stop_price || pos.stop_price;
                 const trailingStop = pos.trailing_stop_price;
 
-                const isCapBreached = exposurePct > 20.0;
+                const isCapBreached = notional > 749.50;
 
                 return (
                   <tr key={pos.symbol} className="hover:bg-gray-800/30 transition-colors">
@@ -197,134 +195,126 @@ export const EtfPositionTracker: React.FC<EtfPositionTrackerProps> = ({ position
                           <span className="text-gray-500">Pair:</span>
                           <span className="text-emerald-400 font-semibold">{pos.rotation_pair}</span>
                           {pos.wash_sale_armed && (
-                            <span className="px-1 py-0.2 rounded bg-amber-950/80 text-amber-300 border border-amber-800/60 text-[9px]">
-                              Pivot Armed
+                            <span className="px-1 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-800/60 text-[9px] flex items-center">
+                              <AlertTriangle className="w-2.5 h-2.5 mr-0.5" /> Armed
                             </span>
                           )}
                         </div>
                       )}
                     </td>
 
-                    {/* Classification */}
-                    <td className="py-3.5 px-4 font-sans">
+                    {/* Segregation Status */}
+                    <td className="py-3.5 px-4">
                       {pos.managed ? (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-cyan-950/80 text-cyan-300 border border-cyan-800/60">
-                          <Activity className="w-3 h-3 mr-1 text-cyan-400" />
-                          Managed Sandbox
-                        </span>
+                        <div className="flex items-center text-cyan-400 text-xs">
+                          <Activity className="w-3.5 h-3.5 mr-1" />
+                          <span className="font-semibold">Tier 1 Engine</span>
+                        </div>
                       ) : (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-amber-950/80 text-amber-300 border border-amber-800/60">
-                          <ExternalLink className="w-3 h-3 mr-1 text-amber-400" />
-                          External Schwab Holding
-                        </span>
+                        <div className="flex items-center text-gray-500 text-xs">
+                          <ExternalLink className="w-3.5 h-3.5 mr-1" />
+                          <span>Unmanaged Core</span>
+                        </div>
+                      )}
+                      {!pos.managed && pos.stop_order_id && (
+                        <div className="text-[10px] text-gray-500 mt-0.5 border border-gray-700 bg-gray-900 rounded px-1.5 py-0.5 inline-block">
+                          Stop: {pos.stop_order_id}
+                        </div>
                       )}
                     </td>
 
-                    {/* Quantity */}
-                    <td className="py-3.5 px-4 text-right text-gray-200">
-                      {pos.quantity} shs
+                    <td className="py-3.5 px-4 text-right text-gray-300 font-semibold">
+                      {pos.quantity}
                     </td>
 
-                    {/* Entry / Last */}
                     <td className="py-3.5 px-4 text-right">
+                      <div className="text-gray-400">${cost.toFixed(2)}</div>
                       <div className="text-gray-100 font-semibold">${pos.current_price.toFixed(2)}</div>
-                      <div className="text-[10px] text-gray-400 font-normal">Entry: ${cost.toFixed(2)}</div>
                     </td>
 
-                    {/* 20% Exposure Gauge */}
-                    <td className="py-3.5 px-4 min-w-[170px]">
-                      {pos.managed ? (
-                        <div className="space-y-1">
-                          <div className="flex items-center justify-between text-[11px]">
-                            <span className="text-gray-300 font-semibold">${notional.toFixed(2)}</span>
-                            <span className={`font-bold ${isCapBreached ? 'text-rose-400' : 'text-cyan-300'}`}>
-                              {exposurePct.toFixed(1)}% / 20%
+                    {/* Gauge */}
+                    <td className="py-3.5 px-4">
+                      <div className="w-full flex items-center space-x-2">
+                        <div className="flex-1 max-w-[150px]">
+                          <div className="flex justify-between text-[10px] mb-1">
+                            <span className={isCapBreached ? 'text-rose-400' : 'text-gray-400'}>
+                              ${notional.toFixed(2)}
                             </span>
+                            <span className="text-gray-500">20%</span>
                           </div>
-                          {/* Exposure Meter Bar */}
-                          <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden relative">
-                            {/* 20% threshold guide line */}
+                          <div className="w-full h-1.5 bg-gray-900 rounded-full overflow-hidden border border-gray-800 relative">
+                            {/* Visual baseline mark */}
+                            <div className="absolute top-0 bottom-0 left-1/2 w-px bg-gray-700 z-10" />
                             <div 
-                              className={`h-full rounded-full transition-all duration-300 ${
-                                isCapBreached ? 'bg-rose-500' : exposurePct > 18.0 ? 'bg-amber-400' : 'bg-cyan-400'
-                              }`}
-                              style={{ width: `${Math.min((exposurePct / 20.0) * 100, 100)}%` }}
+                              style={{ width: `${Math.min((notional / 749.50) * 100, 100)}%` }} 
+                              className={`h-full ${isCapBreached ? 'bg-rose-500' : 'bg-cyan-500'} transition-all`}
                             />
                           </div>
-                          <span className="text-[9px] text-gray-500 block">
-                            {isCapBreached ? 'Exposure Cap Breached!' : `$${(200.0 - notional).toFixed(2)} headroom`}
-                          </span>
                         </div>
-                      ) : (
-                        <div className="text-[11px] text-gray-400">
-                          <span>${notional.toFixed(2)} (External Schwab)</span>
-                        </div>
-                      )}
+                        {isCapBreached && (
+                          <AlertTriangle className="w-4 h-4 text-rose-500 flex-shrink-0 animate-pulse" />
+                        )}
+                      </div>
                     </td>
 
-                    {/* Dual-Tier Stops */}
+                    {/* Stops */}
                     <td className="py-3.5 px-4 text-right">
                       {pos.managed ? (
-                        <div className="space-y-0.5">
+                        <div className="space-y-1">
                           {trailingStop && (
-                            <div className="flex items-center justify-end space-x-1 text-emerald-400">
-                              <Shield className="w-3 h-3 text-emerald-400" />
-                              <span className="font-semibold">${trailingStop.toFixed(2)}</span>
-                              <span className="text-[9px] text-gray-500">(Trail)</span>
+                            <div className="flex items-center justify-end text-[10px] text-gray-300">
+                              <span className="text-gray-500 mr-1.5">Trail:</span>
+                              <span className="bg-cyan-950 border border-cyan-800 rounded px-1.5">${trailingStop.toFixed(2)}</span>
                             </div>
                           )}
                           {hardStop && (
-                            <div className="flex items-center justify-end space-x-1 text-rose-300">
-                              <Shield className="w-3 h-3 text-rose-400" />
-                              <span>${hardStop.toFixed(2)}</span>
-                              <span className="text-[9px] text-gray-500">(NATR)</span>
+                            <div className="flex items-center justify-end text-[10px] text-gray-300">
+                              <span className="text-gray-500 mr-1.5">Hard:</span>
+                              <span className="bg-gray-800 border border-gray-700 rounded px-1.5">${hardStop.toFixed(2)}</span>
                             </div>
                           )}
                         </div>
                       ) : (
-                        <span className="text-gray-500 font-sans">—</span>
+                        <span className="text-gray-600">-</span>
                       )}
                     </td>
 
-                    {/* Target Price */}
-                    <td className="py-3.5 px-4 text-right text-emerald-300">
+                    {/* Target */}
+                    <td className="py-3.5 px-4 text-right">
                       {pos.target_price ? (
-                        <div className="flex items-center justify-end space-x-1">
-                          <Target className="w-3 h-3 text-emerald-400" />
-                          <span>${pos.target_price.toFixed(2)}</span>
+                        <div className="flex items-center justify-end text-emerald-400 font-semibold">
+                          <Target className="w-3.5 h-3.5 mr-1" />
+                          ${pos.target_price.toFixed(2)}
                         </div>
                       ) : (
-                        <span className="text-gray-500 font-sans">—</span>
+                        <span className="text-gray-600">-</span>
                       )}
                     </td>
 
-                    {/* Unrealized P&L */}
+                    {/* PnL */}
                     <td className="py-3.5 px-4 text-right">
-                      <span className={`font-semibold ${isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      <div className={`font-bold ${isProfitable ? 'text-emerald-400' : 'text-rose-400'}`}>
                         {isProfitable ? '+' : ''}${pnl.toFixed(2)}
-                      </span>
-                      <span className={`block text-[10px] ${isProfitable ? 'text-emerald-500' : 'text-rose-500'}`}>
-                        ({isProfitable ? '+' : ''}{pnlPct.toFixed(2)}%)
-                      </span>
+                      </div>
+                      <div className={`text-[10px] ${isProfitable ? 'text-emerald-500/80' : 'text-rose-500/80'}`}>
+                        {isProfitable ? '+' : ''}{pnlPct.toFixed(2)}%
+                      </div>
                     </td>
 
-                    {/* Safety Guard Indicator */}
-                    <td className="py-3.5 px-4 text-center font-sans">
-                      {pos.managed ? (
-                        <span className="inline-flex items-center text-[10px] text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800">
-                          <ShieldCheck className="w-3 h-3 mr-1" />
+                    {/* Verification Guard Badge */}
+                    <td className="py-3.5 px-4 text-center">
+                      {pos.status_flag === 'OVERWEIGHT_TRIM_QUEUED' ? (
+                        <div className="inline-flex items-center px-2 py-1 bg-amber-950/80 border border-amber-500/50 rounded-md text-amber-400 text-[10px] font-bold tracking-wide uppercase animate-pulse">
+                          <Activity className="w-3 h-3 mr-1.5" />
+                          ALGMREN-CHRISS TRIM ACTIVE
+                        </div>
+                      ) : pos.managed ? (
+                        <div className="inline-flex items-center px-2 py-1 bg-gray-800/50 border border-gray-700 rounded-md text-gray-400 text-[10px] font-bold tracking-wide uppercase">
+                          <ShieldCheck className="w-3 h-3 mr-1 text-emerald-500" />
                           Active Guard
-                        </span>
-                      ) : pos.stop_order_id ? (
-                        <span className="inline-flex items-center text-[10px] text-cyan-400 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800">
-                          <ShieldCheck className="w-3 h-3 mr-1" />
-                          Schwab GTC Stop
-                        </span>
+                        </div>
                       ) : (
-                        <span className="inline-flex items-center text-[10px] text-amber-400 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800">
-                          <AlertTriangle className="w-3 h-3 mr-1" />
-                          Unprotected
-                        </span>
+                        <span className="text-gray-600">-</span>
                       )}
                     </td>
                   </tr>

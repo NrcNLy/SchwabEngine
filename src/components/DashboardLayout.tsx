@@ -10,6 +10,7 @@ import {
   Clock
 } from 'lucide-react';
 import { EngineStatus } from '../types';
+import { VmTelemetryStrip } from './VmTelemetryStrip';
 
 interface DashboardLayoutProps {
   status: EngineStatus;
@@ -38,6 +39,10 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
 
   return (
     <div className="min-h-screen bg-[#070b12] text-gray-100 flex flex-col font-sans selection:bg-cyan-500/30 selection:text-cyan-200">
+      
+      {/* Hardware Telemetry Strip */}
+      <VmTelemetryStrip status={status} />
+
       {/* Top Telemetry Header */}
       <header className="border-b border-gray-800/80 bg-[#0d1322]/90 backdrop-blur sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">

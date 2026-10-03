@@ -9,7 +9,23 @@ export interface EngineStatus {
   external_positions_detected: boolean;
   timestamp_edt: string;
   is_connected: boolean;
-  engine_mode: 'LIVE_DAEMON' | 'SANDBOX_SIMULATION';
+  engine_mode: 'LIVE_DAEMON' | 'SANDBOX_SIMULATION' | 'LIVE_TRADING';
+  bayesian_kelly_confidence?: number;
+  almgren_chriss_slices_executed?: number;
+  almgren_chriss_slices_total?: number;
+  lifecycle_phase?: 'PRE_MARKET' | 'CORE_SESSION' | 'SWEEP' | 'REFLECTION' | 'OFFLINE';
+  vm_stats?: {
+    cpu_pct: number;
+    mem_pct: number;
+    api_ping_ms: number;
+    uptime_string: string;
+  };
+  llm_insight?: {
+    last_prompt: string;
+    last_response: string;
+    latency_ms: number;
+    model: string;
+  };
 }
 
 export interface Position {
@@ -31,6 +47,7 @@ export interface Position {
   wash_sale_armed?: boolean;
   stop_order_id?: string;
   avg_cost?: number;
+  status_flag?: string;
 }
 
 export interface PositionsResponse {
@@ -39,6 +56,7 @@ export interface PositionsResponse {
 }
 
 export interface LedgerSnapshot {
+  total_nlv?: number;
   bucket1_settled: number;
   bucket2_unsettled: number;
   bucket3_pending: number;
