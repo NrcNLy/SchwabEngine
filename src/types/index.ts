@@ -66,7 +66,7 @@ export interface PositionsResponse {
 }
 
 export interface SweepAdvice {
-  action: 'SWEEP_IN' | 'REDEEM' | 'HOLD' | string;
+  action: 'NONE' | 'SWEEP_IN' | 'REDEEM_FOR_NEXT_SESSION';
   amount: number;
   place_by: string | null;
   settles_on: string | null;
@@ -132,7 +132,7 @@ export interface BuyingPowerResponse {
   buying_power: BuyingPowerBreakdown | null;
 }
 
-export type Weekday = 'MONDAY' | 'TUESDAY' | 'WEDNESDAY' | 'THURSDAY' | 'FRIDAY' | 'SATURDAY' | 'SUNDAY';
+export type Weekday = 'MONDAY' | 'TUESDAY' | 'WEDNESDAY' | 'THURSDAY' | 'FRIDAY';
 
 export interface LiquidityPolicy {
   inflow: {

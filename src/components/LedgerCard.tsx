@@ -139,7 +139,7 @@ export const LedgerCard: React.FC<LedgerCardProps> = ({ ledger, policy, onPolicy
               <p className="text-[11px] text-gray-400 leading-snug">{bp.sweep.rationale}</p>
               {bp.sweep.amount > 0 && (
                 <div className="mt-2 text-[11px] text-gray-300">
-                  {bp.sweep.action === 'SWEEP_IN' ? 'Suggested sweep-in' : bp.sweep.action === 'REDEEM' ? 'Suggested redemption' : 'Suggested move'}{' '}
+                  {bp.sweep.action === 'SWEEP_IN' ? 'Suggested sweep-in' : bp.sweep.action === 'REDEEM_FOR_NEXT_SESSION' ? 'Suggested redemption' : 'Suggested move'}{' '}
                   <span className="font-bold text-indigo-200">{usd(bp.sweep.amount)}</span>
                   {bp.sweep.place_by ? ` · place by ${bp.sweep.place_by}` : ''}
                   {bp.sweep.settles_on ? ` · settles ${bp.sweep.settles_on}` : ''}

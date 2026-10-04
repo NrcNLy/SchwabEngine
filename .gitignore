@@ -52,3 +52,5 @@ data/*.tmp
 data/*.json.*.tmp
 scratch/sample_data/
 state/
+
+scratch/

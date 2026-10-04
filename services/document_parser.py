@@ -94,6 +94,18 @@ class DocumentParser:
         """Computes the SHA-256 hash of file bytes for duplicate detection."""
         return hashlib.sha256(file_bytes).hexdigest()
 
+    async def _generate_snapshot(self, part, prompt: str, structured: bool) -> UnifiedDocumentSnapshot:
+        """One Vertex call. The reply is always validated through UnifiedDocumentSnapshot."""
+        config_kwargs = {"response_mime_type": "application/json", "temperature": 0.1}
+        if structured:
+            config_kwargs["response_schema"] = UnifiedDocumentSnapshot
+        response = await self.client.aio.models.generate_content(
+            model="gemini-2.5-pro",
+            contents=[part, prompt],
+            config=types.GenerateContentConfig(**config_kwargs),
+        )
+        return UnifiedDocumentSnapshot(**json.loads(response.text))
+
     def is_duplicate(self, file_hash: str) -> bool:
         """Checks if file hash has already been processed."""
         hashes = read_json(self.hashes_file, default={})
@@ -192,22 +204,22 @@ class DocumentParser:
                 logger.info(f"Dispatching '{file_path.name}' to Vertex AI gemini-2.5-pro for auto-classification...")
                 ext = file_path.suffix.lower()
                 mime = "application/pdf" if ext == ".pdf" else "image/png" if ext == ".png" else "image/jpeg"
-                
-                response = await self.client.aio.models.generate_content(
-                    model='gemini-2.5-pro',
-                    contents=[
-                        types.Part.from_bytes(data=file_bytes, mime_type=mime),
-                        prompt
-                    ],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=UnifiedDocumentSnapshot,
-                        temperature=0.1
+                part = types.Part.from_bytes(data=file_bytes, mime_type=mime)
+
+                try:
+                    snapshot = await self._generate_snapshot(part, prompt, structured=True)
+                except Exception as schema_exc:
+                    if getattr(schema_exc, "code", None) != 400:
+                        raise
+                    logger.warning(
+                        f"Vertex rejected the structured-output schema ({schema_exc}); retrying in plain JSON mode."
                     )
-                )
+                    plain_prompt = (
+                        prompt + " Respond with a single JSON object that conforms exactly to this JSON Schema: "
+                        + json.dumps(UnifiedDocumentSnapshot.model_json_schema())
+                    )
+                    snapshot = await self._generate_snapshot(part, plain_prompt, structured=False)
                 logger.info("Vertex AI document response received.")
-                parsed_json = json.loads(response.text)
-                snapshot = UnifiedDocumentSnapshot(**parsed_json)
             except Exception as e:
                 logger.error(f"Vertex AI extraction failed: {e}")
                 extraction_error = e
