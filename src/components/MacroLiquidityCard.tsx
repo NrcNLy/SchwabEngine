@@ -3,9 +3,8 @@ import {
   Building2, 
   ShieldCheck, 
   ShieldAlert, 
-  Upload,
-  Calendar,
-  AlertTriangle,
+  Upload, 
+  Target,
   FileText
 } from 'lucide-react';
 import { MacroLiquidityStateResponse } from '../types';
@@ -28,22 +27,22 @@ export const MacroLiquidityCard: React.FC<MacroLiquidityCardProps> = ({ macroSta
     );
   }
 
-  const { collateral_state, credit_report, promotional_debts } = macroState;
+  const { collateral_state, snapshot, liquidity_targets } = macroState;
   const isSolvent = collateral_state.is_solvent;
   
-  // Calculate buffer percentage for the gauge
   const totalDebt = collateral_state.active_promotional_debt;
   const totalBackstop = collateral_state.total_liquid_backstop;
-  const maxScale = Math.max(totalDebt, totalBackstop) * 1.1; // 10% padding
+  const maxScale = Math.max(totalDebt, totalBackstop) * 1.1;
   
   const backstopPct = maxScale > 0 ? (totalBackstop / maxScale) * 100 : 0;
   const debtPct = maxScale > 0 ? (totalDebt / maxScale) * 100 : 0;
 
   return (
     <>
-      <div className="bg-[#0e1422] border border-gray-800 rounded-xl p-6 shadow-2xl space-y-6">
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between pb-4 border-b border-gray-800 gap-4">
+      <div className="bg-[#0e1422] border border-gray-800 rounded-xl p-6 shadow-2xl flex flex-col space-y-6">
+        
+        {/* Header Section */}
+        <div className="flex items-start justify-between">
           <div className="flex items-center space-x-3">
             <div className={`p-2.5 rounded-lg border ${isSolvent ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20' : 'bg-rose-500/10 text-rose-400 border-rose-500/20'}`}>
               <Building2 className="w-5 h-5" />
@@ -55,16 +54,16 @@ export const MacroLiquidityCard: React.FC<MacroLiquidityCardProps> = ({ macroSta
                 </h3>
                 {isSolvent ? (
                   <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-950 text-emerald-300 border border-emerald-800 flex items-center">
-                    <ShieldCheck className="w-3 h-3 mr-1" /> SOLVENT
+                    <ShieldCheck className="w-3 h-3 mr-1" /> RECORD
                   </span>
                 ) : (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-rose-950 text-rose-300 border border-rose-800 flex items-center animate-pulse">
-                    <ShieldAlert className="w-3 h-3 mr-1" /> COLLATERAL DEFICIT
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-rose-950 text-rose-300 border border-rose-800 flex items-center">
+                    <ShieldAlert className="w-3 h-3 mr-1" /> DEFICIT
                   </span>
                 )}
               </div>
               <p className="text-xs text-gray-400 mt-0.5">
-                Evaluates float solvency against promotional debt maturity timelines.
+                Passive archival float evaluation. Zero sizing influence.
               </p>
             </div>
           </div>
@@ -75,14 +74,8 @@ export const MacroLiquidityCard: React.FC<MacroLiquidityCardProps> = ({ macroSta
               className="flex items-center px-3 py-1.5 bg-[#1a2333] hover:bg-[#232f45] border border-indigo-900/50 text-indigo-300 text-xs font-mono rounded transition-colors"
             >
               <Upload className="w-3.5 h-3.5 mr-1.5" />
-              Ingest Document
+              Ingest
             </button>
-            <div className="text-right font-mono">
-              <span className="text-xs text-gray-400 block">Risk Multiplier</span>
-              <span className={`text-xl font-bold ${collateral_state.risk_multiplier >= 1.0 ? 'text-emerald-400' : collateral_state.risk_multiplier > 0 ? 'text-amber-400' : 'text-rose-500'}`}>
-                {collateral_state.risk_multiplier.toFixed(2)}x
-              </span>
-            </div>
           </div>
         </div>
 
@@ -98,84 +91,84 @@ export const MacroLiquidityCard: React.FC<MacroLiquidityCardProps> = ({ macroSta
           </div>
           <div className="mt-2 text-right">
              <span className="text-[11px] font-mono text-gray-500">
-               Net Buffer: <span className={collateral_state.net_collateral_buffer >= 0 ? "text-emerald-400" : "text-rose-400 font-bold animate-pulse"}>
+               Net Buffer: <span className={collateral_state.net_collateral_buffer >= 0 ? "text-emerald-400" : "text-rose-400 font-bold"}>
                  ${collateral_state.net_collateral_buffer.toLocaleString(undefined, {minimumFractionDigits: 2})}
                </span>
              </span>
           </div>
         </div>
 
-        {/* Aggregate Bureau Utilization Meter */}
-        {credit_report && (
+        {/* Manual Liquidity Targets */}
+        <div>
+          <div className="flex justify-between items-center mb-3">
+            <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider font-mono flex items-center">
+              <Target className="w-4 h-4 mr-1.5 text-cyan-500" />
+              Manual Liquidity Goals
+            </h4>
+          </div>
+          {liquidity_targets && liquidity_targets.length > 0 ? (
+            <div className="space-y-3">
+              {liquidity_targets.map(target => {
+                const settled = collateral_state.settled_cash;
+                const pct = Math.min(100, Math.max(0, (settled / target.target_amount) * 100));
+                const daysLeft = Math.max(0, Math.floor((new Date(target.target_date).getTime() - new Date().getTime()) / 86400000));
+                const isBehind = pct < 50 && daysLeft < 30; // simple heuristic for behind pace
+
+                return (
+                  <div key={target.target_id} className="bg-[#111827] border border-gray-800 rounded-lg p-3 relative overflow-hidden">
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <div className="text-sm font-bold text-gray-200 font-mono flex items-center">
+                          {target.label}
+                          {isBehind && <span className="ml-2 w-2 h-2 rounded-full bg-rose-500" title="Behind Pace" />}
+                        </div>
+                        <div className="text-[11px] text-gray-500 font-mono">Target Date: {target.target_date} ({daysLeft}d left)</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-sm font-bold text-cyan-300 font-mono">${target.target_amount.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
+                        <div className="text-[10px] text-gray-500 font-mono">Current: ${settled.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
+                      </div>
+                    </div>
+                    
+                    {/* Progress Bar */}
+                    <div className="w-full h-1.5 bg-gray-900 rounded-full overflow-hidden mt-2">
+                      <div 
+                        className={`h-full transition-all duration-500 ${pct >= 100 ? 'bg-emerald-500' : isBehind ? 'bg-rose-500' : 'bg-cyan-500'}`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-xs text-gray-500 font-mono p-4 border border-gray-800 rounded bg-[#111827]/50 text-center">
+              No manual targets defined.
+            </div>
+          )}
+        </div>
+
+        {/* Latest Document Audit */}
+        {snapshot && (
           <div className="bg-[#0b101c] border border-gray-800 rounded-xl p-4">
-             <div className="flex items-center justify-between mb-3">
+             <div className="flex items-center justify-between mb-2">
                <div className="flex items-center space-x-2">
                  <FileText className="w-4 h-4 text-indigo-400" />
-                 <span className="text-xs font-semibold text-gray-300 uppercase tracking-wider font-mono">Bureau Utilization</span>
+                 <span className="text-xs font-semibold text-gray-300 uppercase tracking-wider font-mono">Latest Ingest</span>
                  <span className="px-1.5 py-0.5 bg-indigo-950 text-indigo-300 border border-indigo-800/50 rounded text-[10px] font-mono">
-                   {credit_report.bureau}
+                   {snapshot.document_class}
                  </span>
                </div>
                <span className="text-[10px] text-gray-500 font-mono">
-                 As of: {credit_report.report_date}
+                 {snapshot.report_date}
                </span>
              </div>
-             
-             {(() => {
-               const util = credit_report.aggregate_utilization_pct;
-               const utilColor = util < 30 ? 'bg-emerald-500' : util < 50 ? 'bg-amber-500' : 'bg-rose-500';
-               const textColor = util < 30 ? 'text-emerald-400' : util < 50 ? 'text-amber-400' : 'text-rose-400';
-               return (
-                 <div>
-                   <div className="flex justify-between text-[11px] font-mono text-gray-400 mb-1">
-                     <span>${credit_report.total_revolving_balance.toLocaleString()} / ${credit_report.total_revolving_limit.toLocaleString()}</span>
-                     <span className={`font-bold ${textColor}`}>{util.toFixed(1)}%</span>
-                   </div>
-                   <div className="w-full h-2 bg-gray-900 rounded-full overflow-hidden">
-                     <div className={`h-full ${utilColor}`} style={{ width: `${Math.min(util, 100)}%` }} />
-                   </div>
-                 </div>
-               );
-             })()}
+             <div className="text-xs font-mono text-gray-400">
+               Institution: <span className="text-gray-300">{snapshot.institution_or_bureau}</span>
+             </div>
           </div>
         )}
 
-        {/* Promotional Debt Timeline */}
-        {promotional_debts.length > 0 && (
-          <div>
-            <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider font-mono mb-3 flex items-center">
-              <Calendar className="w-4 h-4 mr-1.5 text-gray-500" />
-              Active 0% Balance Transfers
-            </h4>
-            <div className="space-y-3">
-              {promotional_debts.map(debt => (
-                <div key={debt.id} className="bg-[#111827] border border-gray-800 rounded-lg p-3 relative overflow-hidden">
-                  <div className="flex justify-between items-start mb-2">
-                    <div>
-                      <div className="text-sm font-bold text-gray-200 font-mono">{debt.institution}</div>
-                      <div className="text-[11px] text-gray-500 font-mono">Expires: {debt.expiration_date}</div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-sm font-bold text-rose-300 font-mono">${debt.total_balance.toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
-                      <div className="flex items-center justify-end text-[10px] text-amber-500/80 font-mono mt-0.5">
-                        <AlertTriangle className="w-3 h-3 mr-1" />
-                        {debt.days_remaining} Days Left
-                      </div>
-                    </div>
-                  </div>
-                  
-                  {/* Countdown Bar */}
-                  <div className="w-full h-1.5 bg-gray-900 rounded-full overflow-hidden mt-2">
-                    <div 
-                      className={`h-full transition-all duration-500 ${debt.days_remaining < 30 ? 'bg-rose-500' : debt.days_remaining <= 90 ? 'bg-amber-500' : 'bg-emerald-500'}`}
-                      style={{ width: `${Math.max(5, Math.min(100, (debt.days_remaining / 365) * 100))}%` }}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
 
       <DocumentUploadModal 

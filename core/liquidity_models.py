@@ -1,8 +1,8 @@
 """
 core/liquidity_models.py
 ========================
-Data models for credit reporting, promotional debt management, 
-and portfolio collateral invariants.
+Data models for automated document classification, manual liquidity targets,
+and passive portfolio collateral tracking.
 """
 
 from datetime import date, datetime
@@ -12,33 +12,48 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 
 
-class BureauType(str, Enum):
-    EXPERIAN = "EXPERIAN"
-    TRANSUNION = "TRANSUNION"
-    EQUIFAX = "EQUIFAX"
+class DocumentClass(str, Enum):
+    CREDIT_REPORT = "CREDIT_REPORT"
+    BANK_STATEMENT = "BANK_STATEMENT"
+    CREDIT_CARD_STATEMENT = "CREDIT_CARD_STATEMENT"
+    PAYSTUB = "PAYSTUB"
+    STUDENT_LOAN_STATEMENT = "STUDENT_LOAN_STATEMENT"
+    TAX_DOCUMENT = "TAX_DOCUMENT"
+    MISCELLANEOUS_FINANCIAL = "MISCELLANEOUS_FINANCIAL"
 
 
-class Tradeline(BaseModel):
+class DocumentLineItem(BaseModel):
     account_name: str
-    masked_account_number: str
-    credit_limit: Decimal
-    current_balance: Decimal
+    masked_account_number: Optional[str] = None
+    credit_limit: Optional[Decimal] = Decimal("0.00")
+    current_balance: Optional[Decimal] = Decimal("0.00")
     monthly_payment: Optional[Decimal] = Decimal("0.00")
     date_opened: Optional[date] = None
     last_reported: Optional[date] = None
     is_promotional: bool = False
     promotional_expiration: Optional[date] = None
+    notes: Optional[str] = None
 
 
-class CreditReportSnapshot(BaseModel):
-    bureau: BureauType
+class UnifiedDocumentSnapshot(BaseModel):
+    document_class: DocumentClass
+    institution_or_bureau: str
     report_date: date
-    total_revolving_limit: Decimal
-    total_revolving_balance: Decimal
-    aggregate_utilization_pct: float
-    hard_inquiries_count: int
-    tradelines: List[Tradeline]
+    total_revolving_limit: Optional[Decimal] = Decimal("0.00")
+    total_revolving_balance: Optional[Decimal] = Decimal("0.00")
+    aggregate_utilization_pct: Optional[float] = 0.0
+    hard_inquiries_count: Optional[int] = 0
+    line_items: List[DocumentLineItem] = Field(default_factory=list)
     detected_discrepancies: List[str] = Field(default_factory=list)
+
+
+class LiquidityTarget(BaseModel):
+    target_id: str
+    label: str
+    target_amount: Decimal
+    target_date: date
+    is_active: bool = True
+    created_at: date
 
 
 class PromotionalDebt(BaseModel):
@@ -58,17 +73,6 @@ class PromotionalDebt(BaseModel):
         self.days_remaining = max(0, delta)
         return self.days_remaining
 
-    def merge_with_tradeline(self, tradeline: Tradeline) -> "PromotionalDebt":
-        """
-        Enriches/merges manual promotional debt terms (APR and expiration date)
-        with live bureau tradeline balances and reported limits.
-        """
-        self.total_balance = tradeline.current_balance
-        if tradeline.monthly_payment and tradeline.monthly_payment > Decimal("0.00"):
-            self.minimum_monthly_payment = tradeline.monthly_payment
-        self.recalculate_days_remaining()
-        return self
-
 
 class CollateralInvariantState(BaseModel):
     timestamp: date
@@ -79,7 +83,6 @@ class CollateralInvariantState(BaseModel):
     active_promotional_debt: Decimal
     net_collateral_buffer: Decimal
     is_solvent: bool
-    risk_multiplier: float
 
     @classmethod
     def calculate(
@@ -89,10 +92,9 @@ class CollateralInvariantState(BaseModel):
         active_promotional_debt: Decimal,
         external_liquid_backstop: Decimal = Decimal("0.00"),
         as_of: Optional[date] = None,
-        nearest_days_to_reset: Optional[int] = None,
     ) -> "CollateralInvariantState":
         """
-        Calculates the Net Collateral Invariant and resulting Risk Multiplier.
+        Calculates the passive Net Collateral Invariant.
         Formula:
           Total Liquid Backstop = settled_cash + unsettled_cash + external_liquid_backstop
           Net Collateral Buffer = Total Liquid Backstop - active_promotional_debt
@@ -101,19 +103,6 @@ class CollateralInvariantState(BaseModel):
         total_backstop = settled_cash + unsettled_cash + external_liquid_backstop
         buffer = total_backstop - active_promotional_debt
         is_solvent = buffer >= Decimal("0.00")
-
-        # Multiplier evaluation
-        if not is_solvent or (nearest_days_to_reset is not None and nearest_days_to_reset < 30):
-            multiplier = 0.0
-        elif nearest_days_to_reset is not None and nearest_days_to_reset <= 90:
-            # Linear scaling from 1.0 down to 0.5 as days approach 30
-            # multiplier = 0.5 + 0.5 * ((days - 30) / (90 - 30))
-            clamped_days = max(30, min(90, nearest_days_to_reset))
-            multiplier = round(0.5 + 0.5 * ((clamped_days - 30) / 60.0), 4)
-            if buffer < Decimal("1000.00"):
-                multiplier = min(multiplier, 0.5)
-        else:
-            multiplier = 1.0 if buffer >= Decimal("1000.00") else 0.8
 
         return cls(
             timestamp=ts,
@@ -124,12 +113,12 @@ class CollateralInvariantState(BaseModel):
             active_promotional_debt=active_promotional_debt,
             net_collateral_buffer=buffer,
             is_solvent=is_solvent,
-            risk_multiplier=multiplier,
         )
 
 
 class MacroLiquidityEvent(BaseModel):
     timestamp: str
     state: CollateralInvariantState
-    snapshot: Optional[CreditReportSnapshot] = None
+    snapshot: Optional[UnifiedDocumentSnapshot] = None
     promotional_debts: List[PromotionalDebt] = Field(default_factory=list)
+    liquidity_targets: List[LiquidityTarget] = Field(default_factory=list)

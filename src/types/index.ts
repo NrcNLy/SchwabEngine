@@ -97,29 +97,47 @@ export interface MacroBlackout {
   event_time?: string;
 }
 
-export type BureauType = 'EXPERIAN' | 'TRANSUNION' | 'EQUIFAX';
+export type DocumentClass = 
+  'CREDIT_REPORT' | 
+  'BANK_STATEMENT' | 
+  'CREDIT_CARD_STATEMENT' | 
+  'PAYSTUB' | 
+  'STUDENT_LOAN_STATEMENT' | 
+  'TAX_DOCUMENT' | 
+  'MISCELLANEOUS_FINANCIAL';
 
-export interface Tradeline {
+export interface DocumentLineItem {
   account_name: string;
-  masked_account_number: string;
-  credit_limit: number;
-  current_balance: number;
+  masked_account_number?: string;
+  credit_limit?: number;
+  current_balance?: number;
   monthly_payment?: number;
   date_opened?: string;
   last_reported?: string;
   is_promotional: boolean;
   promotional_expiration?: string;
+  notes?: string;
 }
 
-export interface CreditReportSnapshot {
-  bureau: BureauType;
+export interface UnifiedDocumentSnapshot {
+  document_class: DocumentClass;
+  institution_or_bureau: string;
   report_date: string;
-  total_revolving_limit: number;
-  total_revolving_balance: number;
-  aggregate_utilization_pct: number;
-  hard_inquiries_count: number;
-  tradelines: Tradeline[];
+  total_revolving_limit?: number;
+  total_revolving_balance?: number;
+  aggregate_utilization_pct?: number;
+  hard_inquiries_count?: number;
+  line_items: DocumentLineItem[];
   detected_discrepancies: string[];
+}
+
+export interface LiquidityTarget {
+  target_id: string;
+  label: string;
+  target_amount: number;
+  target_date: string;
+  is_active: boolean;
+  created_at: string;
 }
 
 export interface PromotionalDebt {
@@ -143,15 +161,16 @@ export interface CollateralInvariantState {
   active_promotional_debt: number;
   net_collateral_buffer: number;
   is_solvent: boolean;
-  risk_multiplier: number;
 }
 
 export interface MacroLiquidityStateResponse {
   _updated_at: string;
   file_source: string;
   sha256: string;
-  credit_report?: CreditReportSnapshot;
+  snapshot?: UnifiedDocumentSnapshot;
   collateral_state: CollateralInvariantState;
   promotional_debts: PromotionalDebt[];
+  liquidity_targets: LiquidityTarget[];
   external_liquid_backstop: number;
+  _is_simulated?: boolean;
 }

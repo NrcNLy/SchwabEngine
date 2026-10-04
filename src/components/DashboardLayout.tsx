@@ -11,6 +11,8 @@ import {
 } from 'lucide-react';
 import { EngineStatus } from '../types';
 import { VmTelemetryStrip } from './VmTelemetryStrip';
+import { HeaderPnLWidget } from './HeaderPnLWidget';
+
 
 interface DashboardLayoutProps {
   status: EngineStatus;
@@ -109,30 +111,18 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
           </div>
         </div>
 
-        {/* Operating Window & Safeguard Strip */}
+                {/* Operating Window & Safeguard Strip (Compressed) */}
         <div className="bg-[#090e18] border-t border-b border-gray-800/80 px-4 sm:px-6 lg:px-8 py-1.5 flex flex-wrap items-center justify-between text-[11px] font-mono text-gray-400 gap-2">
           <div className="flex items-center space-x-2">
             <Clock className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="text-gray-300 font-semibold">Execution Windows:</span>
-            <span className="text-gray-400">08:35 Pre-Market Macro</span>
-            <span className="text-gray-600">→</span>
-            <span className="text-emerald-400 font-semibold">09:30–15:55 Active Hours</span>
-            <span className="text-gray-600">→</span>
-            <span className="text-rose-400 font-semibold">15:55 Flat Sweep</span>
-            <span className="text-gray-600">→</span>
-            <span className="text-purple-400 font-semibold">16:15 Reflection</span>
+            <span className="text-gray-300 font-semibold">Execution Pipeline:</span>
+            <span className="text-emerald-400 font-semibold bg-emerald-400/10 px-2 py-0.5 rounded">Active Hours (09:30�15:55)</span>
+            <span className="text-gray-600 hidden sm:inline">|</span>
+            <span className="text-gray-500 hidden sm:inline">Next: Flat Sweep in 1h 08m</span>
           </div>
 
           <div className="flex items-center space-x-4">
-            <div className="flex items-center space-x-1.5">
-              <span className="text-gray-400">Circuit Breaker:</span>
-              <span className="text-rose-400 font-bold">-$30.00 (-3.0%)</span>
-            </div>
-            <span className="text-gray-700 hidden sm:inline">|</span>
-            <div className="hidden sm:flex items-center space-x-1.5">
-              <span className="text-gray-400">Single Cap:</span>
-              <span className="text-cyan-300 font-bold">$200.00 (20%)</span>
-            </div>
+            <HeaderPnLWidget status={status} />
           </div>
         </div>
 

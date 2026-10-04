@@ -76,12 +76,11 @@ class TradingSystem:
             await self.handle_liquidity_event(event)
 
     async def handle_liquidity_event(self, event: MacroLiquidityEvent):
-        """Refreshes risk manager constraints dynamically when macro liquidity updates."""
+        """Logs passive macro liquidity updates without affecting order sizing."""
         logger.info(
             f"MacroLiquidityEvent Processed -> Net Collateral Buffer: ${event.state.net_collateral_buffer:.2f}, "
-            f"Risk Multiplier: {event.state.risk_multiplier:.4f}, Solvent: {event.state.is_solvent}"
+            f"Solvent: {event.state.is_solvent}"
         )
-        self.risk_engine.update_macro_risk_multiplier(event.state.risk_multiplier)
 
     async def handle_market_event(self, event: MarketEvent):
         """Asynchronous Consumer: Processes the Pydantic strictly typed event."""

@@ -168,6 +168,27 @@ def build_app(ctx: "EngineContext"):
             if ctx.reconciliation_monitor else True
         )
 
+                try:
+            import psutil
+            cpu_pct = psutil.cpu_percent(interval=None)
+            mem = psutil.virtual_memory()
+            mem_pct = mem.percent
+            
+            uptime_s = ctx.uptime_seconds()
+            days = uptime_s // 86400
+            hrs = (uptime_s % 86400) // 3600
+            mins = (uptime_s % 3600) // 60
+            uptime_str = f"{days}d {hrs}h {mins}m"
+            
+            vm_stats = {
+                "cpu_pct": cpu_pct,
+                "mem_pct": mem_pct,
+                "api_ping_ms": 35,  # mock ping
+                "uptime_string": uptime_str
+            }
+        except ImportError:
+            vm_stats = None
+
         return {
             "status":                    "ONLINE" if auth_ok else "WAITING_AUTH",
             "auth_status":               "AUTHORIZED" if auth_ok else "NEEDS_AUTH",
@@ -176,6 +197,7 @@ def build_app(ctx: "EngineContext"):
             "today_pnl":                 round(pnl, 2),
             "external_positions_detected": external,
             "timestamp_edt":             datetime.now(_EDT).isoformat(),
+            "vm_stats":                  vm_stats
         }
 
     @app.get("/positions")
@@ -432,31 +454,22 @@ def build_app(ctx: "EngineContext"):
     DOCUMENTS_VAULT_DIR.mkdir(parents=True, exist_ok=True)
 
     async def _process_document_background(file_path: Path):
-        """Asynchronous background task to extract credit snapshot without blocking Tier 1."""
         try:
             from services.document_parser import DocumentParser
             parser = DocumentParser()
-            snapshot, is_dup = await parser.extract_credit_report(file_path)
-            logger.info(f"Background extraction of {file_path.name} finished. Snapshot bureau: {snapshot.bureau}")
+            snapshot, is_dup = await parser.extract_document(file_path)
+            logger.info(f"Background extraction of {file_path.name} finished. Snapshot class: {snapshot.document_class}")
         except Exception as exc:
             logger.error(f"Background extraction of {file_path.name} encountered error: {exc}")
 
     @app.post("/api/v1/documents/upload")
     async def upload_document(
         background_tasks: BackgroundTasks,
-        file: UploadFile = File(...),
-        doc_type: str = Form("CREDIT_REPORT")
+        file: UploadFile = File(...)
     ):
-        """
-        Accepts financial document uploads (credit disclosures, statements),
-        persists them to the restricted vault storage, and enqueues async extraction.
-        """
-        if doc_type not in ["CREDIT_REPORT", "BANK_STATEMENT"]:
-            raise HTTPException(status_code=400, detail="Invalid doc_type. Must be CREDIT_REPORT or BANK_STATEMENT.")
-
         safe_filename = "".join(c for c in file.filename if c.isalnum() or c in "._- ")
         timestamp_str = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        dest_filename = f"{doc_type}_{timestamp_str}_{safe_filename}"
+        dest_filename = f"AUTO_{timestamp_str}_{safe_filename}"
         dest_path = DOCUMENTS_VAULT_DIR / dest_filename
 
         contents = await file.read()
@@ -468,7 +481,7 @@ def build_app(ctx: "EngineContext"):
         return {
             "success": True,
             "filename": safe_filename,
-            "doc_type": doc_type,
+            "doc_type": "AUTO",
             "saved_as": dest_filename,
             "path": str(dest_path),
             "status": "QUEUED"
@@ -476,11 +489,9 @@ def build_app(ctx: "EngineContext"):
 
     @app.get("/api/v1/liquidity/state")
     async def get_liquidity_state():
-        """
-        Returns the current CollateralInvariantState, promotional debts,
-        and latest credit report snapshot.
-        """
         state_file = Path("data/macro_liquidity.json")
+        is_simulated = True if (not ctx.auth_manager or not ctx.auth_manager.has_refresh_token()) else False
+        
         if state_file.exists():
             try:
                 data = json.loads(state_file.read_text())
@@ -488,10 +499,12 @@ def build_app(ctx: "EngineContext"):
                     "success": True,
                     "state": data.get("collateral_state"),
                     "promotional_debts": data.get("promotional_debts", []),
-                    "credit_report": data.get("credit_report"),
+                    "liquidity_targets": data.get("liquidity_targets", []),
+                    "snapshot": data.get("snapshot"),
                     "external_liquid_backstop": data.get("external_liquid_backstop", 0.0),
                     "file_source": data.get("file_source"),
-                    "updated_at": data.get("_updated_at")
+                    "updated_at": data.get("_updated_at"),
+                    "_is_simulated": is_simulated
                 }
             except Exception as exc:
                 logger.warning(f"Error reading {state_file}: {exc}")
@@ -506,28 +519,37 @@ def build_app(ctx: "EngineContext"):
             "success": True,
             "state": st.model_dump(),
             "promotional_debts": [],
-            "credit_report": None,
+            "liquidity_targets": [],
+            "snapshot": None,
             "external_liquid_backstop": 0.0,
             "file_source": "DEFAULT_SANDBOX",
-            "updated_at": datetime.utcnow().isoformat() + "Z"
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "_is_simulated": is_simulated
         }
 
-    @app.get("/api/v1/liquidity/credit-report")
-    async def get_credit_report():
-        """Returns the latest CreditReportSnapshot."""
+    @app.get("/api/v1/liquidity/document-snapshot")
+    async def get_document_snapshot():
         state_file = Path("data/macro_liquidity.json")
         if state_file.exists():
             try:
                 data = json.loads(state_file.read_text())
-                if "credit_report" in data and data["credit_report"]:
-                    return {"success": True, "credit_report": data["credit_report"]}
+                if "snapshot" in data and data["snapshot"]:
+                    return {"success": True, "snapshot": data["snapshot"]}
             except Exception as exc:
-                logger.warning(f"Error reading credit report from {state_file}: {exc}")
-        return {"success": False, "message": "No credit report snapshot currently loaded."}
+                logger.warning(f"Error reading snapshot from {state_file}: {exc}")
+        return {"success": False, "message": "No document snapshot currently loaded."}
+
+    class PromotionalDebtRequest(BaseModel):
+        id: str
+        institution: str
+        total_balance: float
+        promotional_apr: float
+        expiration_date: str
+        minimum_monthly_payment: float = 0.0
+        notes: str = ""
 
     @app.post("/api/v1/liquidity/promotional-debt")
     async def add_or_update_promotional_debt(req: PromotionalDebtRequest):
-        """Allows manual entry or editing of promotional debt terms (0% APR expiration)."""
         from core.liquidity_models import PromotionalDebt
         from core.collateral_engine import CollateralEngine
         from services.document_parser import DocumentParser
@@ -574,6 +596,80 @@ def build_app(ctx: "EngineContext"):
         parser._atomic_write_state(curr_data)
 
         return {"success": True, "promotional_debt": new_debt.model_dump(), "new_state": new_state.model_dump()}
+
+    class LiquidityTargetRequest(BaseModel):
+        target_id: str
+        label: str
+        target_amount: float
+        target_date: str
+        is_active: bool = True
+        
+    @app.post("/api/v1/liquidity/targets")
+    async def create_liquidity_target(req: LiquidityTargetRequest):
+        from core.liquidity_models import LiquidityTarget, PromotionalDebt
+        from core.collateral_engine import CollateralEngine
+        from services.document_parser import DocumentParser
+        from decimal import Decimal
+
+        parser = DocumentParser()
+        state_file = Path("data/macro_liquidity.json")
+        curr_data = {}
+        liquidity_targets = []
+        if state_file.exists():
+            try:
+                curr_data = json.loads(state_file.read_text())
+                if "liquidity_targets" in curr_data:
+                    liquidity_targets = [LiquidityTarget(**lt) for lt in curr_data["liquidity_targets"]]
+            except Exception as e:
+                logger.warning(f"Error loading existing state: {e}")
+
+        new_target = LiquidityTarget(
+            target_id=req.target_id,
+            label=req.label,
+            target_amount=Decimal(str(req.target_amount)),
+            target_date=datetime.strptime(req.target_date, "%Y-%m-%d").date(),
+            is_active=req.is_active,
+            created_at=date.today()
+        )
+        
+        replaced = False
+        for i, t in enumerate(liquidity_targets):
+            if t.target_id == new_target.target_id:
+                liquidity_targets[i] = new_target
+                replaced = True
+                break
+        
+        if not replaced:
+            liquidity_targets.append(new_target)
+
+        curr_data.update({
+            "_updated_at": datetime.utcnow().isoformat() + "Z",
+            "liquidity_targets": [lt.model_dump() for lt in liquidity_targets]
+        })
+        parser._atomic_write_state(curr_data)
+
+        return {"success": True, "target": new_target.model_dump()}
+
+    @app.delete("/api/v1/liquidity/targets/{target_id}")
+    async def delete_liquidity_target(target_id: str):
+        from core.liquidity_models import LiquidityTarget
+        from services.document_parser import DocumentParser
+
+        parser = DocumentParser()
+        state_file = Path("data/macro_liquidity.json")
+        curr_data = {}
+        if state_file.exists():
+            try:
+                curr_data = json.loads(state_file.read_text())
+                if "liquidity_targets" in curr_data:
+                    curr_data["liquidity_targets"] = [lt for lt in curr_data["liquidity_targets"] if lt["target_id"] != target_id]
+                    curr_data["_updated_at"] = datetime.utcnow().isoformat() + "Z"
+                    parser._atomic_write_state(curr_data)
+            except Exception as e:
+                logger.warning(f"Error loading existing state: {e}")
+
+        return {"success": True}
+
 
     @app.websocket("/stream")
     async def websocket_stream(ws: WebSocket):

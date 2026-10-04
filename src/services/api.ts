@@ -387,7 +387,6 @@ export async function fetchMacroLiquidityState(): Promise<MacroLiquidityStateRes
         active_promotional_debt: 2500.00,
         net_collateral_buffer: 3460.00,
         is_solvent: true,
-        risk_multiplier: 1.0,
       },
       promotional_debts: [
         {
@@ -401,15 +400,25 @@ export async function fetchMacroLiquidityState(): Promise<MacroLiquidityStateRes
           is_manual: false
         }
       ],
-      external_liquid_backstop: 5000.00
+      liquidity_targets: [
+        {
+          target_id: "mock_target_1",
+          label: "Quarterly Tax Payment",
+          target_amount: 1200.00,
+          target_date: new Date(Date.now() + 86400000 * 60).toISOString().split('T')[0],
+          is_active: true,
+          created_at: new Date().toISOString().split('T')[0],
+        }
+      ],
+      external_liquid_backstop: 5000.00,
+      _is_simulated: true
     };
   }
 }
 
-export async function uploadDocument(file: File, docType: string): Promise<{ success: boolean; message: string; data?: any }> {
+export async function uploadDocument(file: File): Promise<{ success: boolean; message: string; data?: any }> {
   const formData = new FormData();
   formData.append('file', file);
-  formData.append('doc_type', docType);
 
   try {
     const res = await fetch(`${ENGINE_BASE}/v1/documents/upload`, {
@@ -426,3 +435,30 @@ export async function uploadDocument(file: File, docType: string): Promise<{ suc
   }
 }
 
+export async function createLiquidityTarget(payload: any): Promise<{ success: boolean; target?: any; message?: string }> {
+  try {
+    const res = await fetch(`${ENGINE_BASE}/v1/liquidity/targets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error('Create target failed');
+    return data;
+  } catch (err: any) {
+    return { success: false, message: err.message };
+  }
+}
+
+export async function deleteLiquidityTarget(targetId: string): Promise<{ success: boolean; message?: string }> {
+  try {
+    const res = await fetch(`${ENGINE_BASE}/v1/liquidity/targets/${targetId}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error('Delete target failed');
+    return data;
+  } catch (err: any) {
+    return { success: false, message: err.message };
+  }
+}

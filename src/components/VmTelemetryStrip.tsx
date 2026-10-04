@@ -15,6 +15,11 @@ export const VmTelemetryStrip: React.FC<VmTelemetryStripProps> = ({ status }) =>
     <div className="bg-[#0b101c] border-b border-gray-800/80 px-4 sm:px-6 lg:px-8 py-1.5 flex flex-wrap items-center justify-between text-[10px] sm:text-xs font-mono text-gray-400">
       <div className="flex items-center space-x-2">
         <span className="text-gray-500 font-bold uppercase tracking-widest">VM Telemetry</span>
+        {status.engine_mode === 'SANDBOX_SIMULATION' && (
+          <span className="ml-2 px-1.5 py-0.5 bg-rose-950/40 text-rose-400 border border-rose-800/50 rounded font-bold tracking-widest uppercase">
+            SIMULATED / MOCK DATA
+          </span>
+        )}
       </div>
       
       <div className="flex items-center space-x-4 sm:space-x-6">

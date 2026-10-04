@@ -11,7 +11,6 @@ interface DocumentUploadModalProps {
 export const DocumentUploadModal: React.FC<DocumentUploadModalProps> = ({ isOpen, onClose, onUploadSuccess }) => {
   const [dragActive, setDragActive] = useState(false);
   const [file, setFile] = useState<File | null>(null);
-  const [docType, setDocType] = useState<string>('CREDIT_REPORT');
   const [status, setStatus] = useState<'IDLE' | 'UPLOADING' | 'PROCESSING' | 'SUCCESS' | 'ERROR'>('IDLE');
   const [errorMsg, setErrorMsg] = useState<string>('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -51,7 +50,7 @@ export const DocumentUploadModal: React.FC<DocumentUploadModalProps> = ({ isOpen
     await new Promise(r => setTimeout(r, 800));
     setStatus('PROCESSING');
 
-    const result = await uploadDocument(file, docType);
+    const result = await uploadDocument(file);
     if (result.success) {
       setStatus('SUCCESS');
       setTimeout(() => {
@@ -82,25 +81,6 @@ export const DocumentUploadModal: React.FC<DocumentUploadModalProps> = ({ isOpen
         </div>
 
         <div className="p-6">
-          {/* Doc Type Selector */}
-          <div className="mb-6">
-            <label className="block text-xs font-mono text-gray-400 mb-2 uppercase tracking-wider">Document Classification</label>
-            <div className="flex gap-2">
-              <button 
-                onClick={() => setDocType('CREDIT_REPORT')}
-                className={`flex-1 py-2 px-3 text-xs font-mono rounded border ${docType === 'CREDIT_REPORT' ? 'bg-indigo-500/20 border-indigo-500/50 text-indigo-300' : 'bg-[#111827] border-gray-800 text-gray-500 hover:border-gray-700'}`}
-              >
-                Bureau Credit Report
-              </button>
-              <button 
-                onClick={() => setDocType('BANK_STATEMENT')}
-                className={`flex-1 py-2 px-3 text-xs font-mono rounded border ${docType === 'BANK_STATEMENT' ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300' : 'bg-[#111827] border-gray-800 text-gray-500 hover:border-gray-700'}`}
-              >
-                Bank Statement
-              </button>
-            </div>
-          </div>
-
           {/* Drag & Drop Zone */}
           {status === 'IDLE' || status === 'ERROR' ? (
             <div 
