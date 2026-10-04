@@ -21,8 +21,9 @@ from core.models import MarketEvent
 from core.liquidity_models import (
     MacroLiquidityEvent, 
     CollateralInvariantState, 
-    CreditReportSnapshot, 
-    PromotionalDebt
+    UnifiedDocumentSnapshot, 
+    PromotionalDebt,
+    extract_snapshot,
 )
 from core.ledger import SettlementLedger
 from execution.risk_manager import RiskEngine
@@ -119,7 +120,7 @@ async def macro_liquidity_poller(bus: EventBus, poll_interval: float = 2.0):
                     data = json.loads(state_file.read_text())
                     if "collateral_state" in data:
                         state = CollateralInvariantState(**data["collateral_state"])
-                        snapshot = CreditReportSnapshot(**data["credit_report"]) if data.get("credit_report") else None
+                        snapshot = extract_snapshot(data)
                         promos = [PromotionalDebt(**d) for d in data.get("promotional_debts", [])]
                         evt = MacroLiquidityEvent(
                             timestamp=datetime.utcnow().isoformat() + "Z",

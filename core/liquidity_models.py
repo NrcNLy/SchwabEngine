@@ -46,6 +46,39 @@ class UnifiedDocumentSnapshot(BaseModel):
     line_items: List[DocumentLineItem] = Field(default_factory=list)
     detected_discrepancies: List[str] = Field(default_factory=list)
 
+    @classmethod
+    def from_legacy(cls, legacy: Dict[str, Any]) -> "UnifiedDocumentSnapshot":
+        """Adapts the pre-Directive-28 CreditReportSnapshot dict shape."""
+        items = [DocumentLineItem(**{k: v for k, v in t.items() if k in DocumentLineItem.model_fields})
+                 for t in legacy.get("tradelines", [])]
+        return cls(
+            document_class=DocumentClass.CREDIT_REPORT,
+            institution_or_bureau=str(legacy.get("bureau", "UNKNOWN")),
+            report_date=legacy.get("report_date", date.today().isoformat()),
+            total_revolving_limit=legacy.get("total_revolving_limit", Decimal("0.00")),
+            total_revolving_balance=legacy.get("total_revolving_balance", Decimal("0.00")),
+            aggregate_utilization_pct=legacy.get("aggregate_utilization_pct", 0.0),
+            hard_inquiries_count=legacy.get("hard_inquiries_count", 0),
+            line_items=items,
+            detected_discrepancies=list(legacy.get("detected_discrepancies", [])),
+        )
+
+
+def extract_snapshot(data: Dict[str, Any]) -> Optional[UnifiedDocumentSnapshot]:
+    """
+    Pulls a UnifiedDocumentSnapshot out of a macro_liquidity.json payload.
+    Prefers the unified "snapshot" key; falls back to the legacy "credit_report" dict.
+    Returns None (never raises) if neither is present or parseable.
+    """
+    try:
+        if data.get("snapshot"):
+            return UnifiedDocumentSnapshot(**data["snapshot"])
+        if data.get("credit_report"):
+            return UnifiedDocumentSnapshot.from_legacy(data["credit_report"])
+    except Exception:
+        return None
+    return None
+
 
 class LiquidityTarget(BaseModel):
     target_id: str

@@ -168,7 +168,7 @@ def build_app(ctx: "EngineContext"):
             if ctx.reconciliation_monitor else True
         )
 
-                try:
+        try:
             import psutil
             cpu_pct = psutil.cpu_percent(interval=None)
             mem = psutil.virtual_memory()
