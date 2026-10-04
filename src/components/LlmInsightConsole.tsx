@@ -1,95 +1,83 @@
-import React, { useState } from 'react';
-import { Terminal, Brain, Clock, Zap, FileText } from 'lucide-react';
-import { EngineStatus, MacroLiquidityStateResponse } from '../types';
+import React from 'react';
+import { Compass, TrendingDown, TrendingUp, Minus } from 'lucide-react';
+import { RegimeSummary } from '../types';
+import { SHOW_DEBUG } from '../utils/format';
 
 interface LlmInsightConsoleProps {
-  status: EngineStatus;
-  macroState?: MacroLiquidityStateResponse | null;
+  summary: RegimeSummary | null;
+  unavailable: boolean;
 }
 
-export const LlmInsightConsole: React.FC<LlmInsightConsoleProps> = ({ status, macroState }) => {
-  const [activeTab, setActiveTab] = useState<'MARKET' | 'CREDIT'>('MARKET');
-  const insight = status.llm_insight;
+const BIAS_STYLE: Record<string, { tone: string; Icon: React.ComponentType<{ className?: string }> }> = {
+  bullish: { tone: 'text-emerald-300 bg-emerald-950/60 border-emerald-800/60', Icon: TrendingUp },
+  bearish: { tone: 'text-rose-300 bg-rose-950/60 border-rose-800/60', Icon: TrendingDown },
+  neutral: { tone: 'text-gray-300 bg-gray-900 border-gray-700', Icon: Minus },
+};
 
-  if (!insight && !macroState) return null;
+/** Plain-language market regime summary. Advisory only; raw payloads stay behind the dev flag. */
+export const LlmInsightConsole: React.FC<LlmInsightConsoleProps> = ({ summary, unavailable }) => {
+  const bias = summary ? BIAS_STYLE[summary.bias] ?? BIAS_STYLE.neutral : BIAS_STYLE.neutral;
+  const BiasIcon = bias.Icon;
 
   return (
-    <div className="bg-[#0b101d] border border-purple-900/40 rounded-xl shadow-2xl overflow-hidden flex flex-col">
-      <div className="bg-[#111827] border-b border-gray-800 flex items-center justify-between">
-        <div className="flex">
-          {insight && (
-            <button
-              onClick={() => setActiveTab('MARKET')}
-              className={`px-4 py-3 text-xs font-semibold font-mono tracking-wider flex items-center transition-colors ${
-                activeTab === 'MARKET' ? 'text-purple-400 bg-purple-500/5 border-b-2 border-purple-500' : 'text-gray-500 hover:text-gray-300'
-              }`}
-            >
-              <Brain className="w-4 h-4 mr-2" />
-              Market Regime Analysis
-            </button>
-          )}
-          {macroState && (
-            <button
-              onClick={() => setActiveTab('CREDIT')}
-              className={`px-4 py-3 text-xs font-semibold font-mono tracking-wider flex items-center transition-colors ${
-                activeTab === 'CREDIT' ? 'text-emerald-400 bg-emerald-500/5 border-b-2 border-emerald-500' : 'text-gray-500 hover:text-gray-300'
-              }`}
-            >
-              <FileText className="w-4 h-4 mr-2" />
-              Credit / Macro Extraction Audit
-            </button>
-          )}
-        </div>
-
-        {activeTab === 'MARKET' && insight && (
-          <div className="px-4 flex items-center space-x-3 text-[10px] font-mono">
-            <div className="flex items-center text-gray-400">
-              <Zap className="w-3 h-3 text-amber-400 mr-1" />
-              {insight.model}
-            </div>
-            <div className="flex items-center text-gray-400">
-              <Clock className="w-3 h-3 text-emerald-400 mr-1" />
-              {insight.latency_ms}ms Latency
-            </div>
+    <section className="bg-[#0e1422] border border-gray-800 rounded-xl p-4 sm:p-5 shadow-2xl">
+      <div className="flex items-center justify-between gap-3 pb-3 border-b border-gray-800">
+        <div className="flex items-center gap-2.5">
+          <div className="p-2 rounded-lg bg-purple-500/10 text-purple-400 border border-purple-500/20">
+            <Compass className="w-4 h-4" />
           </div>
+          <h3 className="font-semibold text-gray-100 text-sm font-mono uppercase tracking-wider">Market Regime</h3>
+        </div>
+        {summary?.stale && (
+          <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-950 text-amber-300 border border-amber-800/60">
+            Stale{summary.age_hours !== null ? ` · ${Math.round(summary.age_hours)}h old` : ''}
+          </span>
         )}
       </div>
 
-      {activeTab === 'MARKET' && insight && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-gray-800">
-          <div className="p-4">
-            <div className="flex items-center text-[10px] font-mono text-gray-500 uppercase tracking-widest mb-2">
-              <Terminal className="w-3 h-3 mr-1.5" />
-              System Prompt Dispatched
-            </div>
-            <div className="bg-black/40 rounded p-3 text-xs font-mono text-gray-300 leading-relaxed overflow-y-auto max-h-48 border border-gray-800">
-              {insight.last_prompt}
-            </div>
+      {summary === null ? (
+        <p className="mt-4 text-xs font-mono text-gray-500">
+          {unavailable ? 'Regime summary is unavailable right now.' : 'Loading regime summary…'}
+        </p>
+      ) : (
+        <div className="mt-4 space-y-3">
+          <div className="flex flex-wrap items-center gap-2 font-mono">
+            <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-bold ${bias.tone}`}>
+              <BiasIcon className="w-3.5 h-3.5" />
+              {summary.bias_label}
+            </span>
+            <span className="px-2.5 py-1 rounded-lg border border-cyan-900/60 bg-cyan-950/50 text-cyan-300 text-xs font-bold">
+              {summary.regime_label}
+            </span>
+            <span className="px-2.5 py-1 rounded-lg border border-gray-700 bg-gray-900 text-gray-300 text-xs">
+              {summary.volatility_label}
+            </span>
           </div>
 
-          <div className="p-4 bg-[#0e1422]">
-            <div className="flex items-center text-[10px] font-mono text-gray-500 uppercase tracking-widest mb-2">
-              <Brain className="w-3 h-3 mr-1.5" />
-              Structured JSON Parsed Output
-            </div>
-            <pre className="bg-[#080d17] rounded p-3 text-xs font-mono text-emerald-300 overflow-y-auto max-h-48 border border-gray-800 whitespace-pre-wrap">
-              <code>{insight.last_response}</code>
-            </pre>
-          </div>
-        </div>
-      )}
+          <p className="text-sm text-gray-300 leading-snug">{summary.regime_description}</p>
 
-      {activeTab === 'CREDIT' && macroState && (
-        <div className="p-4 bg-[#0e1422]">
-          <div className="flex items-center text-[10px] font-mono text-gray-500 uppercase tracking-widest mb-2">
-            <FileText className="w-3 h-3 mr-1.5" />
-            Raw Macro Liquidity State Payload
-          </div>
-          <pre className="bg-[#080d17] rounded p-3 text-xs font-mono text-emerald-300 overflow-y-auto max-h-96 border border-gray-800 whitespace-pre-wrap">
-            <code>{JSON.stringify(macroState, null, 2)}</code>
-          </pre>
+          {summary.engine_regimes.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {summary.engine_regimes.map((r) => (
+                <span key={r.symbol} className="px-2 py-0.5 rounded text-[10px] font-mono bg-gray-900 border border-gray-800 text-gray-300">
+                  {r.symbol} · {r.label ?? r.regime}
+                </span>
+              ))}
+            </div>
+          )}
+
+          <p className="text-[11px] text-gray-500 font-mono">{summary.advisory_note}</p>
+
+          {SHOW_DEBUG && (
+            <details className="text-[10px] font-mono text-gray-500">
+              <summary className="cursor-pointer text-gray-400">Developer: raw payload</summary>
+              <pre className="mt-2 p-2 bg-[#070b12] border border-gray-800 rounded overflow-x-auto text-gray-400">
+                {JSON.stringify(summary, null, 2)}
+              </pre>
+            </details>
+          )}
         </div>
       )}
-    </div>
+    </section>
   );
 };

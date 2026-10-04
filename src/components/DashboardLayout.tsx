@@ -1,192 +1,110 @@
 import React from 'react';
-import { 
-  Activity, 
-  Terminal, 
-  TrendingUp, 
-  Layers, 
-  ShieldCheck, 
-  Radio, 
-  RefreshCw,
-  Clock
-} from 'lucide-react';
-import { EngineStatus } from '../types';
+import { Activity, Layers, RefreshCw, ShieldCheck, SlidersHorizontal, TrendingUp } from 'lucide-react';
+import { EngineStatus, EnvName } from '../types';
 import { VmTelemetryStrip } from './VmTelemetryStrip';
-import { HeaderPnLWidget } from './HeaderPnLWidget';
+import { StatusPill } from './StatusPill';
+import { NetChangePanel } from './NetChangePanel';
+import { EnvToggle } from './EnvToggle';
 
+export type DashboardTab = 'overview' | 'positions' | 'ledger' | 'controls';
 
 interface DashboardLayoutProps {
-  status: EngineStatus;
+  status: EngineStatus | null;
+  engineError: string | null;
+  env: EnvName;
+  onEnvChange: (env: EnvName) => void;
   onRefresh: () => void;
   isRefreshing: boolean;
-  activeTab: 'overview' | 'positions' | 'controls' | 'ledger';
-  setActiveTab: (tab: 'overview' | 'positions' | 'controls' | 'ledger') => void;
+  activeTab: DashboardTab;
+  setActiveTab: (tab: DashboardTab) => void;
   children: React.ReactNode;
 }
 
+const TABS: Array<{ id: DashboardTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+  { id: 'overview', label: 'Overview', icon: TrendingUp },
+  { id: 'positions', label: 'Risk Guard', icon: ShieldCheck },
+  { id: 'ledger', label: 'Liquidity', icon: Layers },
+  { id: 'controls', label: 'Controls', icon: SlidersHorizontal },
+];
+
 export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
   status,
+  engineError,
+  env,
+  onEnvChange,
   onRefresh,
   isRefreshing,
   activeTab,
   setActiveTab,
   children,
 }) => {
-  const formatUptime = (seconds: number) => {
-    const hrs = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    return `${hrs}h ${mins}m`;
-  };
-
-  const isLive = status.is_connected && status.engine_mode === 'LIVE_DAEMON';
-
   return (
     <div className="min-h-screen bg-[#070b12] text-gray-100 flex flex-col font-sans selection:bg-cyan-500/30 selection:text-cyan-200">
-      
-      {/* Hardware Telemetry Strip */}
+      {env === 'sandbox' && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center overflow-hidden"
+        >
+          <span className="-rotate-[24deg] select-none font-mono font-black tracking-[0.4em] text-amber-300/[0.06] text-6xl sm:text-8xl">
+            SANDBOX
+          </span>
+        </div>
+      )}
+
       <VmTelemetryStrip status={status} />
 
-      {/* Top Telemetry Header */}
-      <header className="border-b border-gray-800/80 bg-[#0d1322]/90 backdrop-blur sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            {/* Logo & Platform Info */}
-            <div className="flex items-center space-x-3">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-cyan-600 via-blue-600 to-emerald-500 flex items-center justify-center shadow-lg shadow-cyan-500/20 border border-cyan-400/20">
-                <Activity className="w-5 h-5 text-white animate-pulse" />
+      <header className="border-b border-gray-800/80 bg-[#0d1322]/95 backdrop-blur sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between h-14 gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-8 h-8 shrink-0 rounded-lg bg-gradient-to-tr from-cyan-600 via-blue-600 to-emerald-500 flex items-center justify-center border border-cyan-400/20">
+                <Activity className="w-4 h-4 text-white" />
               </div>
-              <div>
-                <div className="flex items-center space-x-2">
-                  <h1 className="font-bold text-base tracking-tight text-white font-mono">
-                    SCHWAB<span className="text-cyan-400">ENGINE</span>
-                  </h1>
-                  <span className="px-1.5 py-0.5 text-[9px] uppercase font-mono tracking-wider font-bold rounded bg-cyan-950 text-cyan-300 border border-cyan-800/80">
-                    Tier 1 Core
-                  </span>
-                  <span className="hidden sm:inline-block px-1.5 py-0.5 text-[9px] font-mono rounded bg-purple-950 text-purple-300 border border-purple-800/80">
-                    Vertex AI 2.5
-                  </span>
-                </div>
-                <p className="text-[10px] text-gray-400 font-mono">
-                  Autonomous 3X ETF Execution · $1,000 Sandbox Matrix
-                </p>
-              </div>
+              <h1 className="font-bold text-base tracking-tight text-white font-mono truncate">SchwabEngine</h1>
+              <StatusPill status={status} engineError={engineError} />
             </div>
-
-            {/* Live Engine & Environment Badges */}
-            <div className="flex items-center space-x-3">
-              {/* Engine Status / Daemon Mode */}
-              <div className="flex items-center space-x-2 bg-gray-900/90 px-3 py-1.5 rounded-lg border border-gray-800 text-xs">
-                <Radio className={`w-3.5 h-3.5 ${isLive ? 'text-emerald-400 animate-pulse' : 'text-cyan-400'}`} />
-                <span className="text-gray-400 hidden sm:inline">Engine:</span>
-                <span className={`font-mono font-semibold text-[11px] ${isLive ? 'text-emerald-400' : 'text-cyan-300'}`}>
-                  {isLive ? 'LIVE (8080)' : 'SANDBOX SIM'}
-                </span>
-              </div>
-
-              {/* Schwab Auth Badge */}
-              <div className="hidden md:flex items-center space-x-2 bg-gray-900/90 px-3 py-1.5 rounded-lg border border-gray-800 text-xs">
-                <ShieldCheck className={`w-3.5 h-3.5 ${status.auth_status === 'AUTHORIZED' ? 'text-emerald-400' : 'text-amber-400'}`} />
-                <span className="text-gray-400">OAuth Vault:</span>
-                <span className={`font-mono font-semibold text-[11px] ${status.auth_status === 'AUTHORIZED' ? 'text-emerald-400' : 'text-amber-400'}`}>
-                  {status.auth_status}
-                </span>
-              </div>
-
-              {/* Uptime */}
-              <div className="hidden lg:block text-right text-xs font-mono">
-                <span className="text-gray-500 block text-[9px]">UPTIME</span>
-                <span className="text-gray-300 font-semibold">{formatUptime(status.uptime_seconds)}</span>
-              </div>
-
-              {/* Manual Refresh */}
-              <button
-                onClick={onRefresh}
-                disabled={isRefreshing}
-                className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition-colors border border-gray-700"
-                title="Poll Telemetry"
-              >
-                <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin text-cyan-400' : ''}`} />
-              </button>
-            </div>
-          </div>
-        </div>
-
-                {/* Operating Window & Safeguard Strip (Compressed) */}
-        <div className="bg-[#090e18] border-t border-b border-gray-800/80 px-4 sm:px-6 lg:px-8 py-1.5 flex flex-wrap items-center justify-between text-[11px] font-mono text-gray-400 gap-2">
-          <div className="flex items-center space-x-2">
-            <Clock className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="text-gray-300 font-semibold">Execution Pipeline:</span>
-            <span className="text-emerald-400 font-semibold bg-emerald-400/10 px-2 py-0.5 rounded">Active Hours (09:30�15:55)</span>
-            <span className="text-gray-600 hidden sm:inline">|</span>
-            <span className="text-gray-500 hidden sm:inline">Next: Flat Sweep in 1h 08m</span>
+            <NetChangePanel status={status} />
           </div>
 
-          <div className="flex items-center space-x-4">
-            <HeaderPnLWidget status={status} />
+          <div className="flex items-center gap-2 pb-2 -mx-1 px-1 overflow-x-auto">
+            <EnvToggle env={env} onChange={onEnvChange} />
+            <nav className="flex items-center gap-1 flex-1 min-w-0" aria-label="Sections">
+              {TABS.map(({ id, label, icon: Icon }) => {
+                const isActive = id === activeTab;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setActiveTab(id)}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-mono whitespace-nowrap transition-colors ${
+                      isActive ? 'bg-cyan-950/70 text-cyan-300 border border-cyan-800/60' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/60 border border-transparent'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5" />
+                    {label}
+                  </button>
+                );
+              })}
+            </nav>
+            <button
+              type="button"
+              onClick={onRefresh}
+              aria-label="Refresh data"
+              className="shrink-0 p-1.5 rounded-lg text-gray-400 hover:text-gray-100 hover:bg-gray-800/60 transition-colors"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin text-cyan-400' : ''}`} />
+            </button>
           </div>
-        </div>
-
-        {/* Navigation Tabs */}
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex space-x-1 sm:space-x-4">
-          <button
-            onClick={() => setActiveTab('overview')}
-            className={`py-3 px-3 text-xs font-mono font-medium border-b-2 flex items-center space-x-2 transition-all ${
-              activeTab === 'overview'
-                ? 'border-cyan-400 text-cyan-400 font-bold'
-                : 'border-transparent text-gray-400 hover:text-gray-200 hover:border-gray-700'
-            }`}
-          >
-            <TrendingUp className="w-3.5 h-3.5" />
-            <span>Overview & Audit</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('positions')}
-            className={`py-3 px-3 text-xs font-mono font-medium border-b-2 flex items-center space-x-2 transition-all ${
-              activeTab === 'positions'
-                ? 'border-cyan-400 text-cyan-400 font-bold'
-                : 'border-transparent text-gray-400 hover:text-gray-200 hover:border-gray-700'
-            }`}
-          >
-            <Layers className="w-3.5 h-3.5" />
-            <span>High-Beta ETF Positions</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('controls')}
-            className={`py-3 px-3 text-xs font-mono font-medium border-b-2 flex items-center space-x-2 transition-all ${
-              activeTab === 'controls'
-                ? 'border-cyan-400 text-cyan-400 font-bold'
-                : 'border-transparent text-gray-400 hover:text-gray-200 hover:border-gray-700'
-            }`}
-          >
-            <Terminal className="w-3.5 h-3.5" />
-            <span>Schwab Vault & AI Controls</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('ledger')}
-            className={`py-3 px-3 text-xs font-mono font-medium border-b-2 flex items-center space-x-2 transition-all ${
-              activeTab === 'ledger'
-                ? 'border-cyan-400 text-cyan-400 font-bold'
-                : 'border-transparent text-gray-400 hover:text-gray-200 hover:border-gray-700'
-            }`}
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>3-Bucket GFV Ledger</span>
-          </button>
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {children}
-      </main>
+      {engineError && (
+        <div className="bg-rose-950/60 border-b border-rose-900/60 px-4 py-2 text-xs font-mono text-rose-200 text-center">
+          {engineError} Figures below are not live.
+        </div>
+      )}
 
-      {/* Footer */}
-      <footer className="border-t border-gray-900 bg-[#060a10] py-4 text-center text-xs text-gray-600 font-mono">
-        SchwabEngine · Production GCP VM 8080 · Vertex AI gen-lang-client-0334702303 · Google AI Studio Build Mode
-      </footer>
+      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 py-5">{children}</main>
     </div>
   );
 };

@@ -1,279 +1,297 @@
-import { useState, useEffect, useCallback } from 'react';
-import { 
-  TrendingUp, 
-  TrendingDown, 
-  Layers, 
-  ShieldAlert, 
-  Wallet, 
-  CheckCircle2, 
-  Clock,
-  ShieldCheck
-} from 'lucide-react';
-import { EngineStatus, PositionsResponse, LedgerSnapshot, TradeOrder, MacroLiquidityStateResponse } from './types';
-import { 
-  fetchStatus, 
-  fetchAllPositions, 
-  fetchLedger, 
-  fetchOrders,
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { CheckCircle2, Clock, Layers, ShieldAlert, TrendingDown, TrendingUp, Wallet } from 'lucide-react';
+import {
+  EngineStatus,
+  EnvName,
+  LedgerSnapshot,
+  LiquidityPolicy,
+  MacroLiquidityStateResponse,
+  PositionsResponse,
+  RegimeSummary,
+  TradeOrder,
+} from './types';
+import {
+  fetchAllPositions,
+  fetchLedger,
+  fetchLiquidityPolicy,
   fetchMacroLiquidityState,
-  MOCK_STATUS,
-  MOCK_POSITIONS,
-  MOCK_LEDGER,
-  MOCK_ORDERS 
+  fetchOrders,
+  fetchRegimeSummary,
+  fetchStatus,
 } from './services/api';
-import { DashboardLayout } from './components/DashboardLayout';
+import { DashboardLayout, DashboardTab } from './components/DashboardLayout';
 import { SchwabControls } from './components/SchwabControls';
 import { EtfPositionTracker } from './components/EtfPositionTracker';
 import { LedgerCard } from './components/LedgerCard';
 import { LifecycleTracker } from './components/LifecycleTracker';
 import { LlmInsightConsole } from './components/LlmInsightConsole';
 import { MacroLiquidityCard } from './components/MacroLiquidityCard';
+import { pnlTone, signedPct, signedUsd, usd } from './utils/format';
+
+const POLL_INTERVAL_MS = 5000;
+
+const MetricCard: React.FC<{
+  label: string;
+  value: string;
+  valueTone?: string;
+  hint?: string;
+  icon: React.ReactNode;
+}> = ({ label, value, valueTone = 'text-gray-100', hint, icon }) => (
+  <div className="bg-[#0e1422] border border-gray-800 rounded-xl p-3 shadow-lg">
+    <div className="flex items-center justify-between text-gray-400 text-[11px] mb-1">
+      <span className="font-mono">{label}</span>
+      {icon}
+    </div>
+    <div className={`text-xl font-bold font-mono ${valueTone}`}>{value}</div>
+    {hint && <span className="text-[10px] text-gray-500 font-mono block mt-0.5">{hint}</span>}
+  </div>
+);
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'positions' | 'controls' | 'ledger'>('overview');
+  const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const [status, setStatus] = useState<EngineStatus>(MOCK_STATUS);
-  const [positions, setPositions] = useState<PositionsResponse>(MOCK_POSITIONS);
-  const [ledger, setLedger] = useState<LedgerSnapshot>(MOCK_LEDGER);
-  const [orders, setOrders] = useState<TradeOrder[]>(MOCK_ORDERS);
+  /** Operator's explicit choice. Null means "use the engine's default environment". */
+  const [userEnv, setUserEnv] = useState<EnvName | null>(null);
+
+  const [status, setStatus] = useState<EngineStatus | null>(null);
+  const [engineError, setEngineError] = useState<string | null>(null);
+  const [partialErrors, setPartialErrors] = useState<string[]>([]);
+  const [positions, setPositions] = useState<PositionsResponse | null>(null);
+  const [ledger, setLedger] = useState<LedgerSnapshot | null>(null);
+  const [orders, setOrders] = useState<TradeOrder[] | null>(null);
   const [macroState, setMacroState] = useState<MacroLiquidityStateResponse | null>(null);
+  const [policy, setPolicy] = useState<LiquidityPolicy | null>(null);
+  const [regime, setRegime] = useState<RegimeSummary | null>(null);
+  const [regimeFailed, setRegimeFailed] = useState(false);
+
+  const env: EnvName = userEnv ?? status?.env ?? 'active';
+  const requestSeq = useRef(0);
 
   const loadData = useCallback(async () => {
+    const seq = ++requestSeq.current;
     setIsRefreshing(true);
     try {
-      const [s, p, l, o, m] = await Promise.all([
-        fetchStatus(),
-        fetchAllPositions(),
-        fetchLedger(),
-        fetchOrders(),
+      let s: EngineStatus;
+      try {
+        s = await fetchStatus(userEnv ?? undefined);
+      } catch (err: unknown) {
+        if (seq !== requestSeq.current) return;
+        setEngineError(err instanceof Error ? err.message : 'Engine unreachable.');
+        return;
+      }
+      if (seq !== requestSeq.current) return;
+      const target: EnvName = userEnv ?? s.env;
+
+      const [p, l, o, m, pol, r] = await Promise.allSettled([
+        fetchAllPositions(target),
+        fetchLedger(target),
+        fetchOrders(target),
         fetchMacroLiquidityState(),
+        fetchLiquidityPolicy(),
+        fetchRegimeSummary(),
       ]);
+      if (seq !== requestSeq.current) return;
+
+      const failed: string[] = [];
       setStatus(s);
-      setPositions(p);
-      setLedger(l);
-      setOrders(o);
-      setMacroState(m);
-    } catch (err) {
-      console.error('Failed to update dashboard data', err);
+      setEngineError(null);
+
+      if (p.status === 'fulfilled') setPositions(p.value);
+      else {
+        setPositions(null);
+        failed.push('positions');
+      }
+      if (l.status === 'fulfilled') setLedger(l.value);
+      else {
+        setLedger(null);
+        failed.push('ledger');
+      }
+      if (o.status === 'fulfilled') setOrders(o.value);
+      else {
+        setOrders(null);
+        failed.push('orders');
+      }
+      if (m.status === 'fulfilled') setMacroState(m.value);
+      else {
+        setMacroState(null);
+        failed.push('document intelligence');
+      }
+      if (pol.status === 'fulfilled') setPolicy(pol.value);
+      else failed.push('liquidity policy');
+      if (r.status === 'fulfilled') {
+        setRegime(r.value);
+        setRegimeFailed(false);
+      } else {
+        setRegime(null);
+        setRegimeFailed(true);
+      }
+      setPartialErrors(failed);
     } finally {
-      setIsRefreshing(false);
+      if (seq === requestSeq.current) setIsRefreshing(false);
     }
-  }, []);
+  }, [userEnv]);
 
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 8000); // 8s auto-polling
+    void loadData();
+    const interval = setInterval(() => void loadData(), POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [loadData]);
 
-  const pnlPercent = ((status.today_pnl / 1000.0) * 100);
+  const handleEnvChange = (next: EnvName) => {
+    if (next === env && userEnv === next) return;
+    setPositions(null);
+    setLedger(null);
+    setOrders(null);
+    setUserEnv(next);
+  };
+
+  const nlv = status?.nlv ?? null;
+  const todayPnl = status?.today_pnl ?? null;
+  const todayPct = todayPnl !== null && nlv !== null && nlv > 0 ? (todayPnl / nlv) * 100 : null;
+  const unavailable = status?.data_source === 'UNAVAILABLE';
+  const capHint = ledger && ledger.available ? `${usd(ledger.max_single_exposure)} cap per ticker` : undefined;
 
   return (
     <DashboardLayout
       status={status}
-      onRefresh={loadData}
+      engineError={engineError}
+      env={env}
+      onEnvChange={handleEnvChange}
+      onRefresh={() => void loadData()}
       isRefreshing={isRefreshing}
       activeTab={activeTab}
       setActiveTab={setActiveTab}
     >
-      <div className="space-y-6">
-        {/* Metric Cards Banner - $1,000 Sandbox Matrix */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Today's PnL */}
-          <div className="bg-[#0e1422] border border-gray-800 rounded-xl p-4 shadow-lg">
-            <div className="flex items-center justify-between text-gray-400 text-xs mb-1">
-              <span className="font-mono">Today's Realized P&L</span>
-              <div className={`p-1.5 rounded-md ${status.today_pnl >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
-                {status.today_pnl >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-              </div>
-            </div>
-            <div className="flex items-baseline space-x-2">
-              <div className={`text-2xl font-bold font-mono ${status.today_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {status.today_pnl >= 0 ? '+' : ''}${status.today_pnl.toFixed(2)}
-              </div>
-              <span className={`text-xs font-mono font-semibold ${status.today_pnl >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
-                ({status.today_pnl >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%)
-              </span>
-            </div>
-            <span className="text-[10px] text-gray-500 font-mono block mt-1">
-              Floor: -$30.00 daily circuit breaker
-            </span>
+      <div className="space-y-5">
+        {unavailable && !engineError && (
+          <div className="text-xs font-mono text-amber-200 bg-amber-950/40 border border-amber-900/60 rounded-lg px-4 py-2.5">
+            Active (Schwab) data is unavailable because the engine is running in simulation. Switch to Sandbox to see the simulated pipeline.
           </div>
+        )}
+        {partialErrors.length > 0 && !engineError && (
+          <div className="text-xs font-mono text-rose-200 bg-rose-950/40 border border-rose-900/60 rounded-lg px-4 py-2.5">
+            Could not load: {partialErrors.join(', ')}.
+          </div>
+        )}
 
-          {/* Managed High-Beta Positions */}
-          <div className="bg-[#0e1422] border border-gray-800 rounded-xl p-4 shadow-lg">
-            <div className="flex items-center justify-between text-gray-400 text-xs mb-1">
-              <span className="font-mono">Managed 3X ETF Positions</span>
-              <div className="p-1.5 rounded-md bg-cyan-500/10 text-cyan-400">
-                <Layers className="w-4 h-4" />
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <MetricCard
+            label="Today P&L"
+            value={signedUsd(todayPnl)}
+            valueTone={pnlTone(todayPnl)}
+            hint={
+              todayPct !== null
+                ? `${signedPct(todayPct)} · floor ${usd(status?.circuit_breaker_limit)}`
+                : status
+                  ? `Floor ${usd(status.circuit_breaker_limit)}`
+                  : undefined
+            }
+            icon={
+              <div className={`p-1 rounded-md ${(todayPnl ?? 0) >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                {(todayPnl ?? 0) >= 0 ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
               </div>
-            </div>
-            <div className="text-2xl font-bold font-mono text-cyan-300">
-              {positions.managed.length} <span className="text-xs text-gray-400 font-normal">Active (SOXL/TQQQ/TNA)</span>
-            </div>
-            <span className="text-[10px] text-gray-500 font-mono block mt-1">
-              20% ($200.00) single-ticker cap enforced
-            </span>
-          </div>
-
-          {/* Reconciliation & External Holdings */}
-          <div className="bg-[#0e1422] border border-gray-800 rounded-xl p-4 shadow-lg">
-            <div className="flex items-center justify-between text-gray-400 text-xs mb-1">
-              <span className="font-mono">Reconciled Schwab Holdings</span>
-              <div className="p-1.5 rounded-md bg-amber-500/10 text-amber-400">
-                <ShieldAlert className="w-4 h-4" />
+            }
+          />
+          <MetricCard
+            label="Engine positions"
+            value={positions ? String(positions.managed.length) : '—'}
+            valueTone="text-cyan-300"
+            hint={capHint}
+            icon={
+              <div className="p-1 rounded-md bg-cyan-500/10 text-cyan-400">
+                <Layers className="w-3.5 h-3.5" />
               </div>
-            </div>
-            <div className="text-2xl font-bold font-mono text-amber-300">
-              {positions.unmanaged.length} <span className="text-xs text-gray-400 font-normal">Holding ({positions.unmanaged[0]?.symbol || 'None'})</span>
-            </div>
-            <span className="text-[10px] text-gray-500 font-mono block mt-1">
-              {status.external_positions_detected ? 'Segregated from intraday risk pool' : 'No external positions'}
-            </span>
-          </div>
-
-          {/* Settled Cash (Bucket 1) */}
-          <div className="bg-[#0e1422] border border-gray-800 rounded-xl p-4 shadow-lg">
-            <div className="flex items-center justify-between text-gray-400 text-xs mb-1">
-              <span className="font-mono">GFV Settled Buying Power</span>
-              <div className="p-1.5 rounded-md bg-emerald-500/10 text-emerald-400">
-                <Wallet className="w-4 h-4" />
+            }
+          />
+          <MetricCard
+            label="External holdings"
+            value={positions ? String(positions.unmanaged.length) : '—'}
+            valueTone="text-amber-300"
+            hint={positions && positions.unmanaged.length > 0 ? positions.unmanaged.map((p) => p.symbol).join(', ') : 'None detected'}
+            icon={
+              <div className="p-1 rounded-md bg-amber-500/10 text-amber-400">
+                <ShieldAlert className="w-3.5 h-3.5" />
               </div>
-            </div>
-            <div className="text-2xl font-bold font-mono text-emerald-300">
-              ${ledger.bucket1_settled.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-            </div>
-            <span className="text-[10px] text-gray-500 font-mono block mt-1">
-              Bucket 1: Zero GFV roundtrip risk
-            </span>
-          </div>
+            }
+          />
+          <MetricCard
+            label="Settled buying power"
+            value={ledger && ledger.available ? usd(ledger.bucket1_settled) : '—'}
+            valueTone="text-emerald-300"
+            hint={ledger && ledger.available ? `Max order ${usd(ledger.buying_power?.max_order_notional)}` : undefined}
+            icon={
+              <div className="p-1 rounded-md bg-emerald-500/10 text-emerald-400">
+                <Wallet className="w-3.5 h-3.5" />
+              </div>
+            }
+          />
         </div>
 
-        {/* Tab 1: Overview */}
         {activeTab === 'overview' && (
-          <div className="space-y-6">
+          <div className="space-y-5">
             <LifecycleTracker status={status} />
-            <EtfPositionTracker positions={positions} onRefresh={loadData} />
-            
-            {/* Active Execution Trajectory & AI Telemetry */}
-            <div className="bg-[#0b101d] border border-cyan-900/40 rounded-xl p-5 shadow-2xl relative overflow-hidden">
-              <div className="absolute top-0 left-0 w-1 h-full bg-cyan-500 animate-pulse" />
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-                
-                {/* AI Bayesian Sizing Confidence */}
-                <div className="flex items-start space-x-4">
-                  <div className="p-3 bg-cyan-500/10 rounded-xl border border-cyan-500/30">
-                    <TrendingUp className="w-6 h-6 text-cyan-400" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-semibold text-gray-100 font-mono tracking-wider">
-                      Bayesian Quarter-Kelly Confidence
-                    </h3>
-                    <div className="flex items-center space-x-2 mt-1">
-                      <span className="text-2xl font-bold text-cyan-300 font-mono">
-                        {status.bayesian_kelly_confidence ? (status.bayesian_kelly_confidence * 100).toFixed(1) : '82.0'}%
-                      </span>
-                      <span className="text-xs text-gray-400 font-mono">Posterior Win-Rate Expectation</span>
-                    </div>
-                  </div>
-                </div>
+            <LlmInsightConsole summary={regime} unavailable={regimeFailed} />
 
-                {/* Almgren-Chriss Slicing Progress */}
-                <div className="flex-1 max-w-md w-full bg-gray-900/80 border border-gray-800 rounded-lg p-3">
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="text-xs text-gray-300 font-mono font-bold tracking-wide">
-                      Almgren-Chriss Hyperbolic Slicing
-                    </span>
-                    <span className="text-[10px] bg-amber-950/80 text-amber-400 px-1.5 py-0.5 rounded font-mono">
-                      ACTIVE TRAJECTORY
-                    </span>
-                  </div>
-                  
-                  <div className="w-full bg-gray-800 rounded-full h-2 mb-1.5 border border-gray-700 overflow-hidden">
-                    <div 
-                      className="bg-gradient-to-r from-amber-500 to-cyan-400 h-2 rounded-full transition-all duration-700" 
-                      style={{ width: `${((status.almgren_chriss_slices_executed || 2) / (status.almgren_chriss_slices_total || 4)) * 100}%` }}
-                    />
-                  </div>
-                  <div className="flex justify-between text-[10px] text-gray-500 font-mono">
-                    <span>Child Orders: {status.almgren_chriss_slices_executed || 2} of {status.almgren_chriss_slices_total || 4} Executed</span>
-                    <span>Pegged-to-Midpoint (+0.01)</span>
-                  </div>
-                </div>
-
-              </div>
-            </div>
-
-            <LlmInsightConsole status={status} macroState={macroState} />
-
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-              <LedgerCard ledger={ledger} />
-              <MacroLiquidityCard macroState={macroState} onUploadComplete={loadData} />
-            </div>
-            <SchwabControls status={status} onRefresh={loadData} />
-
-            {/* Execution Audit Log */}
-            <div className="bg-[#0e1422] border border-gray-800 rounded-xl p-5 shadow-2xl">
-              <div className="flex items-center justify-between pb-3 border-b border-gray-800 mb-4">
-                <h3 className="text-sm font-semibold text-gray-100 flex items-center font-mono">
+            <section className="bg-[#0e1422] border border-gray-800 rounded-xl p-4 sm:p-5 shadow-2xl">
+              <div className="flex items-center justify-between pb-3 border-b border-gray-800 mb-3">
+                <h3 className="text-sm font-semibold text-gray-100 flex items-center font-mono uppercase tracking-wider">
                   <Clock className="w-4 h-4 mr-2 text-cyan-400" />
-                  Deterministic Execution Journal (Today's Orders)
+                  Today's orders
                 </h3>
-                <span className="text-xs text-gray-400 font-mono">{orders.length} fills recorded</span>
+                <span className="text-xs text-gray-400 font-mono">{orders ? `${orders.length} recorded` : '—'}</span>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs text-left">
                   <thead className="bg-[#080d17] text-gray-400 uppercase tracking-wider font-mono text-[10px]">
                     <tr>
-                      <th className="py-2.5 px-3">Timestamp</th>
-                      <th className="py-2.5 px-3">Symbol</th>
-                      <th className="py-2.5 px-3">Side</th>
-                      <th className="py-2.5 px-3">Strategy / Regime</th>
-                      <th className="py-2.5 px-3 text-right">Shares</th>
-                      <th className="py-2.5 px-3 text-right">Execution Price</th>
-                      <th className="py-2.5 px-3 text-right">Notional Cost</th>
-                      <th className="py-2.5 px-3 text-right">Max Risk</th>
-                      <th className="py-2.5 px-3 text-center">Status</th>
+                      <th className="py-2 px-3">Time</th>
+                      <th className="py-2 px-3">Symbol</th>
+                      <th className="py-2 px-3">Side</th>
+                      <th className="py-2 px-3">Regime</th>
+                      <th className="py-2 px-3 text-right">Shares</th>
+                      <th className="py-2 px-3 text-right">Price</th>
+                      <th className="py-2 px-3 text-right">Notional</th>
+                      <th className="py-2 px-3 text-center">Status</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-800 font-mono">
-                    {orders.length === 0 ? (
+                    {orders === null ? (
                       <tr>
-                        <td colSpan={9} className="py-6 text-center text-gray-500 font-sans">
-                          No order fills recorded today.
+                        <td colSpan={8} className="py-6 text-center text-gray-500">
+                          Loading orders…
+                        </td>
+                      </tr>
+                    ) : orders.length === 0 ? (
+                      <tr>
+                        <td colSpan={8} className="py-6 text-center text-gray-500">
+                          No orders recorded today.
                         </td>
                       </tr>
                     ) : (
                       orders.map((o, idx) => (
-                        <tr key={idx} className="hover:bg-gray-800/30">
-                          <td className="py-2.5 px-3 text-gray-400">
-                            {new Date(o.timestamp).toLocaleTimeString()}
-                          </td>
-                          <td className="py-2.5 px-3 font-bold text-gray-100">{o.symbol}</td>
-                          <td className="py-2.5 px-3">
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                              o.side === 'BUY' 
-                                ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' 
-                                : 'bg-rose-950 text-rose-300 border border-rose-800'
-                            }`}>
+                        <tr key={`${o.timestamp}-${o.symbol}-${idx}`} className="hover:bg-gray-800/30">
+                          <td className="py-2 px-3 text-gray-400">{new Date(o.timestamp).toLocaleTimeString()}</td>
+                          <td className="py-2 px-3 font-bold text-gray-100">{o.symbol}</td>
+                          <td className="py-2 px-3">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                                o.side === 'BUY'
+                                  ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                                  : 'bg-rose-950 text-rose-300 border-rose-800'
+                              }`}
+                            >
                               {o.side}
                             </span>
                           </td>
-                          <td className="py-2.5 px-3 text-gray-300 text-[11px]">
-                            {o.regime || 'Deterministic Quant'}
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-gray-200">{o.quantity}</td>
-                          <td className="py-2.5 px-3 text-right">${o.price.toFixed(2)}</td>
-                          <td className="py-2.5 px-3 text-right font-semibold text-cyan-300">
-                            ${o.cost.toFixed(2)}
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-purple-300">
-                            ${(o.risk_notional || 4.50).toFixed(2)}
-                          </td>
-                          <td className="py-2.5 px-3 text-center">
+                          <td className="py-2 px-3 text-gray-300 text-[11px]">{o.regime || '—'}</td>
+                          <td className="py-2 px-3 text-right text-gray-200">{o.quantity}</td>
+                          <td className="py-2 px-3 text-right">{usd(o.price)}</td>
+                          <td className="py-2 px-3 text-right font-semibold text-cyan-300">{usd(o.cost)}</td>
+                          <td className="py-2 px-3 text-center">
                             <span className="inline-flex items-center text-[10px] text-emerald-400">
-                              <CheckCircle2 className="w-3 h-3 mr-1" /> {o.status}
+                              <CheckCircle2 className="w-3 h-3 mr-1" />
+                              {o.status}
                             </span>
                           </td>
                         </tr>
@@ -282,85 +300,22 @@ export function App() {
                   </tbody>
                 </table>
               </div>
-            </div>
+            </section>
           </div>
         )}
 
-        {/* Tab 2: High-Beta Positions & Guard */}
         {activeTab === 'positions' && (
-          <div className="space-y-6">
-            <EtfPositionTracker positions={positions} onRefresh={loadData} />
-            <div className="p-5 bg-[#0e1422] border border-gray-800 rounded-xl text-xs text-gray-300 space-y-3 font-mono">
-              <h4 className="font-semibold text-gray-100 flex items-center text-sm">
-                <ShieldCheck className="w-4 h-4 mr-2 text-cyan-400" />
-                Deterministic Risk Boundaries & Quantitative Rules
-              </h4>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-gray-400">
-                <div className="space-y-2 bg-[#090d16] p-3 rounded-lg border border-gray-800">
-                  <span className="font-bold text-cyan-300 block">Single-Ticker Exposure Cap (20% / $200.00):</span>
-                  <p>
-                    Regardless of signal conviction, no single instrument (SOXL, TQQQ, TNA) may exceed $200.00 notional at fill.
-                  </p>
-                </div>
-                <div className="space-y-2 bg-[#090d16] p-3 rounded-lg border border-gray-800">
-                  <span className="font-bold text-emerald-300 block">Dual-Tier Stop Discipline:</span>
-                  <p>
-                    Every entry places an immediate NATR hard stop (capped at 1.0% / $10 account loss) plus a dynamic ratcheting trailing stop.
-                  </p>
-                </div>
-                <div className="space-y-2 bg-[#090d16] p-3 rounded-lg border border-gray-800">
-                  <span className="font-bold text-amber-300 block">IRC §1091 Wash-Sale Auto-Pivot:</span>
-                  <p>
-                    Losses or existing swing trades automatically pivot orders to non-substantially identical pairs: SOXL → FNGU, TQQQ → CONL, TNA → DPST.
-                  </p>
-                </div>
-                <div className="space-y-2 bg-[#090d16] p-3 rounded-lg border border-gray-800">
-                  <span className="font-bold text-rose-300 block">15:55 EDT Mandatory Flat-to-Cash:</span>
-                  <p>
-                    5 minutes before 16:00 close, all open orders are canceled and active intraday positions liquidated at market.
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
+          <EtfPositionTracker env={env} onEnvChange={handleEnvChange} positions={positions} ledger={ledger} />
         )}
 
-        {/* Tab 3: Controls & AI */}
-        {activeTab === 'controls' && (
-          <div className="space-y-6">
-            <SchwabControls status={status} onRefresh={loadData} />
-          </div>
-        )}
-
-        {/* Tab 4: Ledger & GFV Prevention */}
         {activeTab === 'ledger' && (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-              <LedgerCard ledger={ledger} />
-              <MacroLiquidityCard macroState={macroState} onUploadComplete={loadData} />
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="p-4 bg-[#0e1422] border border-gray-800 rounded-xl">
-                <h4 className="font-semibold text-xs text-emerald-400 mb-1 font-mono">Bucket 1: Settled Funds ($720.00)</h4>
-                <p className="text-xs text-gray-400">
-                  Fully cleared cash available for immediate day-trading. Exclusively accessed by Tier 1 order router to guarantee zero Good Faith Violations.
-                </p>
-              </div>
-              <div className="p-4 bg-[#0e1422] border border-gray-800 rounded-xl">
-                <h4 className="font-semibold text-xs text-cyan-400 mb-1 font-mono">Bucket 2: Unsettled T+1 ($240.00)</h4>
-                <p className="text-xs text-gray-400">
-                  Proceeds from positions sold today. Under SEC T+1 rules, these clear automatically at 09:00 EDT the following trading morning.
-                </p>
-              </div>
-              <div className="p-4 bg-[#0e1422] border border-gray-800 rounded-xl">
-                <h4 className="font-semibold text-xs text-amber-400 mb-1 font-mono">Bucket 3: Pending ACH ($40.00)</h4>
-                <p className="text-xs text-gray-400">
-                  ACH bank transfer currently in flight. Excluded from active Quarter-Kelly sizing until confirmed settled by broker.
-                </p>
-              </div>
-            </div>
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+            <LedgerCard ledger={ledger} policy={policy} onPolicySaved={(saved) => { setPolicy(saved); void loadData(); }} />
+            <MacroLiquidityCard macroState={macroState} onUploadComplete={() => void loadData()} />
           </div>
         )}
+
+        {activeTab === 'controls' && <SchwabControls status={status} onRefresh={() => void loadData()} />}
       </div>
     </DashboardLayout>
   );

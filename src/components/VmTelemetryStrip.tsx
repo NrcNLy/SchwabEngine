@@ -3,45 +3,33 @@ import { Activity, Database, Wifi, Clock } from 'lucide-react';
 import { EngineStatus } from '../types';
 
 interface VmTelemetryStripProps {
-  status: EngineStatus;
+  status: EngineStatus | null;
 }
 
 export const VmTelemetryStrip: React.FC<VmTelemetryStripProps> = ({ status }) => {
-  const { vm_stats } = status;
+  const vm = status?.vm_stats;
+  if (!vm) return null;
 
-  if (!vm_stats) return null;
+  const ping = vm.api_ping_ms;
+  const pingTone = ping === null ? 'text-gray-500' : ping < 250 ? 'text-emerald-400' : 'text-amber-400';
 
   return (
-    <div className="bg-[#0b101c] border-b border-gray-800/80 px-4 sm:px-6 lg:px-8 py-1.5 flex flex-wrap items-center justify-between text-[10px] sm:text-xs font-mono text-gray-400">
-      <div className="flex items-center space-x-2">
-        <span className="text-gray-500 font-bold uppercase tracking-widest">VM Telemetry</span>
-        {status.engine_mode === 'SANDBOX_SIMULATION' && (
-          <span className="ml-2 px-1.5 py-0.5 bg-rose-950/40 text-rose-400 border border-rose-800/50 rounded font-bold tracking-widest uppercase">
-            SIMULATED / MOCK DATA
-          </span>
-        )}
+    <div className="bg-[#0b101c] border-b border-gray-800/80 px-3 sm:px-6 lg:px-8 py-1 flex items-center justify-end gap-4 text-[10px] font-mono text-gray-400">
+      <div className="flex items-center gap-1" title="CPU utilization">
+        <Activity className="w-3 h-3 text-cyan-400" />
+        <span className="text-gray-200">{vm.cpu_pct.toFixed(0)}%</span>
       </div>
-      
-      <div className="flex items-center space-x-4 sm:space-x-6">
-        <div className="flex items-center space-x-1.5" title="CPU Utilization">
-          <Activity className="w-3.5 h-3.5 text-cyan-400" />
-          <span className="text-gray-200">{vm_stats.cpu_pct.toFixed(1)}%</span>
-        </div>
-        
-        <div className="flex items-center space-x-1.5" title="Memory Allocation">
-          <Database className="w-3.5 h-3.5 text-purple-400" />
-          <span className="text-gray-200">{vm_stats.mem_pct.toFixed(1)}%</span>
-        </div>
-
-        <div className="flex items-center space-x-1.5" title="Schwab API Latency">
-          <Wifi className={`w-3.5 h-3.5 ${vm_stats.api_ping_ms < 50 ? 'text-emerald-400' : 'text-amber-400'}`} />
-          <span className="text-gray-200">{vm_stats.api_ping_ms}ms</span>
-        </div>
-
-        <div className="flex items-center space-x-1.5" title="Daemon Uptime">
-          <Clock className="w-3.5 h-3.5 text-gray-500" />
-          <span className="text-gray-300">{vm_stats.uptime_string}</span>
-        </div>
+      <div className="flex items-center gap-1" title="Memory utilization">
+        <Database className="w-3 h-3 text-purple-400" />
+        <span className="text-gray-200">{vm.mem_pct.toFixed(0)}%</span>
+      </div>
+      <div className="flex items-center gap-1" title="Schwab API latency (measured by the broker sync)">
+        <Wifi className={`w-3 h-3 ${pingTone}`} />
+        <span className="text-gray-200">{ping === null ? '—' : `${Math.round(ping)}ms`}</span>
+      </div>
+      <div className="flex items-center gap-1" title="Engine uptime">
+        <Clock className="w-3 h-3 text-gray-500" />
+        <span className="text-gray-300">{vm.uptime_string}</span>
       </div>
     </div>
   );

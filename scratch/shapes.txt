@@ -1,0 +1,261 @@
+﻿### /api/status?env=sandbox 200
+{
+ "status": "ONLINE",
+ "system_state": "SIMULATED",
+ "system_reasons": [
+  "Dry-run mode: nothing is sent to Schwab."
+ ],
+ "auth_status": "NOT_REQUIRED",
+ "auth_expires_in_s": null,
+ "env": "sandbox",
+ "data_source": "SANDBOX_SIM",
+ "engine_mode": "SANDBOX_SIMULATION",
+ "is_connected": true,
+ "uptime_seconds": 0,
+ "active_positions": 0,
+ "nlv": 1000.0,
+ "net_change_usd": null,
+ "net_change_pct": null,
+ "today_pnl": 0.0,
+ "today_realized_pnl": 0.0,
+ "unrealized_pnl": 0.0,
+ "circuit_breaker_limit": -30.0,
+ "circuit_breaker_triggered": false,
+ "external_positions_detected": false,
+ "timestamp_edt": "2026-10-04T17:03:43.387091-04:00",
+ "lifecycle_phase": "OFFLINE",
+ "vm_stats": {
+  "cpu_pct": 0.0,
+  "mem_pct": 58.3,
+  "api_ping_ms": null,
+  "uptime_string": "0d 0h 0m"
+ }
+}
+### /api/status?env=active 200
+{
+ "status": "ONLINE",
+ "system_state": "SIMULATED",
+ "system_reasons": [
+  "Dry-run mode: nothing is sent to Schwab."
+ ],
+ "auth_status": "NOT_REQUIRED",
+ "auth_expires_in_s": null,
+ "env": "active",
+ "data_source": "UNAVAILABLE",
+ "engine_mode": "SANDBOX_SIMULATION",
+ "is_connected": true,
+ "uptime_seconds": 0,
+ "active_positions": 0,
+ "nlv": null,
+ "net_change_usd": null,
+ "net_change_pct": null,
+ "today_pnl": 0.0,
+ "today_realized_pnl": 0.0,
+ "unrealized_pnl": 0.0,
+ "circuit_breaker_limit": 0.0,
+ "circuit_breaker_triggered": false,
+ "external_positions_detected": false,
+ "timestamp_edt": "2026-10-04T17:03:43.390801-04:00",
+ "lifecycle_phase": "OFFLINE",
+ "vm_stats": {
+  "cpu_pct": 0.0,
+  "mem_pct": 58.3,
+  "api_ping_ms": null,
+  "uptime_string": "0d 0h 0m"
+ }
+}
+### /api/ledger?env=sandbox 200
+{
+ "env": "sandbox",
+ "data_source": "SANDBOX_SIM",
+ "available": true,
+ "synced": false,
+ "synced_at": null,
+ "total_nlv": 1000.0,
+ "nlv": 1000.0,
+ "total_equity": 1000.0,
+ "bucket1_settled": 1000.0,
+ "bucket2_unsettled": 0.0,
+ "bucket3_pending": 0.0,
+ "swvxx_balance": 0.0,
+ "max_single_exposure": 200.0,
+ "max_order_value": 200.0,
+ "max_risk_per_trade": 10.0,
+ "daily_drawdown_limit": -30.0,
+ "quarter_kelly_size": 25.39,
+ "safe_daytrade_buying_power": 950.0,
+ "gfv_risk_flag": false,
+ "buying_power": {
+  "as_of": "2026-10-04",
+  "nlv": 1000.0,
+  "settled_cash": 1000.0,
+  "hard_reserve": 0.0,
+  "hard_reserve_unsettled_cash": 0.0,
+  "hard_reserve_swvxx_in_flight": 0.0,
+  "swvxx_balance": 0.0,
+  "pending_ach": 0.0,
+  "external_backstop": 0.0,
+  "soft_reserve_target": 100.0,
+  "soft_reserve_target_effective": 50.0,
+  "soft_reserve_current": 50.0,
+  "soft_reserve_shortfall": 0.0,
+  "inflow_offset": 50.0,
+  "next_inflow_date": "2026-10-09",
+  "next_inflow_settles": "2026-10-14",
+  "replenish_eta": null,
+  "base_float": 950.0,
+  "soft_draw_available": 25.0,
+  "high_probability": false,
+  "tactical_float": 950.0,
+  "single_ticker_cap": 200.0,
+  "max_order_notional": 200.0,
+  "sweep": {
+   "action": "SWEEP_IN",
+   "amount": 550.0,
+   "place_by": "2026-10-04",
+   "settles_on": "2026-10-05",
+   "mode": "ADVISORY",
+   "routed": false,
+   "rationale": "$550.00 of settled cash exceeds the trading float plus soft reserve. Move to SWVXX after the 15:50 flat; it is redeemable only after T+1."
+  }
+ }
+}
+### /api/ledger?env=active 200
+{
+ "env": "active",
+ "data_source": "UNAVAILABLE",
+ "available": false,
+ "synced": false,
+ "total_nlv": 0.0,
+ "nlv": 0.0,
+ "total_equity": 0.0,
+ "bucket1_settled": 0.0,
+ "bucket2_unsettled": 0.0,
+ "bucket3_pending": 0.0,
+ "max_single_exposure": 0.0,
+ "max_order_value": 0.0,
+ "max_risk_per_trade": 0.0,
+ "daily_drawdown_limit": 0.0,
+ "quarter_kelly_size": 0.0,
+ "safe_daytrade_buying_power": 0.0,
+ "gfv_risk_flag": false,
+ "swvxx_balance": 0.0,
+ "buying_power": null
+}
+### /api/positions/all?env=sandbox 200
+{
+ "env": "sandbox",
+ "data_source": "SANDBOX_SIM",
+ "managed": [],
+ "unmanaged": []
+}
+### /api/orders?env=sandbox 200
+[]
+### /api/v1/liquidity/policy 200
+{
+ "inflow": {
+  "enabled": true,
+  "amount": 250.0,
+  "weekday": "FRIDAY",
+  "lag_business_days": 3,
+  "confidence": 0.8,
+  "horizon_business_days": 5,
+  "offset_cap_fraction": 0.5
+ },
+ "soft_reserve": {
+  "pct_nlv": 0.1,
+  "floor_usd": 100.0,
+  "max_draw_fraction": 0.5,
+  "min_cash_buffer": 10.0
+ },
+ "sweep": {
+  "symbol": "SWVXX",
+  "mode": "ADVISORY",
+  "min_idle_usd": 250.0,
+  "trading_float_pct_nlv": 0.4,
+  "redemption_lead_business_days": 1
+ },
+ "risk_gate": {
+  "single_ticker_cap_pct": 0.2,
+  "high_prob_posterior_min": 0.55,
+  "high_prob_regime": "A"
+ }
+}
+### /api/v1/liquidity/buying-power?env=sandbox 200
+{
+ "env": "sandbox",
+ "available": true,
+ "data_source": "SANDBOX_SIM",
+ "buying_power": {
+  "as_of": "2026-10-04",
+  "nlv": 1000.0,
+  "settled_cash": 1000.0,
+  "hard_reserve": 0.0,
+  "hard_reserve_unsettled_cash": 0.0,
+  "hard_reserve_swvxx_in_flight": 0.0,
+  "swvxx_balance": 0.0,
+  "pending_ach": 0.0,
+  "external_backstop": 0.0,
+  "soft_reserve_target": 100.0,
+  "soft_reserve_target_effective": 50.0,
+  "soft_reserve_current": 50.0,
+  "soft_reserve_shortfall": 0.0,
+  "inflow_offset": 50.0,
+  "next_inflow_date": "2026-10-09",
+  "next_inflow_settles": "2026-10-14",
+  "replenish_eta": null,
+  "base_float": 950.0,
+  "soft_draw_available": 25.0,
+  "high_probability": false,
+  "tactical_float": 950.0,
+  "single_ticker_cap": 200.0,
+  "max_order_notional": 200.0,
+  "sweep": {
+   "action": "SWEEP_IN",
+   "amount": 550.0,
+   "place_by": "2026-10-04",
+   "settles_on": "2026-10-05",
+   "mode": "ADVISORY",
+   "routed": false,
+   "rationale": "$550.00 of settled cash exceeds the trading float plus soft reserve. Move to SWVXX after the 15:50 flat; it is redeemable only after T+1."
+  }
+ }
+}
+### /api/v1/regime/summary 200
+{
+ "headline": "Bullish bias | Breakout / trend setups favored | High volatility expected (~1.5x normal)",
+ "bias": "bullish",
+ "bias_label": "Bullish bias",
+ "regime": "A",
+ "regime_label": "Breakout / trend",
+ "regime_description": "Opening-range breakouts are favored.",
+ "volatility_label": "High volatility expected (~1.5x normal)",
+ "volatility_multiplier": 1.5,
+ "as_of": "2026-10-03T06:59:59.754185+00:00",
+ "age_hours": 38.1,
+ "stale": true,
+ "engine_regimes": [],
+ "advisory_note": "Advisory only: this view does not change position sizing or entry rules."
+}
+### /api/v1/liquidity/state 200
+{
+ "success": true,
+ "state": {
+  "timestamp": "2026-10-04",
+  "settled_cash": 1000.0,
+  "unsettled_cash": 0.0,
+  "external_liquid_backstop": 0.0,
+  "total_liquid_backstop": 1000.0,
+  "active_promotional_debt": 0.0,
+  "net_collateral_buffer": 1000.0,
+  "is_solvent": true
+ },
+ "promotional_debts": [],
+ "liquidity_targets": [],
+ "snapshot": null,
+ "external_liquid_backstop": 0.0,
+ "file_source": null,
+ "updated_at": null,
+ "sha256": null,
+ "_is_simulated": true
+}

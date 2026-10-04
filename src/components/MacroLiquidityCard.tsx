@@ -27,7 +27,7 @@ export const MacroLiquidityCard: React.FC<MacroLiquidityCardProps> = ({ macroSta
     );
   }
 
-  const { collateral_state, snapshot, liquidity_targets } = macroState;
+  const { state: collateral_state, snapshot, liquidity_targets } = macroState;
   const isSolvent = collateral_state.is_solvent;
   
   const totalDebt = collateral_state.active_promotional_debt;
