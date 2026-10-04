@@ -123,11 +123,21 @@ class GovernorDaemon:
             logger.error(f"Smoke test failed! Connection or authentication error: {exc}")
             sys.exit(1)
 
+    async def parse_document(self, doc_path: Path):
+        """Dispatches financial document parsing to DocumentParser."""
+        from services.document_parser import DocumentParser
+        logger.info(f"Governor triggering multimodal extraction for: {doc_path}")
+        parser = DocumentParser()
+        snapshot, is_dup = await parser.extract_credit_report(doc_path)
+        logger.info(f"Extraction completed. Bureau: {snapshot.bureau}, Discrepancies: {len(snapshot.detected_discrepancies)}, IsDuplicate: {is_dup}")
+        return snapshot
+
 def main():
     parser = argparse.ArgumentParser(description="Schwab Tier 2 Background Governor")
     parser.add_argument("--macro", action="store_true", help="Run pre-market macro ingestion")
     parser.add_argument("--reflect", action="store_true", help="Run post-market reflection")
     parser.add_argument("--test", action="store_true", help="Run dry-run Vertex AI smoke test")
+    parser.add_argument("--parse-doc", type=str, help="Path to credit or financial document to parse")
     args = parser.parse_args()
 
     daemon = GovernorDaemon()
@@ -136,10 +146,12 @@ def main():
         asyncio.run(daemon.run_smoke_test())
     elif args.macro:
         asyncio.run(daemon.pre_market_macro())
+    elif args.parse_doc:
+        asyncio.run(daemon.parse_document(Path(args.parse_doc)))
     elif args.reflect:
         logger.warning("Reflection not explicitly typed yet.")
     else:
-        logger.info("Governor Daemon initialized. Use --macro, --reflect, or --test flags to execute sequences.")
+        logger.info("Governor Daemon initialized. Use --macro, --reflect, --test, or --parse-doc flags to execute sequences.")
 
 if __name__ == "__main__":
     main()

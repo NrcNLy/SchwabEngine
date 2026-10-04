@@ -97,3 +97,61 @@ export interface MacroBlackout {
   event_time?: string;
 }
 
+export type BureauType = 'EXPERIAN' | 'TRANSUNION' | 'EQUIFAX';
+
+export interface Tradeline {
+  account_name: string;
+  masked_account_number: string;
+  credit_limit: number;
+  current_balance: number;
+  monthly_payment?: number;
+  date_opened?: string;
+  last_reported?: string;
+  is_promotional: boolean;
+  promotional_expiration?: string;
+}
+
+export interface CreditReportSnapshot {
+  bureau: BureauType;
+  report_date: string;
+  total_revolving_limit: number;
+  total_revolving_balance: number;
+  aggregate_utilization_pct: number;
+  hard_inquiries_count: number;
+  tradelines: Tradeline[];
+  detected_discrepancies: string[];
+}
+
+export interface PromotionalDebt {
+  id: string;
+  institution: string;
+  total_balance: number;
+  promotional_apr: number;
+  expiration_date: string;
+  minimum_monthly_payment: number;
+  days_remaining: number;
+  is_manual: boolean;
+  notes?: string;
+}
+
+export interface CollateralInvariantState {
+  timestamp: string;
+  settled_cash: number;
+  unsettled_cash: number;
+  external_liquid_backstop: number;
+  total_liquid_backstop: number;
+  active_promotional_debt: number;
+  net_collateral_buffer: number;
+  is_solvent: boolean;
+  risk_multiplier: number;
+}
+
+export interface MacroLiquidityStateResponse {
+  _updated_at: string;
+  file_source: string;
+  sha256: string;
+  credit_report?: CreditReportSnapshot;
+  collateral_state: CollateralInvariantState;
+  promotional_debts: PromotionalDebt[];
+  external_liquid_backstop: number;
+}

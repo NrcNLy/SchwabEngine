@@ -41,3 +41,7 @@ env/
 .vscode/
 *.swp
 *.swo
+
+# Local Data Vaults
+data/vault/documents/
+data/macro_liquidity.json.tmp

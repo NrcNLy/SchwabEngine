@@ -9,12 +9,13 @@ import {
   Clock,
   ShieldCheck
 } from 'lucide-react';
-import { EngineStatus, PositionsResponse, LedgerSnapshot, TradeOrder } from './types';
+import { EngineStatus, PositionsResponse, LedgerSnapshot, TradeOrder, MacroLiquidityStateResponse } from './types';
 import { 
   fetchStatus, 
   fetchAllPositions, 
   fetchLedger, 
   fetchOrders,
+  fetchMacroLiquidityState,
   MOCK_STATUS,
   MOCK_POSITIONS,
   MOCK_LEDGER,
@@ -26,6 +27,7 @@ import { EtfPositionTracker } from './components/EtfPositionTracker';
 import { LedgerCard } from './components/LedgerCard';
 import { LifecycleTracker } from './components/LifecycleTracker';
 import { LlmInsightConsole } from './components/LlmInsightConsole';
+import { MacroLiquidityCard } from './components/MacroLiquidityCard';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<'overview' | 'positions' | 'controls' | 'ledger'>('overview');
@@ -35,20 +37,23 @@ export function App() {
   const [positions, setPositions] = useState<PositionsResponse>(MOCK_POSITIONS);
   const [ledger, setLedger] = useState<LedgerSnapshot>(MOCK_LEDGER);
   const [orders, setOrders] = useState<TradeOrder[]>(MOCK_ORDERS);
+  const [macroState, setMacroState] = useState<MacroLiquidityStateResponse | null>(null);
 
   const loadData = useCallback(async () => {
     setIsRefreshing(true);
     try {
-      const [s, p, l, o] = await Promise.all([
+      const [s, p, l, o, m] = await Promise.all([
         fetchStatus(),
         fetchAllPositions(),
         fetchLedger(),
         fetchOrders(),
+        fetchMacroLiquidityState(),
       ]);
       setStatus(s);
       setPositions(p);
       setLedger(l);
       setOrders(o);
+      setMacroState(m);
     } catch (err) {
       console.error('Failed to update dashboard data', err);
     } finally {
@@ -200,9 +205,12 @@ export function App() {
               </div>
             </div>
 
-            <LlmInsightConsole status={status} />
+            <LlmInsightConsole status={status} macroState={macroState} />
 
-            <LedgerCard ledger={ledger} />
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              <LedgerCard ledger={ledger} />
+              <MacroLiquidityCard macroState={macroState} onUploadComplete={loadData} />
+            </div>
             <SchwabControls status={status} onRefresh={loadData} />
 
             {/* Execution Audit Log */}
@@ -327,7 +335,10 @@ export function App() {
         {/* Tab 4: Ledger & GFV Prevention */}
         {activeTab === 'ledger' && (
           <div className="space-y-6">
-            <LedgerCard ledger={ledger} />
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              <LedgerCard ledger={ledger} />
+              <MacroLiquidityCard macroState={macroState} onUploadComplete={loadData} />
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="p-4 bg-[#0e1422] border border-gray-800 rounded-xl">
                 <h4 className="font-semibold text-xs text-emerald-400 mb-1 font-mono">Bucket 1: Settled Funds ($720.00)</h4>

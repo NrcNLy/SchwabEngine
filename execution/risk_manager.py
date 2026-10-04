@@ -16,6 +16,12 @@ logger = logging.getLogger("risk_manager")
 class RiskEngine:
     def __init__(self):
         self._active_positions = {}
+        self.macro_risk_multiplier: float = 1.0
+
+    def update_macro_risk_multiplier(self, multiplier: float) -> None:
+        """Dynamically updates the macro liquidity risk multiplier (0.0 to 1.0)."""
+        self.macro_risk_multiplier = max(0.0, min(1.0, float(multiplier)))
+        logger.info(f"RiskEngine macro risk multiplier updated to: {self.macro_risk_multiplier:.4f}")
 
     def calculate_bayesian_kelly_sizing(self, wins: int, executions: int, payoff_ratio: float, account_base: float, prior_mean: float = 0.5) -> float:
         """
@@ -65,9 +71,18 @@ class RiskEngine:
         position_size = risk_capital / stop_distance
         return math.floor(position_size)
 
-    def determine_position_size(self, ticker: str, atr: float, account_base: float) -> int:
-        """High-level macro wrapper to determine live execution size."""
-        # Hardcoding mock historical performance data for the sandbox
+    def determine_position_size(
+        self, 
+        ticker: str, 
+        atr: float, 
+        account_base: float, 
+        risk_multiplier: float = None
+    ) -> int:
+        """
+        High-level macro wrapper to determine live execution size.
+        Applies macro risk_multiplier to total meta-order shares before
+        Almgren-Chriss trajectory slicing, returning 0 if total scaled shares < 1.
+        """
         wins = 45
         executions = 100
         payoff_ratio = 1.6 # 1.6 R-multiple
@@ -79,6 +94,20 @@ class RiskEngine:
             account_base=account_base
         )
         
-        shares = self._scale_inversely_to_atr(risk_capital, atr)
-        logger.info(f"[{ticker}] Bayesian Quarter-Kelly Risk Cap: ${risk_capital:.2f} | Target Shares (ATR {atr}): {shares}")
-        return shares
+        raw_shares = self._scale_inversely_to_atr(risk_capital, atr)
+        mult = self.macro_risk_multiplier if risk_multiplier is None else max(0.0, min(1.0, float(risk_multiplier)))
+        
+        scaled_shares = math.floor(raw_shares * mult)
+        
+        if scaled_shares < 1:
+            logger.warning(
+                f"[{ticker}] Sizing halted or below 1 share: Raw={raw_shares}, "
+                f"Macro Multiplier={mult:.4f} -> Final Target Shares: 0"
+            )
+            return 0
+
+        logger.info(
+            f"[{ticker}] Bayesian Quarter-Kelly Risk Cap: ${risk_capital:.2f} | "
+            f"Raw Shares: {raw_shares} | Multiplier: {mult:.4f} -> Final Target Shares: {scaled_shares}"
+        )
+        return scaled_shares

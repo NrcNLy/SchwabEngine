@@ -1,4 +1,4 @@
-import { EngineStatus, PositionsResponse, LedgerSnapshot, StrategyConfig, TradeOrder } from '../types';
+import { EngineStatus, PositionsResponse, LedgerSnapshot, StrategyConfig, TradeOrder, MacroLiquidityStateResponse } from '../types';
 
 // Deterministic Tier 1 engine configuration
 const ENGINE_BASE = import.meta.env.VITE_ENGINE_BASE_URL || '/api';
@@ -359,6 +359,70 @@ export async function setEmergencyHalt(halted: boolean): Promise<{ success: bool
       halted,
       message: halted ? 'Master Kill Switch ENGAGED. Tier 1 order router suspended.' : 'Trading engine RESUMED.',
     };
+  }
+}
+
+export async function fetchMacroLiquidityState(): Promise<MacroLiquidityStateResponse | null> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 1200);
+
+  try {
+    const res = await fetch(`${ENGINE_BASE}/v1/liquidity/state`, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (!res.ok) throw new Error('Daemon liquidity state non-200');
+    return await res.json();
+  } catch {
+    clearTimeout(timeoutId);
+    // Mock response for frontend development
+    return {
+      _updated_at: new Date().toISOString(),
+      file_source: "mock_state.json",
+      sha256: "mock_hash",
+      collateral_state: {
+        timestamp: new Date().toISOString().split('T')[0],
+        settled_cash: 720.00,
+        unsettled_cash: 240.00,
+        external_liquid_backstop: 5000.00,
+        total_liquid_backstop: 5960.00,
+        active_promotional_debt: 2500.00,
+        net_collateral_buffer: 3460.00,
+        is_solvent: true,
+        risk_multiplier: 1.0,
+      },
+      promotional_debts: [
+        {
+          id: "mock_debt_1",
+          institution: "Chase",
+          total_balance: 2500.00,
+          promotional_apr: 0.0,
+          expiration_date: new Date(Date.now() + 86400000 * 45).toISOString().split('T')[0],
+          minimum_monthly_payment: 35.00,
+          days_remaining: 45,
+          is_manual: false
+        }
+      ],
+      external_liquid_backstop: 5000.00
+    };
+  }
+}
+
+export async function uploadDocument(file: File, docType: string): Promise<{ success: boolean; message: string; data?: any }> {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('doc_type', docType);
+
+  try {
+    const res = await fetch(`${ENGINE_BASE}/v1/documents/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.detail || 'Upload failed');
+    }
+    return { success: true, message: 'Document uploaded successfully', data };
+  } catch (err: any) {
+    return { success: false, message: err.message || 'Error uploading document' };
   }
 }
 

@@ -18,6 +18,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.models import MarketEvent
+from core.liquidity_models import (
+    MacroLiquidityEvent, 
+    CollateralInvariantState, 
+    CreditReportSnapshot, 
+    PromotionalDebt
+)
 from core.ledger import SettlementLedger
 from execution.risk_manager import RiskEngine
 from execution.router import ExecutionRouter
@@ -25,6 +31,9 @@ from governor import GovernorDaemon
 
 from core.streamer import SchwabStreamer
 from execution.order_client import SchwabOrderClient
+from datetime import datetime
+import json
+from typing import Any
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")
 logger = logging.getLogger("main_eda")
@@ -37,7 +46,7 @@ class EventBus:
     def subscribe(self, callback):
         self._subscribers.append(callback)
 
-    async def publish(self, event: MarketEvent):
+    async def publish(self, event: Any):
         await self._queue.put(event)
 
     async def _dispatch_loop(self):
@@ -57,7 +66,22 @@ class TradingSystem:
         self.governor = GovernorDaemon()
 
         # Wire up the consumer to the event bus
-        self.bus.subscribe(self.handle_market_event)
+        self.bus.subscribe(self.route_event)
+
+    async def route_event(self, event: Any):
+        """Dispatches typed events to specialized handlers."""
+        if isinstance(event, MarketEvent):
+            await self.handle_market_event(event)
+        elif isinstance(event, MacroLiquidityEvent):
+            await self.handle_liquidity_event(event)
+
+    async def handle_liquidity_event(self, event: MacroLiquidityEvent):
+        """Refreshes risk manager constraints dynamically when macro liquidity updates."""
+        logger.info(
+            f"MacroLiquidityEvent Processed -> Net Collateral Buffer: ${event.state.net_collateral_buffer:.2f}, "
+            f"Risk Multiplier: {event.state.risk_multiplier:.4f}, Solvent: {event.state.is_solvent}"
+        )
+        self.risk_engine.update_macro_risk_multiplier(event.state.risk_multiplier)
 
     async def handle_market_event(self, event: MarketEvent):
         """Asynchronous Consumer: Processes the Pydantic strictly typed event."""
@@ -83,6 +107,33 @@ class TradingSystem:
             # 4. Almgren-Chriss Execution
             await self.router.execute_almgren_chriss_trajectory(event.ticker, target_shares, side="BUY")
 
+async def macro_liquidity_poller(bus: EventBus, poll_interval: float = 2.0):
+    """Watches data/macro_liquidity.json for changes and publishes MacroLiquidityEvent."""
+    state_file = Path("data/macro_liquidity.json")
+    last_mtime = 0.0
+    while True:
+        try:
+            if state_file.exists():
+                mtime = state_file.stat().st_mtime
+                if mtime > last_mtime:
+                    last_mtime = mtime
+                    data = json.loads(state_file.read_text())
+                    if "collateral_state" in data:
+                        state = CollateralInvariantState(**data["collateral_state"])
+                        snapshot = CreditReportSnapshot(**data["credit_report"]) if data.get("credit_report") else None
+                        promos = [PromotionalDebt(**d) for d in data.get("promotional_debts", [])]
+                        evt = MacroLiquidityEvent(
+                            timestamp=datetime.utcnow().isoformat() + "Z",
+                            state=state,
+                            snapshot=snapshot,
+                            promotional_debts=promos
+                        )
+                        logger.info("Macro liquidity file update detected. Publishing MacroLiquidityEvent to bus.")
+                        await bus.publish(evt)
+        except Exception as e:
+            logger.warning(f"Error in macro liquidity poller: {e}")
+        await asyncio.sleep(poll_interval)
+
 async def main_loop():
     logger.info("Booting SchwabEngine Event-Driven Architecture (EDA)...")
     
@@ -96,6 +147,9 @@ async def main_loop():
     
     # Start the event dispatcher in the background
     dispatcher_task = asyncio.create_task(bus._dispatch_loop())
+    
+    # Start the macro liquidity poller in the background
+    liquidity_task = asyncio.create_task(macro_liquidity_poller(bus))
     
     # Instantiate the Charles Schwab WebSocket Streamer
     # auth_manager can be injected here for actual OAuth fetching
@@ -114,6 +168,7 @@ async def main_loop():
     
     # Cleanup
     dispatcher_task.cancel()
+    liquidity_task.cancel()
 
 if __name__ == "__main__":
     try:

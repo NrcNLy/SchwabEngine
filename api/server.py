@@ -44,6 +44,14 @@ from typing import Any, Dict, List, Optional
 import pytz
 
 from pydantic import BaseModel
+try:
+    from fastapi import (
+        FastAPI, HTTPException, WebSocket, WebSocketDisconnect,
+        UploadFile, File, Form, BackgroundTasks
+    )
+    from fastapi.middleware.cors import CORSMiddleware
+except ImportError:
+    FastAPI = None
 
 logger = logging.getLogger(__name__)
 _EDT = pytz.timezone("America/New_York")
@@ -65,6 +73,15 @@ class AuthExchangeRequest(BaseModel):
 class HaltRequest(BaseModel):
     halted: bool
 
+class PromotionalDebtRequest(BaseModel):
+    id: str
+    institution: str
+    total_balance: float
+    promotional_apr: float = 0.0
+    expiration_date: str
+    minimum_monthly_payment: float = 0.0
+    notes: Optional[str] = None
+
 
 def build_app(ctx: "EngineContext"):
     """
@@ -76,11 +93,7 @@ def build_app(ctx: "EngineContext"):
     Returns:
         A configured FastAPI application instance.
     """
-    try:
-        from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-        from fastapi.middleware.cors import CORSMiddleware
-        from pydantic import BaseModel
-    except ImportError:
+    if FastAPI is None:
         logger.error(
             "api/server.py: FastAPI/uvicorn not installed. "
             "Run: pip install fastapi uvicorn"
@@ -410,6 +423,157 @@ def build_app(ctx: "EngineContext"):
             "message": "15:55 Flat-to-Cash Sweep executed. All open orders cancelled; 3 positions liquidated at market into Bucket 2.",
             "liquidated_count": count
         }
+
+    # -----------------------------------------------------------------
+    # Macro Liquidity & Document Ingestion Endpoints (Phase 2)
+    # -----------------------------------------------------------------
+
+    DOCUMENTS_VAULT_DIR = Path("data/vault/documents")
+    DOCUMENTS_VAULT_DIR.mkdir(parents=True, exist_ok=True)
+
+    async def _process_document_background(file_path: Path):
+        """Asynchronous background task to extract credit snapshot without blocking Tier 1."""
+        try:
+            from services.document_parser import DocumentParser
+            parser = DocumentParser()
+            snapshot, is_dup = await parser.extract_credit_report(file_path)
+            logger.info(f"Background extraction of {file_path.name} finished. Snapshot bureau: {snapshot.bureau}")
+        except Exception as exc:
+            logger.error(f"Background extraction of {file_path.name} encountered error: {exc}")
+
+    @app.post("/api/v1/documents/upload")
+    async def upload_document(
+        background_tasks: BackgroundTasks,
+        file: UploadFile = File(...),
+        doc_type: str = Form("CREDIT_REPORT")
+    ):
+        """
+        Accepts financial document uploads (credit disclosures, statements),
+        persists them to the restricted vault storage, and enqueues async extraction.
+        """
+        if doc_type not in ["CREDIT_REPORT", "BANK_STATEMENT"]:
+            raise HTTPException(status_code=400, detail="Invalid doc_type. Must be CREDIT_REPORT or BANK_STATEMENT.")
+
+        safe_filename = "".join(c for c in file.filename if c.isalnum() or c in "._- ")
+        timestamp_str = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        dest_filename = f"{doc_type}_{timestamp_str}_{safe_filename}"
+        dest_path = DOCUMENTS_VAULT_DIR / dest_filename
+
+        contents = await file.read()
+        dest_path.write_bytes(contents)
+        logger.info(f"Stored uploaded document to {dest_path} ({len(contents)} bytes). Dispatching Tier 2 background extraction.")
+
+        background_tasks.add_task(_process_document_background, dest_path)
+
+        return {
+            "success": True,
+            "filename": safe_filename,
+            "doc_type": doc_type,
+            "saved_as": dest_filename,
+            "path": str(dest_path),
+            "status": "QUEUED"
+        }
+
+    @app.get("/api/v1/liquidity/state")
+    async def get_liquidity_state():
+        """
+        Returns the current CollateralInvariantState, promotional debts,
+        and latest credit report snapshot.
+        """
+        state_file = Path("data/macro_liquidity.json")
+        if state_file.exists():
+            try:
+                data = json.loads(state_file.read_text())
+                return {
+                    "success": True,
+                    "state": data.get("collateral_state"),
+                    "promotional_debts": data.get("promotional_debts", []),
+                    "credit_report": data.get("credit_report"),
+                    "external_liquid_backstop": data.get("external_liquid_backstop", 0.0),
+                    "file_source": data.get("file_source"),
+                    "updated_at": data.get("_updated_at")
+                }
+            except Exception as exc:
+                logger.warning(f"Error reading {state_file}: {exc}")
+
+        from core.collateral_engine import CollateralEngine
+        from decimal import Decimal
+        engine = CollateralEngine()
+        settled = float(ctx.ledger.bucket1_settled) if ctx.ledger else 720.00
+        unsettled = float(ctx.ledger.bucket2_unsettled) if ctx.ledger else 240.00
+        st = engine.evaluate_invariant(Decimal(str(settled)), Decimal(str(unsettled)))
+        return {
+            "success": True,
+            "state": st.model_dump(),
+            "promotional_debts": [],
+            "credit_report": None,
+            "external_liquid_backstop": 0.0,
+            "file_source": "DEFAULT_SANDBOX",
+            "updated_at": datetime.utcnow().isoformat() + "Z"
+        }
+
+    @app.get("/api/v1/liquidity/credit-report")
+    async def get_credit_report():
+        """Returns the latest CreditReportSnapshot."""
+        state_file = Path("data/macro_liquidity.json")
+        if state_file.exists():
+            try:
+                data = json.loads(state_file.read_text())
+                if "credit_report" in data and data["credit_report"]:
+                    return {"success": True, "credit_report": data["credit_report"]}
+            except Exception as exc:
+                logger.warning(f"Error reading credit report from {state_file}: {exc}")
+        return {"success": False, "message": "No credit report snapshot currently loaded."}
+
+    @app.post("/api/v1/liquidity/promotional-debt")
+    async def add_or_update_promotional_debt(req: PromotionalDebtRequest):
+        """Allows manual entry or editing of promotional debt terms (0% APR expiration)."""
+        from core.liquidity_models import PromotionalDebt
+        from core.collateral_engine import CollateralEngine
+        from services.document_parser import DocumentParser
+        from decimal import Decimal
+
+        parser = DocumentParser()
+        collateral_engine = CollateralEngine()
+
+        state_file = Path("data/macro_liquidity.json")
+        curr_data = {}
+        if state_file.exists():
+            try:
+                curr_data = json.loads(state_file.read_text())
+                if "promotional_debts" in curr_data:
+                    for d in curr_data["promotional_debts"]:
+                        collateral_engine.add_or_update_promotional_debt(PromotionalDebt(**d))
+                if "external_liquid_backstop" in curr_data:
+                    collateral_engine.external_liquid_backstop = Decimal(str(curr_data["external_liquid_backstop"]))
+            except Exception as e:
+                logger.warning(f"Error loading existing state: {e}")
+
+        new_debt = PromotionalDebt(
+            id=req.id,
+            institution=req.institution,
+            total_balance=Decimal(str(req.total_balance)),
+            promotional_apr=Decimal(str(req.promotional_apr)),
+            expiration_date=datetime.strptime(req.expiration_date, "%Y-%m-%d").date(),
+            minimum_monthly_payment=Decimal(str(req.minimum_monthly_payment)),
+            is_manual=True,
+            notes=req.notes
+        )
+        collateral_engine.add_or_update_promotional_debt(new_debt)
+
+        settled = Decimal(str(ctx.ledger.bucket1_settled if ctx.ledger else 720.00))
+        unsettled = Decimal(str(ctx.ledger.bucket2_unsettled if ctx.ledger else 240.00))
+        new_state = collateral_engine.evaluate_invariant(settled, unsettled)
+
+        curr_data.update({
+            "_updated_at": datetime.utcnow().isoformat() + "Z",
+            "collateral_state": new_state.model_dump(),
+            "promotional_debts": [d.model_dump() for d in collateral_engine.promotional_debts.values()],
+            "external_liquid_backstop": float(collateral_engine.external_liquid_backstop)
+        })
+        parser._atomic_write_state(curr_data)
+
+        return {"success": True, "promotional_debt": new_debt.model_dump(), "new_state": new_state.model_dump()}
 
     @app.websocket("/stream")
     async def websocket_stream(ws: WebSocket):
