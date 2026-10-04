@@ -45,3 +45,10 @@ env/
 # Local Data Vaults
 data/vault/documents/
 data/macro_liquidity.json.tmp
+data/liquidity_policy.json
+data/nlv_anchor_*.json
+data/vault/
+data/*.tmp
+data/*.json.*.tmp
+scratch/sample_data/
+state/

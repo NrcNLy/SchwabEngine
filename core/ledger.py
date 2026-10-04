@@ -25,7 +25,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import pytz
 
@@ -130,6 +130,7 @@ class SettlementLedger:
         self.synced: bool = False
         self.synced_at: Optional[datetime] = None
         self.drift: Decimal = ZERO
+        self._ceiling_provider: Optional[Callable[[], Optional[Decimal]]] = None
 
     # ------------------------------------------------------------------
     # Read-only views
@@ -220,8 +221,16 @@ class SettlementLedger:
     # Capital allocation (settled-only: invariant I1)
     # ------------------------------------------------------------------
 
+    def set_order_ceiling_provider(self, provider: Optional[Callable[[], Optional[Decimal]]]) -> None:
+        """
+        Registers a callable returning the current policy-derived maximum order
+        notional (or None for no extra ceiling). Evaluated on every pre-trade check
+        so the soft-reserve policy is enforced for StrategyEngine entries as well.
+        """
+        self._ceiling_provider = provider
+
     def check_order_allowed(self, order_cost) -> Tuple[bool, str]:
-        """Pre-trade gate used by StrategyEngine. Settled cash + 20% NLV cap."""
+        """Pre-trade gate used by StrategyEngine. Settled cash + 20% NLV cap + policy ceiling."""
         cost = _d(order_cost)
         with self._lock:
             if cost <= 0:
@@ -232,7 +241,16 @@ class SettlementLedger:
             cap = self.max_single_exposure
             if cap > 0 and cost > cap:
                 return False, f"cost ${cost:.2f} exceeds single-ticker cap ${cap:.2f} (20% NLV)"
-            return True, "ok"
+            provider = self._ceiling_provider
+        if provider is not None:
+            try:
+                ceiling = provider()
+            except Exception as exc:
+                logger.error("Order ceiling provider failed (%s); refusing order.", exc)
+                return False, "order ceiling unavailable"
+            if ceiling is not None and cost > ceiling:
+                return False, f"cost ${cost:.2f} exceeds policy buying power ${ceiling:.2f}"
+        return True, "ok"
 
     def allocate_capital(self, ticker: str, amount) -> bool:
         """Reserves settled cash for an entry. Never touches Bucket 2."""

@@ -1,8 +1,8 @@
 # Schwab Day-Trading Engine - Python Dependencies
-# Phase 1: Core dependencies
 
 # HTTP / REST
 requests>=2.32.3
+httpx>=0.27.0
 
 # Cryptography (AES-GCM-256 + PBKDF2HMAC for Security Vault)
 cryptography>=43.0.0
@@ -12,19 +12,19 @@ pytz>=2024.2
 
 # Configuration management
 pyyaml>=6.0.2
+python-dotenv>=1.0.1
 
 # WebSocket streaming (Level 1 Schwab streamer)
 websockets>=13.1
 
-# Vector store for LLM semantic caching (Part 4)
-chromadb>=0.5.15
-
-# Gemini LLM Gatekeeper
-google-genai>=0.8.0
+# Gemini LLM (Vertex AI) for the Tier 2 governor and document parser
+google-genai>=1.0.0
 
 # Structured schema / type validation
 pydantic>=2.9.2
 
-# Embedding function for ChromaDB
-sentence-transformers
-
+# API server + dashboard hosting
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-multipart>=0.0.9
+psutil>=5.9.0

@@ -7,6 +7,7 @@ to auto-classify and extract UnifiedDocumentSnapshot records.
 """
 
 import os
+import asyncio
 import json
 import time
 import hashlib
@@ -14,7 +15,7 @@ import logging
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 try:
     from google import genai
@@ -29,9 +30,12 @@ from core.liquidity_models import (
     UnifiedDocumentSnapshot,
     PromotionalDebt,
     CollateralInvariantState,
-    LiquidityTarget
+    LiquidityTarget,
+    extract_snapshot,
 )
 from core.collateral_engine import CollateralEngine
+from core.atomic_io import atomic_write_json, read_json, update_json
+from core.paths import PROCESSED_HASHES_FILE, STATE_DIR
 
 logger = logging.getLogger("document_parser")
 
@@ -49,26 +53,42 @@ class DecimalEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
+class DocumentExtractionError(RuntimeError):
+    """Raised when a document cannot be extracted and no fabricated fallback is permitted."""
+
+
 class DocumentParser:
-    def __init__(self, output_dir: Optional[Path] = None):
-        self.output_dir = output_dir or Path("data")
+    def __init__(
+        self,
+        output_dir: Optional[Path] = None,
+        cash_provider: Optional[Callable[[], Tuple[Decimal, Decimal]]] = None,
+    ):
+        """
+        cash_provider: returns (settled_cash, unsettled_cash) from the live ledger, used only to
+        evaluate the Net Collateral Buffer. Without one, balances default to zero.
+        """
+        self.output_dir = output_dir or STATE_DIR
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.output_dir / "macro_liquidity.json"
-        self.hashes_file = Path("data/vault/documents/processed_hashes.json")
+        self.hashes_file = PROCESSED_HASHES_FILE
         self.hashes_file.parent.mkdir(parents=True, exist_ok=True)
+        self.cash_provider = cash_provider
+        # The deterministic sample parser returns invented tradelines. It is only ever
+        # used when explicitly enabled (local development); never silently.
+        self.allow_sample_fallback = os.environ.get("DOC_PARSER_SAMPLE_FALLBACK", "") == "1"
 
         self.client = None
         if genai:
             try:
-                # Configure google-genai client with 120s timeout
+                # Configure google-genai client with 120s timeout (HttpOptions.timeout is in milliseconds)
                 self.client = genai.Client(
                     vertexai=True,
                     project=PROJECT_ID,
                     location=LOCATION,
-                    http_options={"api_version": "v1", "timeout": 120.0}
+                    http_options={"api_version": "v1", "timeout": 120_000}
                 )
             except Exception as e:
-                logger.warning(f"Could not initialize Vertex AI genai Client: {e}. Will use fallback parser if needed.")
+                logger.warning(f"Could not initialize Vertex AI genai Client: {e}.")
 
     def compute_sha256(self, file_bytes: bytes) -> str:
         """Computes the SHA-256 hash of file bytes for duplicate detection."""
@@ -76,58 +96,28 @@ class DocumentParser:
 
     def is_duplicate(self, file_hash: str) -> bool:
         """Checks if file hash has already been processed."""
-        if not self.hashes_file.exists():
-            return False
-        try:
-            with open(self.hashes_file, "r") as f:
-                hashes = json.load(f)
-            return file_hash in hashes
-        except Exception:
-            return False
+        hashes = read_json(self.hashes_file, default={})
+        return isinstance(hashes, dict) and file_hash in hashes
 
     def record_processed_hash(self, file_hash: str, filename: str) -> None:
         """Records processed hash to prevent duplicate AI extraction cost."""
-        hashes = {}
-        if self.hashes_file.exists():
-            try:
-                with open(self.hashes_file, "r") as f:
-                    hashes = json.load(f)
-            except Exception:
-                hashes = {}
-        hashes[file_hash] = {
-            "filename": filename,
-            "processed_at": datetime.utcnow().isoformat() + "Z"
-        }
+        def mutate(doc: dict) -> None:
+            doc[file_hash] = {
+                "filename": filename,
+                "processed_at": datetime.utcnow().isoformat() + "Z",
+            }
         try:
-            with open(self.hashes_file, "w") as f:
-                json.dump(hashes, f, indent=2)
+            update_json(self.hashes_file, mutate, default={})
         except Exception as e:
             logger.error(f"Failed to record processed hash: {e}")
 
     def _atomic_write_state(self, state_data: dict, max_retries: int = 5, retry_delay: float = 0.15) -> None:
         """
-        Atomically saves state data to data/macro_liquidity.json.tmp and swaps to data/macro_liquidity.json.
+        Atomically saves state data to state/macro_liquidity.json (temp file + fsync + os.replace,
+        retrying on Windows WinError 32 file locks) via core.atomic_io.
         """
-        tmp_file = self.state_file.with_suffix(".json.tmp")
-        payload = json.dumps(state_data, indent=2, cls=DecimalEncoder)
-
-        with open(tmp_file, "w") as f:
-            f.write(payload)
-            f.flush()
-            os.fsync(f.fileno())
-
-        for attempt in range(max_retries):
-            try:
-                os.replace(tmp_file, self.state_file)
-                logger.info(f"State atomically updated to {self.state_file}")
-                return
-            except PermissionError as pe:
-                if attempt < max_retries - 1:
-                    logger.warning(f"WinError 32 file lock on {self.state_file}. Retry {attempt+1}/{max_retries} in {retry_delay}s...")
-                    time.sleep(retry_delay * (attempt + 1))
-                else:
-                    logger.error(f"Failed to swap {tmp_file} to {self.state_file} after {max_retries} retries: {pe}")
-                    raise
+        atomic_write_json(self.state_file, state_data, max_retries=max_retries, retry_delay=retry_delay)
+        logger.info(f"State atomically updated to {self.state_file}")
 
     def parse_with_fallback(self, file_bytes: bytes, filename: str) -> UnifiedDocumentSnapshot:
         """
@@ -176,19 +166,18 @@ class DocumentParser:
 
         if not force and self.is_duplicate(file_hash):
             logger.info(f"Duplicate file detected (SHA-256: {file_hash[:12]}...). Skipping re-extraction.")
-            if self.state_file.exists():
+            stored = read_json(self.state_file, default=None)
+            if isinstance(stored, dict):
                 try:
-                    data = json.loads(self.state_file.read_text())
-                    if "snapshot" in data:
-                        return UnifiedDocumentSnapshot(**data["snapshot"]), True
-                    # fallback for legacy shape
-                    elif "credit_report" in data:
-                         # basic conversion logic omitted for brevity
-                         pass
-                except Exception:
-                    pass
+                    existing = extract_snapshot(stored)
+                except Exception as exc:
+                    logger.warning(f"Stored snapshot unreadable ({exc}); re-extracting.")
+                    existing = None
+                if existing is not None:
+                    return existing, True
 
         snapshot = None
+        extraction_error: Optional[Exception] = None
         if self.client:
             prompt = (
                 "You are an institutional financial document analysis system. "
@@ -220,49 +209,58 @@ class DocumentParser:
                 parsed_json = json.loads(response.text)
                 snapshot = UnifiedDocumentSnapshot(**parsed_json)
             except Exception as e:
-                logger.error(f"Vertex AI extraction failed: {e}. Falling back to deterministic parser.")
+                logger.error(f"Vertex AI extraction failed: {e}")
+                extraction_error = e
 
         if snapshot is None:
+            if not self.allow_sample_fallback:
+                reason = extraction_error or "Vertex AI client is not configured"
+                raise DocumentExtractionError(f"Could not extract '{file_path.name}': {reason}")
+            logger.warning("DOC_PARSER_SAMPLE_FALLBACK=1: persisting SAMPLE data (not from the document).")
             snapshot = self.parse_with_fallback(file_bytes, file_path.name)
 
-        self.record_processed_hash(file_hash, file_path.name)
-
-        # Load existing state to preserve manual promotional debts, backstops, and liquidity targets
-        collateral_engine = CollateralEngine()
-        liquidity_targets = []
-        if self.state_file.exists():
+        settled_cash, unsettled_cash = Decimal("0"), Decimal("0")
+        if self.cash_provider is not None:
             try:
-                curr = json.loads(self.state_file.read_text())
-                if "promotional_debts" in curr:
-                    for d_dict in curr["promotional_debts"]:
-                        d = PromotionalDebt(**d_dict)
-                        collateral_engine.add_or_update_promotional_debt(d)
-                if "external_liquid_backstop" in curr:
-                    collateral_engine.external_liquid_backstop = Decimal(str(curr["external_liquid_backstop"]))
-                if "liquidity_targets" in curr:
-                    liquidity_targets = [LiquidityTarget(**lt) for lt in curr["liquidity_targets"]]
+                settled_cash, unsettled_cash = self.cash_provider()
             except Exception as e:
-                logger.warning(f"Failed to read existing state for merging: {e}")
+                logger.warning(f"Cash provider failed ({e}); evaluating collateral buffer with zero cash.")
 
-        # Merge new snapshot
-        collateral_engine.merge_document_snapshot(snapshot)
+        def merge_and_persist() -> None:
+            self.record_processed_hash(file_hash, file_path.name)
 
-        state = collateral_engine.evaluate_invariant(
-            settled_cash=Decimal("720.00"),
-            unsettled_cash=Decimal("240.00")
-        )
+            def mutate(curr: dict) -> None:
+                # Preserve manual promotional debts, backstops, and liquidity targets
+                collateral_engine = CollateralEngine()
+                liquidity_targets = []
+                try:
+                    for d_dict in curr.get("promotional_debts", []):
+                        collateral_engine.add_or_update_promotional_debt(PromotionalDebt(**d_dict))
+                    if "external_liquid_backstop" in curr:
+                        collateral_engine.external_liquid_backstop = Decimal(str(curr["external_liquid_backstop"]))
+                    liquidity_targets = [LiquidityTarget(**lt) for lt in curr.get("liquidity_targets", [])]
+                except Exception as e:
+                    logger.warning(f"Failed to read existing state for merging: {e}")
 
-        output_payload = {
-            "_updated_at": datetime.utcnow().isoformat() + "Z",
-            "file_source": file_path.name,
-            "sha256": file_hash,
-            "snapshot": snapshot.model_dump(),
-            "collateral_state": state.model_dump(),
-            "promotional_debts": [d.model_dump() for d in collateral_engine.promotional_debts.values()],
-            "liquidity_targets": [lt.model_dump() for lt in liquidity_targets],
-            "external_liquid_backstop": float(collateral_engine.external_liquid_backstop)
-        }
-        self._atomic_write_state(output_payload)
+                collateral_engine.merge_document_snapshot(snapshot)
+                state = collateral_engine.evaluate_invariant(
+                    settled_cash=Decimal(str(settled_cash)),
+                    unsettled_cash=Decimal(str(unsettled_cash)),
+                )
+                curr.update({
+                    "_updated_at": datetime.utcnow().isoformat() + "Z",
+                    "file_source": file_path.name,
+                    "sha256": file_hash,
+                    "snapshot": snapshot.model_dump(),
+                    "collateral_state": state.model_dump(),
+                    "promotional_debts": [d.model_dump() for d in collateral_engine.promotional_debts.values()],
+                    "liquidity_targets": [lt.model_dump() for lt in liquidity_targets],
+                    "external_liquid_backstop": float(collateral_engine.external_liquid_backstop),
+                })
 
+            update_json(self.state_file, mutate, default={})
+            logger.info(f"State atomically updated to {self.state_file}")
+
+        await asyncio.to_thread(merge_and_persist)
         return snapshot, False
 

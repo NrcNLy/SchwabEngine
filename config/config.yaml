@@ -314,9 +314,9 @@ research:
 # ---------------------------------------------------------------------------
 # API Server (FastAPI — Android dashboard backend)
 # ---------------------------------------------------------------------------
-api:
+server:
   enabled: true
   host: "0.0.0.0"
   port: 8080
-  # Schwab OAuth callback URL — must match the registered app exactly (no port)
-  callback_url: "https://127.0.0.1"
+  # Directory of the built dashboard (vite build) served by the API process
+  static_dir: "dist"

@@ -1,20 +1,20 @@
-﻿#!/bin/bash
-set -e
-pip install fastapi uvicorn --quiet -q
+#!/bin/bash
+# Runs ON the VM. Pulls the repository and redeploys the whole tree
+# (main.py, governor.py, core/, services/, execution/, api/, config/, src/ -> dist/ via the image build).
+#
+#   bash deploy.sh                          # dry-run engine
+#   ENGINE_FLAGS="--live" bash deploy.sh    # live trading
+#
+# Untracked host files (schwab_tokens_vault.json, .env, ~/schwab_state) are never touched by the pull.
+set -euo pipefail
 
-docker cp ~/schwab_engine/core/auth.py schwab_engine_container:/app/core/auth.py
-docker cp ~/schwab_engine/config/config.yaml schwab_engine_container:/app/config/config.yaml
+cd ~/schwab_engine
 
-docker exec schwab_engine_container mkdir -p /app/news /app/portfolio /app/reconciliation /app/research /app/api
+if [ -d .git ]; then
+    echo "Pulling latest from origin..."
+    git pull --ff-only
+else
+    echo "No .git directory here; deploying the files already on disk (use deploy.ps1 from your PC to upload)."
+fi
 
-docker cp ~/schwab_engine/news/ schwab_engine_container:/app/
-docker cp ~/schwab_engine/portfolio/ schwab_engine_container:/app/
-docker cp ~/schwab_engine/reconciliation/ schwab_engine_container:/app/
-docker cp ~/schwab_engine/research/ schwab_engine_container:/app/
-docker cp ~/schwab_engine/api/ schwab_engine_container:/app/
-
-docker restart schwab_engine_container
-sleep 7
-docker logs --tail 25 schwab_engine_container
-echo "=== MEM ==="
-free -m
+bash remote_deploy.sh

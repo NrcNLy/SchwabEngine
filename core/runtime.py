@@ -13,14 +13,24 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 import pytz
 import yaml
 
+from core.atomic_io import read_json
+from core.paths import ANCHOR_ACTIVE_FILE, ANCHOR_SANDBOX_FILE, MACRO_STATE_FILE
 from core.ledger import SettlementLedger
-from core.liquidity_policy import LiquidityPolicy, is_business_day, load_policy
+from core.liquidity_policy import (
+    ZERO,
+    BuyingPowerBreakdown,
+    LiquidityPolicy,
+    compute_buying_power,
+    is_business_day,
+    load_policy,
+)
 from core.nlv_anchor import NlvAnchor
 
 logger = logging.getLogger("runtime")
@@ -116,8 +126,8 @@ class EngineContext:
 
         self.ledgers: Dict[str, Optional[SettlementLedger]] = {"active": None, "sandbox": None}
         self.anchors: Dict[str, NlvAnchor] = {
-            "active": NlvAnchor("data/nlv_anchor_active.json"),
-            "sandbox": NlvAnchor("data/nlv_anchor_sandbox.json"),
+            "active": NlvAnchor(ANCHOR_ACTIVE_FILE),
+            "sandbox": NlvAnchor(ANCHOR_SANDBOX_FILE),
         }
         self.policy: LiquidityPolicy = LiquidityPolicy()
         self._policy_lock = threading.RLock()
@@ -128,6 +138,7 @@ class EngineContext:
         self.tick_source: str = "NONE"    # SCHWAB | MOCK | NONE
         self.last_error: Optional[str] = None
         self.api_latency_ms: Optional[float] = None
+        self.sim_regimes: Dict[str, str] = {}   # dry-run pipeline regime per symbol
 
         self._start_time = datetime.utcnow()
 
@@ -165,3 +176,57 @@ class EngineContext:
 
     def load_persisted_policy(self) -> None:
         self.set_policy(load_policy())
+
+    def engine_regimes(self) -> Dict[str, str]:
+        """Current regime code (A/B/C) per symbol; unclassified symbols are omitted."""
+        regimes: Dict[str, str] = {}
+        engine = self.strategy_engine
+        if engine is not None:
+            for sym in (self.cfg.get("engine", {}) or {}).get("symbols", []):
+                code = engine.get_regime(sym).value
+                if code in ("A", "B", "C"):
+                    regimes[str(sym).upper()] = code
+        regimes.update(self.sim_regimes)
+        return regimes
+
+
+def read_external_backstop() -> Decimal:
+    """External liquid backstop recorded by document ingestion (informational; never buying power)."""
+    doc = read_json(MACRO_STATE_FILE, default={}) or {}
+    raw = doc.get("external_liquid_backstop", 0)
+    try:
+        return max(Decimal(str(raw)), ZERO)
+    except Exception:
+        return ZERO
+
+
+def ledger_buying_power(
+    ctx: EngineContext,
+    env: str,
+    regime: Optional[str] = None,
+    posterior: Optional[float] = None,
+    backstop: Optional[Decimal] = None,
+) -> Optional[BuyingPowerBreakdown]:
+    """
+    Buying-power breakdown for one environment ('active' | 'sandbox'), or None when
+    that environment has no ledger (e.g. 'active' while running DRY_RUN).
+    Posterior defaults to the risk engine's Bayesian win-rate.
+    """
+    ledger = ctx.ledger_for(env)
+    if ledger is None:
+        return None
+    if posterior is None and ctx.risk_manager is not None:
+        posterior = ctx.risk_manager.posterior_win_rate()
+    return compute_buying_power(
+        nlv=ledger.nlv,
+        settled_cash=ledger.settled,
+        unsettled_cash=ledger.unsettled_total,
+        policy=ctx.get_policy(),
+        today=now_et().date(),
+        swvxx_settled=ledger.swvxx_balance,
+        swvxx_in_flight=ledger.swvxx_in_flight,
+        pending_ach=ledger.pending_ach,
+        external_backstop=read_external_backstop() if backstop is None else backstop,
+        regime=regime,
+        posterior=posterior,
+    )

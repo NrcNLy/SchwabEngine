@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environments
+# Virtual environments / secrets (the .env file is passed with --env-file at run time)
 .env
 .venv
 venv/
@@ -13,8 +13,16 @@ ENV/
 .git/
 .gitignore
 
-# Android Edge Kotlin files (not needed in Python container)
+# Not needed in the Python image
 android_edge/
+node_modules/
+scratch/
+docs/
+.agents/
+
+# Runtime state lives in the mounted data volume, never baked into the image
+data/*.json
+data/vault/
 
 # Do NOT ignore config/config.yaml (needed for engine configuration)
-# Do NOT ignore schwab_tokens_vault.json (it will be handled via a volume mount, but ignoring it entirely can complicate things if it's referenced during build contexts)
+# Do NOT ignore src/ or package*.json (the web build stage needs them)

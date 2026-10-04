@@ -31,6 +31,7 @@ from typing import Dict, Literal, Optional
 from pydantic import BaseModel, Field
 
 from core.atomic_io import atomic_write_json, read_json
+from core.paths import POLICY_FILE
 
 logger = logging.getLogger("liquidity_policy")
 
@@ -49,7 +50,7 @@ NYSE_HOLIDAYS = {
     date(2027, 11, 25), date(2027, 12, 24),
 }
 
-POLICY_PATH = Path("data/liquidity_policy.json")
+POLICY_PATH = POLICY_FILE
 
 
 def q(value: Decimal) -> Decimal:
