@@ -23,6 +23,9 @@ from execution.risk_manager import RiskEngine
 from execution.router import ExecutionRouter
 from governor import GovernorDaemon
 
+from core.streamer import SchwabStreamer
+from execution.order_client import SchwabOrderClient
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")
 logger = logging.getLogger("main_eda")
 
@@ -46,11 +49,11 @@ class EventBus:
             self._queue.task_done()
 
 class TradingSystem:
-    def __init__(self, bus: EventBus):
+    def __init__(self, bus: EventBus, order_client: SchwabOrderClient = None):
         self.bus = bus
         self.ledger = SettlementLedger()
         self.risk_engine = RiskEngine()
-        self.router = ExecutionRouter()
+        self.router = ExecutionRouter(order_client=order_client)
         self.governor = GovernorDaemon()
 
         # Wire up the consumer to the event bus
@@ -62,7 +65,7 @@ class TradingSystem:
         
         # 1. Check if we should trigger a macro ingestion (mocking condition)
         if event.choppiness_index > 60:
-            logger.warning(f"High choppiness detected ({event.choppiness_index}). Dispatching async AI governor...")
+            logger.warning(f"High choppiness detected ({event.choppiness_index:.1f}). Dispatching async AI governor...")
             # This does not block the event loop!
             asyncio.create_task(self.governor.pre_market_macro())
 
@@ -80,38 +83,28 @@ class TradingSystem:
             # 4. Almgren-Chriss Execution
             await self.router.execute_almgren_chriss_trajectory(event.ticker, target_shares, side="BUY")
 
-async def mock_market_data_producer(bus: EventBus):
-    """Simulates a websocket stream publishing strictly typed Pydantic events."""
-    logger.info("Market Data Producer Online. Streaming events...")
-    
-    events = [
-        MarketEvent(ticker="SOXL", price=165.88, atr=4.20, choppiness_index=45.2),
-        MarketEvent(ticker="TQQQ", price=80.96, atr=2.15, choppiness_index=62.1), # High chop -> triggers AI
-        MarketEvent(ticker="TNA", price=59.84, atr=1.80, choppiness_index=38.4)
-    ]
-    
-    for event in events:
-        await asyncio.sleep(1.5) # Simulate tick delay
-        logger.info(f"Producer Publishing -> {event.ticker}")
-        await bus.publish(event)
-        
-    logger.info("Market Data Producer finished streaming.")
-
 async def main_loop():
     logger.info("Booting SchwabEngine Event-Driven Architecture (EDA)...")
     
     bus = EventBus()
     
+    # Initialize the core REST Execution client (Dry-Run by default for safety)
+    order_client = SchwabOrderClient(auth_manager=None, live_trading=False)
+    
     # Initialize the core system
-    system = TradingSystem(bus)
+    system = TradingSystem(bus, order_client=order_client)
     
     # Start the event dispatcher in the background
     dispatcher_task = asyncio.create_task(bus._dispatch_loop())
     
-    # Start the market data producer
-    producer_task = asyncio.create_task(mock_market_data_producer(bus))
+    # Instantiate the Charles Schwab WebSocket Streamer
+    # auth_manager can be injected here for actual OAuth fetching
+    streamer = SchwabStreamer(bus, auth_manager=None)
     
-    # Wait for the producer to finish
+    # Start the live market data stream producer
+    producer_task = asyncio.create_task(streamer.listener_loop())
+    
+    # Wait for the producer to finish (or run indefinitely)
     await producer_task
     
     # Wait for the queue to drain

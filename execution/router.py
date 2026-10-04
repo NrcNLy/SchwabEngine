@@ -12,13 +12,18 @@ import math
 import asyncio
 import logging
 
+from execution.order_client import SchwabOrderClient
+
 logger = logging.getLogger("execution_router")
 
 class ExecutionRouter:
-    def __init__(self):
+    def __init__(self, order_client: SchwabOrderClient = None):
         # Microstructure constants for modeling
         self.impact_exponent = 0.5
         self.risk_aversion_lambda = 1e-4
+        
+        # Instantiate fallback dry-run client if none injected
+        self.order_client = order_client or SchwabOrderClient(live_trading=False)
 
     def calculate_hyperbolic_trajectory(self, meta_order_qty: int, periods: int) -> list[int]:
         """
@@ -40,7 +45,6 @@ class ExecutionRouter:
                 break
                 
             # Ratio of remaining time vs total time in the hyperbolic curve
-            # For simplicity in this scaffold, we simulate the front-loaded curve.
             time_left = periods - t
             ratio = math.sinh(kappa * time_left) / math.sinh(kappa * periods)
             
@@ -55,7 +59,7 @@ class ExecutionRouter:
     async def execute_almgren_chriss_trajectory(self, ticker: str, meta_order_qty: int, side: str = "BUY"):
         """
         Executes the meta order utilizing the computed Almgren-Chriss trajectory.
-        Routes child orders as Pegged-to-Midpoint to capture the spread.
+        Routes child orders as Pegged-to-Midpoint via the Schwab REST client.
         """
         logger.info(f"[{ticker}] Initializing Almgren-Chriss {side} sequence for {meta_order_qty} shares.")
         
@@ -69,9 +73,15 @@ class ExecutionRouter:
             if child_qty <= 0:
                 continue
                 
-            # In a live system, we would route this via the broker's API using REL (Relative/Pegged)
-            # e.g., broker.place_order(ticker, child_qty, order_type="REL", aux_price=0.01)
             logger.info(f"[{ticker}] Routing Child Order {idx+1}/{periods}: {side} {child_qty} shares (Type: PEGGED_TO_MIDPOINT)")
+            
+            # Dispatch actively to the Schwab API
+            await self.order_client.submit_pegged_midpoint_order(
+                ticker=ticker, 
+                qty=child_qty, 
+                side=side, 
+                offset=0.01
+            )
             
             # Simulate latency of execution filling in the market
             await asyncio.sleep(0.5)
