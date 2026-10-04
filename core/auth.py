@@ -231,6 +231,7 @@ class SchwabAuthManager:
         self._access_token:        Optional[str]   = None
         self._refresh_token:       Optional[str]   = None
         self._access_token_expiry: Optional[float] = None  # monotonic timestamp
+        self._refresh_issued_at:   Optional[float] = None  # epoch seconds (refresh token issuance)
 
         self._lock = threading.Lock()
 
@@ -255,6 +256,8 @@ class SchwabAuthManager:
             self._refresh_token       = payload["refresh_token"]
             # Conservatively assume the saved token has half TTL remaining
             self._access_token_expiry = time.monotonic() + (self._access_ttl / 2)
+            issued = payload.get("refresh_token_issued_at") or payload.get("obtained_at")
+            self._refresh_issued_at   = float(issued) if issued else None
         logger.info("SchwabAuthManager: tokens loaded from vault.")
 
     def start(self) -> None:
@@ -302,6 +305,21 @@ class SchwabAuthManager:
         """Return True if a valid refresh token is currently held in memory."""
         with self._lock:
             return self._refresh_token is not None and len(self._refresh_token.strip()) > 0
+
+    def refresh_seconds_remaining(self) -> Optional[float]:
+        """
+        Seconds until the refresh token expires (issuance + refresh_token_ttl_sec),
+        or None if the issuance time is unknown (legacy vault without a timestamp).
+        """
+        with self._lock:
+            if self._refresh_issued_at is None:
+                return None
+            return (self._refresh_issued_at + self._refresh_ttl) - time.time()
+
+    def force_refresh(self) -> None:
+        """Blocking refresh used at startup to validate the vault before trading."""
+        with self._lock:
+            self._do_refresh()
 
     # ------------------------------------------------------------------
     # Initial authorization code exchange (first-run / weekend reauth)
@@ -382,16 +400,20 @@ class SchwabAuthManager:
         Safe to call with or without the lock held (load_tokens calls it
         without the lock during init).
         """
+        previous_refresh    = self._refresh_token
         self._access_token  = token_data["access_token"]
         self._refresh_token = token_data.get("refresh_token", self._refresh_token)
         expires_in          = int(token_data.get("expires_in", self._access_ttl))
         self._access_token_expiry = time.monotonic() + expires_in
+        if self._refresh_issued_at is None or self._refresh_token != previous_refresh:
+            self._refresh_issued_at = time.time()
 
         vault_payload = {
             "access_token":  self._access_token,
             "refresh_token": self._refresh_token,
             "persisted_at":  datetime.utcnow().isoformat() + "Z",
             "expires_in":    expires_in,
+            "refresh_token_issued_at": self._refresh_issued_at,
         }
         self._vault.save(vault_payload)
         logger.info(

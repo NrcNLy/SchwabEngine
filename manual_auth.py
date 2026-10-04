@@ -81,16 +81,21 @@ def exchange_and_save(raw_input_url_or_code, redirect_uri="https://127.0.0.1:555
 
     # Encrypt and save to schwab_tokens_vault.json
     from core.auth import SecurityVault
-    vault_path = Path(__file__).parent / "schwab_tokens_vault.json"
-    vault = SecurityVault(str(vault_path), passphrase=PASSPHRASE)
+    from core.runtime import load_config
+    cfg = load_config()
+    iterations = int(cfg.get("auth", {}).get("pbkdf2_iterations", 600000))
+    vault_path = Path(__file__).parent / cfg.get("auth", {}).get("vault_file", "schwab_tokens_vault.json")
+    vault = SecurityVault(passphrase=PASSPHRASE, iterations=iterations, vault_path=vault_path)
     
+    issued_at = time.time()
     payload = {
         "access_token": tokens.get("access_token"),
         "refresh_token": tokens.get("refresh_token"),
         "id_token": tokens.get("id_token"),
         "token_type": tokens.get("token_type", "Bearer"),
         "expires_in": tokens.get("expires_in", 1800),
-        "obtained_at": time.time(),
+        "obtained_at": issued_at,
+        "refresh_token_issued_at": issued_at,
     }
     vault.save(payload)
     print(f"Vault encrypted and saved successfully to {vault_path} (size: {vault_path.stat().st_size} bytes)")

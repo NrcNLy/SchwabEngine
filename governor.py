@@ -128,8 +128,8 @@ class GovernorDaemon:
         from services.document_parser import DocumentParser
         logger.info(f"Governor triggering multimodal extraction for: {doc_path}")
         parser = DocumentParser()
-        snapshot, is_dup = await parser.extract_credit_report(doc_path)
-        logger.info(f"Extraction completed. Bureau: {snapshot.bureau}, Discrepancies: {len(snapshot.detected_discrepancies)}, IsDuplicate: {is_dup}")
+        snapshot, is_dup = await parser.extract_document(doc_path)
+        logger.info(f"Extraction completed. Class: {snapshot.document_class.value}, Institution: {snapshot.institution_or_bureau}, Discrepancies: {len(snapshot.detected_discrepancies)}, IsDuplicate: {is_dup}")
         return snapshot
 
 def main():

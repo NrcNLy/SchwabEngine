@@ -4,6 +4,16 @@
 # =============================================================================
 
 # ---------------------------------------------------------------------------
+# Engine Mode
+# ---------------------------------------------------------------------------
+engine:
+  # Default is dry-run. Live order routing requires a valid token vault AND either
+  # this flag set to true or the `--live` CLI flag. Live mode fails closed: it never
+  # falls back to mock data or mock order routing.
+  live_trading: false
+  symbols: ["SOXL", "TQQQ", "TNA"]
+
+# ---------------------------------------------------------------------------
 # Account & Firewall Settings
 # ---------------------------------------------------------------------------
 account:
@@ -27,6 +37,11 @@ risk:
 
   # Hard cash buffer: orders are blocked if Bucket 1 <= this amount
   cash_buffer: 10.00
+
+  # NLV-relative limits (single source of truth for ledger, API and UI)
+  single_ticker_cap_pct: 0.20     # max notional per ticker = 20% of NLV
+  max_risk_per_trade_pct: 0.01    # 1% of NLV
+  daily_drawdown_pct: 0.03        # 3% of NLV circuit breaker
 
   # Maximum loss per trade (used in Quarter-Kelly sizing)
   max_loss_per_trade: 10.00
@@ -218,6 +233,8 @@ schedule:
 
   # End-of-day liquidation sweep — flatten all positions to cash (5 min buffer before 15:55)
   eod_liquidation_time: "15:50:00"
+  # Hard deadline: all engine positions must be flat and orders cancelled by this time
+  flat_deadline_time: "15:55:00"
 
   # Timezone for all scheduled events
   timezone: "America/New_York"
@@ -272,6 +289,7 @@ portfolio_manager:
     - "FNGU"
     - "CONL"
     - "DPST"
+    - "SWVXX"
 
 # ---------------------------------------------------------------------------
 # Reconciliation Monitor (External order/position detection)
@@ -281,6 +299,8 @@ reconciliation:
   poll_interval_sec: 30            # How often to poll Schwab for drift
   protect_unmanaged: true          # Auto-place a protective stop on external positions
   unmanaged_stop_pct: 0.05         # Emergency stop at 5% below avg cost
+  exclude_symbols:                 # Never place protective stops / liquidate these
+    - "SWVXX"
 
 # ---------------------------------------------------------------------------
 # Research / Compression Agent
