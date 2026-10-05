@@ -153,6 +153,69 @@ strategies:
     target: "vwap"               # Exit at VWAP midline
 
 # ---------------------------------------------------------------------------
+# Microstructure Engine (MLOFI / Directional VPIN / Cross-Asset Lead-Lag)
+# Veto/confirm gate only: never sizes, never touches the ledger, stops or flatten,
+# and can never unblock a macro Regime C halt.
+# ---------------------------------------------------------------------------
+microstructure:
+  enabled: true
+  mode: "shadow"                 # shadow = log + telemetry only | enforce = block orders
+  reference_symbols: ["NVDA", "TSM", "KRE", "$TNX", "/ZN", "/NQ"]
+  book:
+    levels: 5
+    # Both services acknowledged SUBS on the VM (scripts/book_recon.py). Books are per venue; the hub
+    # sticks to whichever venue delivers depth for a symbol and falls back to L1 OFI otherwise.
+    services: ["NASDAQ_BOOK", "NYSE_BOOK"]
+    l1_fallback: true
+    l1_fallback_after_ms: 2000
+    venue_switch_ms: 5000
+  mlofi:
+    windows_ms: [100, 1000, 5000]
+    tick_size: 0.01
+    weight_floor_ticks: 0.5
+    spoof_clip_mult: 6.0
+    min_events: 20
+    unanimous_min_levels: 3
+    neg_deadband: 0.05           # ORB suppressed when MLOFI(5s) < -deadband
+    hard_floor: -0.50            # VWAP-MR suppressed only below this
+    confirm_threshold: 0.10      # MORNING_DRIVE ORB needs MLOFI(1s) >= this
+    neutral_band: 0.05
+    accum_min: 0.10
+  vpin:
+    bucket_divisor: 50           # V = ADV / 50
+    n_buckets: 50
+    min_buckets: 10              # vpin_ready=false (neutral) until this many buckets
+    percentile_lookback: 250
+    percentile_min_history: 20
+    toxic_percentile: 0.90
+    sigma_halflife: 20
+    adv_lookback_days: 20
+  lead_lag:
+    stale_after_ms: 3000
+    rate_stale_after_ms: 30000
+    horizon_ms: 5000
+    soxl:
+      follower: "SOXL"
+      leaders: { NVDA: 0.6, TSM: 0.4 }
+      spike_z: 2.0
+      follower_stale_ticks: 1
+    tqqq:
+      yield_symbol: "$TNX"
+      fallback_futures: "/ZN"
+      nq_symbol: "/NQ"
+      window_s: 60
+      spike_z: 2.0
+      accel_z: 1.0
+    tna:
+      leader: "KRE"
+      kre_neg: 0.10
+      kre_ret_floor: 0.004
+      ret_window_s: 900
+  gate:
+    lead_confirm: 0.10
+    lead_unavailable_policy: "mlofi_only"   # degrade to own-book MLOFI; never fail closed on a dead feed
+
+# ---------------------------------------------------------------------------
 # Macro Gatekeeper & LLM Settings
 # ---------------------------------------------------------------------------
 macro:
@@ -202,7 +265,7 @@ rate_limiter:
 # WebSocket Streamer
 # ---------------------------------------------------------------------------
 streamer:
-  url: "wss://streamer-api.schwabapi.com/ws"
+  url: "wss://streamer-api.schwab.com/ws"   # overridden at runtime by userPreference.streamerSocketUrl
   user_preference_endpoint: "/trader/v1/userPreference"
 
   # Level 1 equity fields to subscribe

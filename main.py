@@ -132,6 +132,9 @@ async def build_sim(ctx: EngineContext, cfg: dict, settings: EngineSettings, ign
     ledger = build_ledger(cfg, live=False)
     ctx.ledgers["sandbox"] = ledger
 
+    from indicators.microstructure import MicrostructureHub
+    ctx.microstructure = MicrostructureHub.from_config(cfg, None)
+
     bus = EventBus()
     router = ExecutionRouter(order_client=SchwabOrderClient(auth_manager=None, live_trading=False))
     engine = SimEngine(ctx, cfg, ledger, settings, router, ignore_session=ignore_session)
@@ -235,6 +238,10 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
 
     ledger.set_order_ceiling_provider(ceiling)
 
+    from indicators.microstructure import MicrostructureHub
+    micro_hub = MicrostructureHub.from_config(cfg, rest)
+    ctx.microstructure = micro_hub
+
     mask = UniverseExclusionMask(cfg)
     strategy = StrategyEngine(cfg, ledger, mask)
     ctx.strategy_engine = strategy
@@ -248,7 +255,16 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
             logger.warning("History preload failed for %s (%s); regime stays unclassified until bars accrue.", sym, exc)
 
     streamer = LiveStreamer.from_config(cfg, rest)
-    streamer.set_symbols(sorted(mask.universe))
+    if micro_hub is not None:
+        all_equity_symbols = sorted(mask.universe | set(micro_hub.equity_reference_symbols()))
+        streamer.set_symbols(all_equity_symbols)
+        streamer.set_book_subscriptions(micro_hub.book_symbols(), micro_hub.book_services)
+        futures_syms = micro_hub.futures_symbols()
+        if futures_syms:
+            streamer.set_futures_symbols(futures_syms)
+        streamer.on_book = engine.on_book
+    else:
+        streamer.set_symbols(sorted(mask.universe))
     streamer.on_tick = engine.on_tick
     streamer.start()
     handles.streamer = streamer
@@ -321,6 +337,8 @@ async def run(args: argparse.Namespace) -> int:
         await asyncio.gather(*tasks, return_exceptions=True)
         if handles.streamer is not None:
             await asyncio.to_thread(handles.streamer.stop)
+        if ctx.microstructure is not None:
+            await asyncio.to_thread(ctx.microstructure.persist)
         if handles.auth is not None:
             handles.auth.stop()
         open_positions = sorted(engine.ledger.positions.keys())

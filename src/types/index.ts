@@ -40,6 +40,7 @@ export interface EngineStatus {
   entry_permitted?: boolean;
   phase_sizing_multiplier?: number;
   vm_stats?: VmStats;
+  microstructure?: MicrostructureTelemetry;
 }
 
 export interface Position {
@@ -294,4 +295,27 @@ export interface DocumentJobStatus {
 export interface ActionResult {
   success: boolean;
   message: string;
+}
+
+export interface MicrostructureSymbolView {
+  mlofi: number | null;
+  mlofi_1s: number | null;
+  mlofi_ready: boolean;
+  vpin: number | null;
+  vpin_percentile: number | null;
+  vpin_ready: boolean;
+  vpin_toxic: boolean;
+  lead_lag_bias: number | null;
+  lead_available: boolean;
+  depth_levels: number;
+  depth_source: string;
+  gate: string | null;
+  gate_code: string | null;
+}
+
+export interface MicrostructureTelemetry {
+  enabled: boolean;
+  mode?: 'shadow' | 'enforce';
+  ready?: boolean;
+  symbols?: Record<string, MicrostructureSymbolView>;
 }

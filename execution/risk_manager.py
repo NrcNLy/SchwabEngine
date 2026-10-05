@@ -16,6 +16,7 @@ the external backstop never contribute to it.
 
 import math
 import logging
+from dataclasses import dataclass
 from typing import Any, Optional
 
 logger = logging.getLogger("risk_manager")
@@ -198,3 +199,100 @@ class RiskEngine:
         stop_price = float(position.stop_price) if position.stop_price is not None else (hwm - dist)
         return stop_price, adjusted
 
+
+# ---------------------------------------------------------------------------
+# Microstructure entry gate (veto / confirm only)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class MicroDecision:
+    """
+    Outcome of the microstructure gate for one prospective BUY.
+
+    The gate is VETO-ONLY: ``size_multiplier`` is always 1.0 and no code path can raise a size, touch the
+    ledger, loosen a stop or delay a flatten. It also never unblocks a macro Regime C halt.
+    """
+    action: str                      # "ALLOW" | "SUPPRESS"
+    code: str                        # OK, OK_DEGRADED, DISABLED, MLOFI_NEG, MLOFI_FLOOR, VPIN_TOXIC, ...
+    reason: str
+    regime_hint: Optional[str] = None   # "C" defensive liquidity withdrawal | "A" accumulation validated
+    degraded: bool = False
+    size_multiplier: float = 1.0
+
+    @property
+    def suppress(self) -> bool:
+        return self.action == "SUPPRESS"
+
+
+_ORB = "15m_ORB"
+
+
+def evaluate_microstructure_gate(snap: Any, symbol: str, strategy: str, phase: Any,
+                                 cfg: Optional[dict]) -> MicroDecision:
+    """
+    Pure decision function. ``snap`` exposes ``.mlofi`` (MLOFIReading), ``.vpin`` (VPINReading) and
+    ``.lead`` (LeadLagReading). ``cfg`` is the ``microstructure`` config block. First matching rule wins.
+    """
+    if not cfg or not cfg.get("enabled", False) or snap is None:
+        return MicroDecision("ALLOW", "DISABLED", "microstructure gate disabled")
+
+    ml_cfg = cfg.get("mlofi", {}) or {}
+    gate_cfg = cfg.get("gate", {}) or {}
+    neg_deadband = float(ml_cfg.get("neg_deadband", 0.05))
+    hard_floor = float(ml_cfg.get("hard_floor", -0.50))
+    confirm_thr = float(ml_cfg.get("confirm_threshold", 0.10))
+    neutral_band = float(ml_cfg.get("neutral_band", 0.05))
+    accum_min = float(ml_cfg.get("accum_min", 0.10))
+    lead_confirm = float(gate_cfg.get("lead_confirm", 0.10))
+    policy = str(gate_cfg.get("lead_unavailable_policy", "mlofi_only")).lower()
+
+    sym = symbol.upper()
+    is_orb = strategy == _ORB
+    phase_name = str(getattr(phase, "value", phase))
+    ml, vp, lead = snap.mlofi, snap.vpin, snap.lead
+    n5 = ml.norm.get("5s", 0.0)
+    n1 = ml.norm.get("1s", 0.0)
+
+    # 1. Hard directional vetoes from the cross-asset leaders.
+    if sym == "TQQQ" and lead.available and lead.veto_long:
+        return MicroDecision("SUPPRESS", "YIELD_SPIKE", "10Y yield spike: TQQQ long entries suppressed")
+    if sym == "TNA" and is_orb and lead.available and lead.invalidate_breakout:
+        return MicroDecision("SUPPRESS", "KRE_WEAK", "KRE weakness invalidates the small-cap breakout")
+
+    # 2. Adverse-selection toxicity (needs a ready VPIN with percentile history; otherwise neutral).
+    hint: Optional[str] = None
+    if vp.ready and vp.toxic:
+        accumulation = ml.ready and ml.unanimous_positive and n5 >= accum_min
+        if accumulation:
+            hint = "A"
+        else:
+            kind = "neutral" if (not ml.ready or abs(n5) < neutral_band) else "divergent"
+            return MicroDecision(
+                "SUPPRESS", "VPIN_TOXIC",
+                f"VPIN {vp.vpin:.2f} (p{vp.percentile * 100:.0f}) toxic with {kind} order flow",
+                regime_hint="C")
+
+    # 3. Own-book order-flow sign (differentiated by strategy).
+    if is_orb:
+        if ml.ready and n5 < -neg_deadband:
+            return MicroDecision("SUPPRESS", "MLOFI_NEG", f"MLOFI(5s) {n5:+.3f} below -{neg_deadband:.2f}", hint)
+    else:
+        if ml.ready and n5 < hard_floor:
+            return MicroDecision("SUPPRESS", "MLOFI_FLOOR", f"MLOFI(5s) {n5:+.3f} below hard floor {hard_floor:+.2f}", hint)
+
+    # 4. ORB authorization during MORNING_DRIVE requires positive flow AND lead confirmation.
+    if is_orb and phase_name == "MORNING_DRIVE":
+        if not (ml.ready and n1 >= confirm_thr):
+            return MicroDecision("SUPPRESS", "ORB_UNCONFIRMED",
+                                 f"MORNING_DRIVE ORB needs MLOFI(1s) >= {confirm_thr:.2f} (got {n1:+.3f}, ready={ml.ready})", hint)
+        if lead.available:
+            if lead.bias < lead_confirm:
+                return MicroDecision("SUPPRESS", "ORB_UNCONFIRMED",
+                                     f"lead-lag bias {lead.bias:+.2f} below {lead_confirm:.2f}", hint)
+        else:
+            if policy == "block_orb":
+                return MicroDecision("SUPPRESS", "LEAD_UNAVAILABLE", "lead feeds unavailable (policy block_orb)", hint)
+            return MicroDecision("ALLOW", "OK_DEGRADED",
+                                 "lead feeds unavailable: confirmed on own-book MLOFI only", hint, degraded=True)
+
+    return MicroDecision("ALLOW", "OK", "microstructure checks passed", hint)

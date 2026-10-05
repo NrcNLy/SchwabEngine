@@ -34,6 +34,7 @@ from typing import Any, Callable, Dict, List, Optional
 import websockets
 from websockets.exceptions import ConnectionClosedError, WebSocketException
 
+from data.book import BookSnapshot, parse_book_frame
 from data.rest_client import SchwabRestClient
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ FIELD_MAP: Dict[int, str] = {
     4:  "bid_size",
     5:  "ask_size",
     8:  "total_volume",
+    9:  "last_size",
     10: "high_price",
     11: "low_price",
 }
@@ -113,6 +115,14 @@ class SchwabStreamer:
 
         self._symbols:  List[str]                         = []
         self.on_tick:   Optional[Callable[[str, dict], None]] = None
+        self.on_book:   Optional[Callable[[BookSnapshot], None]] = None
+
+        # Microstructure feeds (optional): Level 2 books and futures reference quotes
+        self._book_symbols:   List[str] = []
+        self._book_services:  List[str] = []
+        self._futures_symbols: List[str] = []
+        self._client_ids: Dict[str, str] = {"SchwabClientCustomerId": "", "SchwabClientCorrelId": ""}
+        self._pending_labels: Dict[str, str] = {}
 
         self._loop:   Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread]          = None
@@ -164,6 +174,17 @@ class SchwabStreamer:
         """
         self._symbols = list(symbols)
         logger.info("SchwabStreamer: symbol universe set → %s", self._symbols)
+
+    def set_book_subscriptions(self, symbols: List[str], services: Optional[List[str]] = None) -> None:
+        """Configure symbols and services for Level 2 book subscriptions."""
+        self._book_symbols = list(symbols)
+        self._book_services = list(services or ["NASDAQ_BOOK", "NYSE_BOOK"])
+        logger.info("SchwabStreamer: book subscriptions set → %s across %s", self._book_symbols, self._book_services)
+
+    def set_futures_symbols(self, symbols: List[str]) -> None:
+        """Configure symbols for Level 1 futures subscriptions (e.g. /ZN, /NQ)."""
+        self._futures_symbols = list(symbols)
+        logger.info("SchwabStreamer: futures symbols set → %s", self._futures_symbols)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -228,9 +249,10 @@ class SchwabStreamer:
                 logger.info("SchwabStreamer: fetching streamer credentials…")
                 streamer_info = self._fetch_streamer_credentials()
 
-                logger.info("SchwabStreamer: connecting to %s", self._ws_url)
+                ws_url = str(streamer_info.get("streamerSocketUrl") or self._ws_url)
+                logger.info("SchwabStreamer: connecting to %s", ws_url)
                 async with websockets.connect(
-                    self._ws_url,
+                    ws_url,
                     ping_interval=20,
                     ping_timeout=10,
                 ) as ws:
@@ -246,7 +268,11 @@ class SchwabStreamer:
                     logger.info("SchwabStreamer: LOGIN successful.")
                     backoff = _RECONNECT_INITIAL_SEC  # Reset on successful connection
 
-                    # === Phase B: LEVELONE_EQUITIES subscription ===
+                    # === Phase B: Subscriptions ===
+                    self._client_ids = {
+                        "SchwabClientCustomerId": streamer_info.get("schwabClientCustomerId", ""),
+                        "SchwabClientCorrelId": streamer_info.get("schwabClientCorrelId", ""),
+                    }
                     await self._send_levelone_subscription(ws)
                     sub_response = await self._recv_and_validate(ws, "SUBS")
                     if not sub_response:
@@ -257,6 +283,10 @@ class SchwabStreamer:
                         "SchwabStreamer: LEVELONE_EQUITIES subscription active for %s",
                         self._symbols,
                     )
+
+                    # Level 2 Books and Futures Subscriptions (Microstructure)
+                    await self._send_book_subscriptions(ws)
+                    await self._send_futures_subscriptions(ws)
 
                     # === Streaming loop ===
                     await self._stream(ws)
@@ -392,6 +422,58 @@ class SchwabStreamer:
             self._symbols, self._fields,
         )
 
+    async def _send_book_subscriptions(
+        self,
+        ws: websockets.WebSocketClientProtocol,
+    ) -> None:
+        """Send book subscription requests for configured book services."""
+        if not self._book_symbols or not self._book_services:
+            return
+        requests = []
+        for service in self._book_services:
+            rid = str(_next_request_id())
+            requests.append({
+                "service": service,
+                "requestid": rid,
+                "command": "SUBS",
+                "SchwabClientCustomerId": self._client_ids.get("SchwabClientCustomerId", ""),
+                "SchwabClientCorrelId": self._client_ids.get("SchwabClientCorrelId", ""),
+                "parameters": {
+                    "keys": ",".join(self._book_symbols),
+                    "fields": "0,1,2,3",
+                },
+            })
+        if requests:
+            await ws.send(json.dumps({"requests": requests}))
+            logger.debug("SchwabStreamer: book subscription frames sent for %s across %s",
+                         self._book_symbols, self._book_services)
+
+    async def _send_futures_subscriptions(
+        self,
+        ws: websockets.WebSocketClientProtocol,
+    ) -> None:
+        """Send LEVELONE_FUTURES subscription frame if futures symbols configured."""
+        if not self._futures_symbols:
+            return
+        rid = str(_next_request_id())
+        req = {
+            "requests": [
+                {
+                    "service": "LEVELONE_FUTURES",
+                    "requestid": rid,
+                    "command": "SUBS",
+                    "SchwabClientCustomerId": self._client_ids.get("SchwabClientCustomerId", ""),
+                    "SchwabClientCorrelId": self._client_ids.get("SchwabClientCorrelId", ""),
+                    "parameters": {
+                        "keys": ",".join(self._futures_symbols),
+                        "fields": "0,1,2,3,4,5,8,9",
+                    },
+                }
+            ]
+        }
+        await ws.send(json.dumps(req))
+        logger.debug("SchwabStreamer: LEVELONE_FUTURES subscription sent for %s", self._futures_symbols)
+
     async def _recv_and_validate(
         self,
         ws: websockets.WebSocketClientProtocol,
@@ -478,7 +560,18 @@ class SchwabStreamer:
         data_frames = msg.get("data", [])
         for frame in data_frames:
             service = frame.get("service", "")
-            if service != "LEVELONE_EQUITIES":
+            if service in ("NASDAQ_BOOK", "NYSE_BOOK"):
+                if self.on_book:
+                    for content in frame.get("content", []):
+                        snap = parse_book_frame(content, venue=service)
+                        if snap is not None:
+                            try:
+                                self.on_book(snap)
+                            except Exception as exc:  # noqa: BLE001
+                                logger.exception("SchwabStreamer: on_book callback raised for %s: %s", snap.symbol, exc)
+                continue
+
+            if service not in ("LEVELONE_EQUITIES", "LEVELONE_FUTURES"):
                 continue
 
             for content in frame.get("content", []):

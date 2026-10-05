@@ -127,9 +127,15 @@ class _EngineBase:
         self.ledger = ledger
         self.settings = settings
         self.ignore_session = ignore_session
+        self.micro = getattr(ctx, "microstructure", None)
         self._in_flight: Set[str] = set()
         self._exiting: Set[str] = set()
         self._last_flatten_attempt = 0.0
+
+    def on_book(self, snap: Any) -> None:
+        """Called from the streamer thread with Level 2 order book snapshot."""
+        if self.micro is not None:
+            self.micro.on_book(snap)
 
     # -- guards ----------------------------------------------------------
 
@@ -208,6 +214,11 @@ class _EngineBase:
                             "FLAT DEADLINE PASSED with open engine positions: %s. Check Schwab immediately.",
                             sorted(self.ledger.positions.keys()),
                         )
+
+                    if t >= dtime(16, 0) and done.get("micro_persist") != today:
+                        done["micro_persist"] = today
+                        if self.ctx.microstructure is not None:
+                            await asyncio.to_thread(self.ctx.microstructure.persist)
             except Exception:
                 logger.exception("Scheduler pass failed")
             try:
@@ -254,12 +265,23 @@ class LiveEngine(_EngineBase):
         self._yz_dt_days = float(yz_cfg.get("dt_annualization_days", 1.0))
         self._yz_estimators: Dict[str, YangZhangEstimator] = {}
         strategy.set_signal_callback(self._on_signal)
+        if self.micro is not None:
+            strategy.set_pre_signal_filter(self.micro.pre_signal_filter)
 
     # -- streamer thread entry points --------------------------------------
 
     def on_tick(self, symbol: str, fields: Dict[str, Any]) -> None:
         """Called from the streamer thread. Must not block."""
         sym = symbol.upper()
+        # Reference symbols (NVDA, TSM, KRE, $TNX, /ZN, /NQ) update microstructure hub only
+        if self.micro is not None and self.micro.is_reference(sym):
+            self.micro.on_tick(sym, fields)
+            return
+
+        # Microstructure ingest for tradeable symbols
+        if self.micro is not None:
+            self.micro.on_tick(sym, fields)
+
         price = fields.get("last_price")
         if price is None:
             return
@@ -332,6 +354,15 @@ class LiveEngine(_EngineBase):
         if reason:
             logger.info("[%s] Signal ignored: %s", sym, reason)
             return False
+
+        # Microstructure gate confirmation
+        if self.micro is not None:
+            t_phase = get_session_phase(now_et(), self.cfg) if not self.ignore_session else TradingPhase.CORE_SESSION
+            strat_name = str(getattr(sig, "strategy", "UNKNOWN"))
+            dec = self.micro.check(sym, strat_name, t_phase, stage="engine")
+            if self.micro.blocks(dec):
+                logger.info("[%s] Signal blocked by microstructure gate: %s (%s)", sym, dec.code, dec.reason)
+                return False
 
         self._in_flight.add(sym)
         try:

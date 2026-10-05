@@ -142,6 +142,7 @@ class EngineContext:
         self.last_error: Optional[str] = None
         self.api_latency_ms: Optional[float] = None
         self.sim_regimes: Dict[str, str] = {}   # dry-run pipeline regime per symbol
+        self.microstructure = None
 
         self._start_time = datetime.utcnow()
 

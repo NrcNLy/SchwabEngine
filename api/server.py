@@ -448,7 +448,16 @@ def build_app(ctx: EngineContext):
             "entry_permitted": is_entry_permitted(get_session_phase(now_et(), ctx.cfg), ctx.cfg)[0],
             "phase_sizing_multiplier": is_entry_permitted(get_session_phase(now_et(), ctx.cfg), ctx.cfg)[1],
             "vm_stats": vm_stats,
+            "microstructure": ctx.microstructure.telemetry() if ctx.microstructure is not None else {"enabled": False},
         }
+
+    # ---- microstructure indicators ------------------------------------
+
+    @router.get("/indicators")
+    async def get_indicators(symbol: Optional[str] = None):
+        if ctx.microstructure is None:
+            return {"enabled": False, "symbols": {}, "recent_decisions": [], "latency_max_us": 0.0}
+        return ctx.microstructure.indicators(symbol)
 
     # ---- positions / orders / ledger ----------------------------------
 

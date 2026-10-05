@@ -32,7 +32,7 @@ STATUS_KEYS = {
     "engine_mode", "is_connected", "uptime_seconds", "active_positions", "nlv", "net_change_usd",
     "net_change_pct", "today_pnl", "today_realized_pnl", "unrealized_pnl", "circuit_breaker_limit",
     "circuit_breaker_triggered", "external_positions_detected", "timestamp_edt", "lifecycle_phase",
-    "session_phase", "entry_permitted", "phase_sizing_multiplier", "vm_stats",
+    "session_phase", "entry_permitted", "phase_sizing_multiplier", "vm_stats", "microstructure",
 }
 
 
@@ -185,3 +185,11 @@ def test_websocket_heartbeat(client):
     with client.websocket_connect("/api/stream") as ws:
         msg = ws.receive_json()
     assert msg["event"] == "HEARTBEAT" and msg["system_state"] == "SIMULATED"
+
+
+def test_indicators_endpoint(client):
+    r = client.get("/api/indicators")
+    assert r.status_code == 200
+    body = r.json()
+    assert "enabled" in body
+

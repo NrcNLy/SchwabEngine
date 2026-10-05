@@ -674,6 +674,9 @@ class StrategyEngine:
         # Signal callback: fn(signal: TradeSignal) -> None
         self._signal_cb: Optional[Callable[[TradeSignal], None]] = None
 
+        # Pre-signal filter: fn(symbol: str, strategy: str) -> bool
+        self._pre_filter: Optional[Callable[[str, str], bool]] = None
+
         logger.info(
             "StrategyEngine initialised — eval_interval=%ds, "
             "max_risk=$%.2f, ORB RR=%.1f:1, MR sigma=%.1fσ RSI<%d",
@@ -689,6 +692,11 @@ class StrategyEngine:
         """Register the callback that receives generated TradeSignal objects."""
         self._signal_cb = fn
         logger.info("StrategyEngine: signal callback registered.")
+
+    def set_pre_signal_filter(self, fn: Callable[[str, str], bool]) -> None:
+        """Register a pre-signal filter that can veto signals before state is mutated."""
+        self._pre_filter = fn
+        logger.info("StrategyEngine: pre-signal filter registered.")
 
     def register_symbol(self, symbol: str) -> None:
         """Add a symbol to the engine's tracking universe if not already present."""
@@ -1216,6 +1224,10 @@ class StrategyEngine:
             )
             return None
 
+        # Pre-signal gate check (e.g. microstructure veto before burning ORB or starting cooldown)
+        if self._pre_filter and not self._pre_filter(state.symbol, "15m_ORB"):
+            return None
+
         state.orb_signal_fired = True   # One ORB per day per spec
 
         return TradeSignal(
@@ -1303,6 +1315,10 @@ class StrategyEngine:
                 "— signal suppressed.",
                 state.symbol, atr_stop_dist, self._max_risk,
             )
+            return None
+
+        # Pre-signal gate check (e.g. microstructure veto before triggering cooldown)
+        if self._pre_filter and not self._pre_filter(state.symbol, "VWAP_MR"):
             return None
 
         return TradeSignal(
