@@ -193,3 +193,22 @@ def test_indicators_endpoint(client):
     body = r.json()
     assert "enabled" in body
 
+
+@pytest.mark.parametrize("prefix", ["", "/api"])
+def test_live_monitoring_endpoint(client, prefix):
+    r = client.get(f"{prefix}/live")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    text = r.text
+    assert "SchwabEngine" in text
+    assert "cdn.tailwindcss.com" in text
+    assert "Engine Mode" in text
+    assert "T+1 Rule Adherence" in text
+    assert "Current Trading Phase" in text
+    assert "AI Engine Confidence" in text
+    assert "Capital Summary" in text
+    assert "Holdings &amp; Capacity Ledger" in text or "Holdings & Capacity Ledger" in text
+    assert "TQQQ" in text and "SOXL" in text and "TNA" in text
+    assert "Reverse-Chronological Live Event Log" in text
+
+

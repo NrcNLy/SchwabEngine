@@ -58,10 +58,11 @@ try:
         WebSocket, WebSocketDisconnect,
     )
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, HTMLResponse
     from fastapi.staticfiles import StaticFiles
 except ImportError:  # pragma: no cover - dependency guard
     FastAPI = None
+    HTMLResponse = None
 
 from core.atomic_io import StateEncoder, read_json, update_json
 from core.paths import DOCUMENTS_DIR, MACRO_STATE_FILE
@@ -74,6 +75,7 @@ from core.runtime import (
 )
 from core.session import get_session_phase, is_entry_permitted
 from services.regime_summary import build_regime_summary
+from api.live_view import render_live_dashboard
 
 __all__ = ["build_app", "EngineContext", "compute_system_state"]
 
@@ -375,6 +377,12 @@ def build_app(ctx: EngineContext):
 
     manager = _ConnectionManager()
 
+    # ---- live monitoring dashboard ----------------------------------
+
+    @router.get("/live", response_class=HTMLResponse)
+    async def get_live():
+        return HTMLResponse(content=render_live_dashboard())
+
     # ---- status -----------------------------------------------------
 
     @router.get("/status")
@@ -447,6 +455,8 @@ def build_app(ctx: EngineContext):
             "session_phase": get_session_phase(now_et(), ctx.cfg).value,
             "entry_permitted": is_entry_permitted(get_session_phase(now_et(), ctx.cfg), ctx.cfg)[0],
             "phase_sizing_multiplier": is_entry_permitted(get_session_phase(now_et(), ctx.cfg), ctx.cfg)[1],
+            "posterior": round(_f(ctx.risk_manager.posterior_win_rate()), 4) if ctx.risk_manager is not None else 0.4615,
+            "positions": managed,
             "vm_stats": vm_stats,
             "microstructure": ctx.microstructure.telemetry() if ctx.microstructure is not None else {"enabled": False},
         }
@@ -539,6 +549,7 @@ def build_app(ctx: EngineContext):
             "quarter_kelly_size": round(_f(kelly), 2),
             "safe_daytrade_buying_power": _f(bp.tactical_float),
             "gfv_risk_flag": ledger.gfv_risk_flag,
+            "posterior": round(_f(posterior), 4) if posterior is not None else 0.4615,
             "buying_power": _jsonable(bp),
         }
 
