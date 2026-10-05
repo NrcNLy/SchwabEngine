@@ -274,10 +274,15 @@ TEXT_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".json", ".yaml", ".yml", ".md", "
 
 @guarded
 def check_repo_hygiene() -> None:
-    gi = (ROOT / ".gitignore").read_text(encoding="utf-8", errors="ignore") if (ROOT / ".gitignore").exists() else ""
-    for needle in (".env", "schwab_tokens_vault.json", "state/"):
-        R.check(any(line.strip().rstrip("/") == needle.rstrip("/") or line.strip().startswith(needle) for line in gi.splitlines()),
-                f".gitignore covers {needle}", detail_fail="not ignored")
+    gi_path = ROOT / ".gitignore"
+    if gi_path.is_file():
+        gi = gi_path.read_text(encoding="utf-8", errors="ignore")
+        for needle in (".env", "schwab_tokens_vault.json", "state/"):
+            R.check(any(line.strip().rstrip("/") == needle.rstrip("/") or line.strip().startswith(needle) for line in gi.splitlines()),
+                    f".gitignore covers {needle}", detail_fail="not ignored")
+    else:
+        for needle in (".env", "schwab_tokens_vault.json", "state/"):
+            R.warn(f".gitignore covers {needle}", ".gitignore not present in container/build context")
 
     files = tracked_files()
     if files is None:
