@@ -523,19 +523,44 @@ class LiveEngine(_EngineBase):
 
     # -- broker polling ------------------------------------------------------
 
-    async def run_broker_sync(self, stop: asyncio.Event) -> None:
+    async def sync_broker_state(self, stop: asyncio.Event) -> None:
+        """
+        Broker background sync loop:
+        - 45s during market hours (CORE_SESSION)
+        - 300s during off-market hours
+        - Throttled to 60s if daily call count exceeds 3,200
+        - Suppressed if auth circuit breaker is open (AUTH_LOCKED)
+        """
         sync = self.ctx.broker_sync
+        from core.rate_limiter import SchwabRateLimiter
+        limiter = SchwabRateLimiter.get_instance()
+
         while not stop.is_set():
+            auth = self.ctx.auth_manager
+            if auth and getattr(auth, "auth_circuit_open", False):
+                logger.warning("LiveEngine: broker sync paused because auth circuit breaker is OPEN (AUTH_LOCKED).")
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=60.0)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
             try:
                 await asyncio.to_thread(sync.sync_once)
             except Exception as exc:
                 self.ctx.last_error = f"broker sync: {exc}"
                 logger.error("Broker sync failed (%d consecutive): %s", sync.consecutive_failures, exc)
+
             sync.set_managed_symbols(self.ledger.positions.keys())
+
+            phase = lifecycle_phase(now_et(), self.cfg)
+            interval = sync.get_sync_interval(phase, limiter)
             try:
-                await asyncio.wait_for(stop.wait(), timeout=sync.poll_interval)
+                await asyncio.wait_for(stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
+
+    run_broker_sync = sync_broker_state
 
 
 # ---------------------------------------------------------------------------

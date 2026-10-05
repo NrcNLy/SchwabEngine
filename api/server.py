@@ -161,11 +161,19 @@ def compute_system_state(ctx: EngineContext) -> Dict[str, Any]:
     """
     Single source of truth for the header status pill.
 
-    States: OK | DEGRADED | DOWN | HALTED | SIMULATED. ``reasons`` explains why
+    States: OK | DEGRADED | DOWN | HALTED | SIMULATED | AUTH_LOCKED. ``reasons`` explains why
     in plain language (shown as the pill tooltip).
     """
     if ctx.is_halted:
         return {"state": "HALTED", "reasons": ["Kill switch engaged: no new orders are being routed."]}
+
+    auth = ctx.auth_manager
+    if auth is not None and getattr(auth, "auth_circuit_open", False):
+        return {
+            "state": "AUTH_LOCKED",
+            "reasons": ["Authentication circuit breaker is OPEN. Token refresh failed with 4xx errors. Manual reset required via /api/auth/reset or re-authorization."],
+        }
+
     if not ctx.live:
         return {"state": "SIMULATED", "reasons": ["Dry-run mode: nothing is sent to Schwab."]}
 
@@ -701,6 +709,14 @@ def build_app(ctx: EngineContext):
             "message": "Schwab OAuth token renewed via the encrypted vault.",
             "expires_in_seconds": max(0, expires_in),
         }
+
+    @router.post("/auth/reset")
+    async def auth_reset():
+        if ctx.auth_manager is None:
+            return {"success": False, "message": "Auth manager not initialized."}
+        ctx.auth_manager.reset_circuit_breaker()
+        await manager.broadcast({"event": "AUTH_RESET"})
+        return {"success": True, "message": "Authentication circuit breaker reset successfully."}
 
     # ---- health / emergency ---------------------------------------------
 

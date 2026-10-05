@@ -237,6 +237,18 @@ class SchwabRestClient:
         token = self._auth_manager.get_access_token()
         return {"Authorization": f"Bearer {token}"}
 
+    def _acquire(self, timeout: float = 30.0, is_essential: bool = False, action: str = "NORMAL") -> bool:
+        if getattr(self._auth_manager, "auth_circuit_open", False):
+            from core.auth import AuthCircuitBreakerError
+            raise AuthCircuitBreakerError(
+                "SchwabRestClient: authentication circuit breaker is OPEN (AUTH_LOCKED). "
+                "Automated outbound calls suppressed."
+            )
+        try:
+            return self._bucket.acquire(timeout=timeout, is_essential=is_essential, action=action)
+        except TypeError:
+            return self._bucket.acquire(timeout=timeout)
+
     def _get(self, url: str, params: Optional[Dict[str, Any]] = None) -> Response:
         """
         Rate-limited GET with exponential-backoff retry.
@@ -257,7 +269,7 @@ class SchwabRestClient:
 
         for attempt in range(1, _MAX_RETRIES + 2):  # +1 final raise
             # Rate-limit gate — blocks here if bucket is empty
-            acquired = self._bucket.acquire(timeout=30)
+            acquired = self._acquire(timeout=30, is_essential=False, action="GET")
             if not acquired:
                 raise RuntimeError(
                     f"SchwabRestClient: rate-limiter timed out for GET {url}"
@@ -306,7 +318,7 @@ class SchwabRestClient:
         # Should never reach here, but satisfy type checker
         raise RuntimeError(f"SchwabRestClient: exhausted retries for GET {url}")
 
-    def _post(self, url: str, json_body: dict) -> Response:
+    def _post(self, url: str, json_body: dict, is_essential: bool = False, action: str = "POST") -> Response:
         """
         Rate-limited POST with exponential-backoff retry.
 
@@ -320,7 +332,7 @@ class SchwabRestClient:
         backoff = _INITIAL_BACKOFF_SEC
 
         for attempt in range(1, _MAX_RETRIES + 2):
-            acquired = self._bucket.acquire(timeout=30)
+            acquired = self._acquire(timeout=30, is_essential=is_essential, action=action)
             if not acquired:
                 raise RuntimeError(
                     f"SchwabRestClient: rate-limiter timed out for POST {url}"
@@ -368,7 +380,7 @@ class SchwabRestClient:
 
         raise RuntimeError(f"SchwabRestClient: exhausted retries for POST {url}")
 
-    def _delete(self, url: str) -> Response:
+    def _delete(self, url: str, is_essential: bool = True, action: str = "CANCEL") -> Response:
         """
         Rate-limited DELETE with exponential-backoff retry.
 
@@ -378,7 +390,7 @@ class SchwabRestClient:
         backoff = _INITIAL_BACKOFF_SEC
 
         for attempt in range(1, _MAX_RETRIES + 2):
-            acquired = self._bucket.acquire(timeout=30)
+            acquired = self._acquire(timeout=30, is_essential=is_essential, action=action)
             if not acquired:
                 raise RuntimeError(
                     f"SchwabRestClient: rate-limiter timed out for DELETE {url}"
@@ -429,7 +441,7 @@ class SchwabRestClient:
     # Public API — Order Lifecycle (Phase 6)
     # ------------------------------------------------------------------
 
-    def place_order(self, account_hash: str, order_body: dict) -> Response:
+    def place_order(self, account_hash: str, order_body: dict, is_essential: bool = False, action: str = "PLACE_ORDER") -> Response:
         """
         Submit a new order for the specified account.
 
@@ -450,7 +462,7 @@ class SchwabRestClient:
             requests.HTTPError: On HTTP 400 (bad payload), 403, or unrecoverable errors.
         """
         url = f"{self._trader_base}/accounts/{account_hash}/orders"
-        resp = self._post(url, order_body)
+        resp = self._post(url, order_body, is_essential=is_essential, action=action)
 
         if resp.status_code != 201:
             logger.error(

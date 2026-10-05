@@ -43,6 +43,7 @@ Configuration sources (config.yaml):
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,11 @@ _OT_STOP   = "STOP"
 # Instructions
 _INST_BUY  = "BUY"
 _INST_SELL = "SELL"
+
+# Tier 2 Stop Throttling & Coalescing
+TIER2_MIN_DELTA_PCT = 0.015  # 1.5% minimum price movement threshold
+TIER2_COOLDOWN_SEC  = 180.0  # 180-second minimum cooldown between cancel-replace requests
+
 
 
 class AccountFirewallError(RuntimeError):
@@ -116,6 +122,7 @@ class OrderManager:
         self._account_hash:   Optional[str] = None
         self._account_number: Optional[str] = None
         self._firewall_ok:    bool = False
+        self._tier2_stops:    Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Account Firewall
@@ -243,7 +250,9 @@ class OrderManager:
             self._account_number[-4:] if self._account_number else "?",
         )
 
-        resp     = self._rest.place_order(self._account_hash, body)
+        is_essential = reason in ("MANDATORY_FLATTEN", "EMERGENCY", "API_EMERGENCY")
+        action = "MANDATORY_FLATTEN" if is_essential else "MARKET_SELL"
+        resp     = self._rest.place_order(self._account_hash, body, is_essential=is_essential, action=action)
         order_id = self._extract_order_id(resp.headers.get("Location", ""))
 
         logger.info(
@@ -300,7 +309,86 @@ class OrderManager:
             "OrderManager: TIER2 STOP order placed — id=%s | %s ×%d @ $%s",
             order_id, symbol, qty, price,
         )
+        self._tier2_stops[symbol.upper()] = {
+            "order_id": order_id,
+            "stop_price": float(stop_price),
+            "quantity": qty,
+            "last_update_time": time.monotonic(),
+        }
         return order_id
+
+    def update_broker_stop(
+        self,
+        symbol: str,
+        quantity: int,
+        new_stop_price: float,
+        current_order_id: Optional[str] = None,
+        last_stop_price: Optional[float] = None,
+    ) -> Tuple[Optional[str], bool]:
+        """
+        Throttle and execute cancel-replace for broker-side Tier-2 catastrophe stops:
+        - Coalesces and throttles updates: dynamic Yang-Zhang trailing stops are tracked
+          synthetically in memory (Tier 1), while Tier-2 broker stops only update when:
+          1. Price movement delta >= 1.5% compared to the existing stop price.
+          2. Cooldown >= 180 seconds has elapsed since the last cancel-replace.
+
+        Args:
+            symbol:           Ticker symbol.
+            quantity:         Share quantity.
+            new_stop_price:   New target catastrophe stop price.
+            current_order_id: Existing order ID to cancel if replace is approved.
+            last_stop_price:  Previous stop price (if known; falls back to cached).
+
+        Returns:
+            (order_id, replaced): Tuple of the effective order ID (new or existing)
+            and a boolean indicating whether a cancel-replace was executed.
+        """
+        self._require_firewall()
+        sym = symbol.upper()
+        now = time.monotonic()
+
+        existing = self._tier2_stops.get(sym, {})
+        oid = current_order_id or existing.get("order_id")
+        prev_price = last_stop_price if last_stop_price is not None else existing.get("stop_price")
+        last_time = existing.get("last_update_time", 0.0)
+
+        # 1. Check cooldown (180s)
+        elapsed = now - last_time
+        if elapsed < TIER2_COOLDOWN_SEC:
+            remaining = TIER2_COOLDOWN_SEC - elapsed
+            logger.info(
+                "OrderManager: Tier-2 stop update for %s throttled by 180s cooldown "
+                "(%.1fs remaining). Resting stop remains unchanged.",
+                sym, remaining,
+            )
+            return oid, False
+
+        # 2. Check minimum price movement threshold (>= 1.5% delta)
+        if prev_price is not None and prev_price > 0:
+            delta_pct = abs(float(new_stop_price) - float(prev_price)) / float(prev_price)
+            if delta_pct < TIER2_MIN_DELTA_PCT:
+                logger.info(
+                    "OrderManager: Tier-2 stop update for %s skipped: delta %.2f%% < %.2f%% threshold. "
+                    "Resting stop remains unchanged.",
+                    sym, delta_pct * 100, TIER2_MIN_DELTA_PCT * 100,
+                )
+                return oid, False
+
+        # 3. Both conditions satisfied: execute cancel-replace
+        if oid:
+            try:
+                self.cancel_order(oid)
+            except Exception as exc:
+                logger.warning("OrderManager: could not cancel old Tier-2 stop %s during replace: %s", oid, exc)
+
+        new_id = self.place_broker_stop(sym, quantity, new_stop_price)
+        logger.info(
+            "OrderManager: Tier-2 stop cancel-replace executed for %s — old=%s, new=%s @ $%.2f",
+            sym, oid, new_id, new_stop_price,
+        )
+        return new_id, True
+
+    replace_broker_stop = update_broker_stop
 
     def execute_market_sell(
         self,

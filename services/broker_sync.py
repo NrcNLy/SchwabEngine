@@ -158,6 +158,13 @@ class BrokerSync:
 
     def sync_once(self) -> BrokerBalances:
         """One poll cycle. Raises on parse failure; records failures for health."""
+        auth = getattr(self._rest, "_auth_manager", None)
+        if auth and getattr(auth, "auth_circuit_open", False):
+            logger.warning("BrokerSync: skipping sync because auth circuit breaker is OPEN (AUTH_LOCKED).")
+            with self._lock:
+                self.last_error = "Auth circuit breaker OPEN (AUTH_LOCKED)"
+            return self._ledger.balances
+
         started = time.monotonic()
         try:
             accounts = self._rest.get_accounts(fields="positions")
@@ -226,3 +233,16 @@ class BrokerSync:
     @property
     def poll_interval(self) -> float:
         return self._poll_interval
+
+    def get_sync_interval(self, lifecycle_phase: str = "CORE_SESSION", limiter: Optional[Any] = None) -> float:
+        """
+        Calculates sync interval:
+        - 45s during market hours (CORE_SESSION)
+        - 300s during off-market hours
+        - Throttled to 60s if daily call quota warning threshold (3,200) is exceeded
+        """
+        interval = 45.0 if lifecycle_phase == "CORE_SESSION" else 300.0
+        if limiter is not None and getattr(limiter, "should_throttle_sync", lambda: False)():
+            interval = max(interval, 60.0)
+        return interval
+

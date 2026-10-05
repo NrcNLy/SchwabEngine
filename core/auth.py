@@ -52,6 +52,10 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 logger = logging.getLogger(__name__)
 
+class AuthCircuitBreakerError(RuntimeError):
+    """Raised when the authentication circuit breaker is open (AUTH_LOCKED)."""
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -234,6 +238,8 @@ class SchwabAuthManager:
         self._refresh_issued_at:   Optional[float] = None  # epoch seconds (refresh token issuance)
 
         self._lock = threading.Lock()
+        self.auth_circuit_open: bool = False
+        self.auth_circuit_failure_count: int = 0
 
         # Background refresh thread
         self._refresh_thread: Optional[threading.Thread] = None
@@ -294,6 +300,11 @@ class SchwabAuthManager:
         Thread-safe.
         """
         with self._lock:
+            if self.auth_circuit_open:
+                raise AuthCircuitBreakerError(
+                    "SchwabAuthManager: authentication circuit breaker is OPEN (AUTH_LOCKED). "
+                    "Automated outbound calls suppressed until reset via /api/auth/reset or re-authorization."
+                )
             if self._is_token_expired():
                 logger.warning(
                     "SchwabAuthManager: access token expired — synchronous refresh."
@@ -352,6 +363,9 @@ class SchwabAuthManager:
             timeout=15,
         )
         response.raise_for_status()
+        with self._lock:
+            self.auth_circuit_open = False
+            self.auth_circuit_failure_count = 0
         self._ingest_token_response(response.json())
 
     # ------------------------------------------------------------------
@@ -370,11 +384,29 @@ class SchwabAuthManager:
             return True
         return time.monotonic() >= (self._access_token_expiry - 300)  # 5-min pre-expiry
 
-    def _do_refresh(self) -> None:
+    def reset_circuit_breaker(self) -> None:
+        """Manually reset the authentication circuit breaker."""
+        with self._lock:
+            self.auth_circuit_open = False
+            self.auth_circuit_failure_count = 0
+            logger.info("SchwabAuthManager: authentication circuit breaker reset manually.")
+
+    def _do_refresh(self, backoff_sec: float = 10.0) -> None:
         """
-        Perform a blocking refresh_token grant.
+        Perform a blocking refresh_token grant with exponential backoff circuit breaker.
         MUST be called while holding self._lock, or at startup.
+
+        If token endpoint returns a 4xx error (including 401 Unauthorized):
+        - Attempt refresh at most 2 times with a 10s backoff.
+        - If both fail, trip the breaker: set auth_circuit_open = True,
+          transition system to AUTH_LOCKED, and suppress further outbound calls.
         """
+        if self.auth_circuit_open:
+            raise AuthCircuitBreakerError(
+                "SchwabAuthManager: authentication circuit breaker is OPEN (AUTH_LOCKED). "
+                "Refresh suppressed until manual reset via /api/auth/reset or new OAuth code."
+            )
+
         if not self._refresh_token:
             raise RuntimeError(
                 "SchwabAuthManager: no refresh token available. "
@@ -382,17 +414,67 @@ class SchwabAuthManager:
             )
 
         logger.info("SchwabAuthManager: refreshing access token via refresh_token grant.")
-        response = requests.post(
-            self._token_url,
-            headers=self._basic_auth_header(),
-            data={
-                "grant_type":    "refresh_token",
-                "refresh_token":  self._refresh_token,
-            },
-            timeout=15,
-        )
-        response.raise_for_status()
-        self._ingest_token_response(response.json())
+        max_attempts = 2
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = requests.post(
+                    self._token_url,
+                    headers=self._basic_auth_header(),
+                    data={
+                        "grant_type":    "refresh_token",
+                        "refresh_token":  self._refresh_token,
+                    },
+                    timeout=15,
+                )
+
+                if 400 <= response.status_code < 500:
+                    logger.warning(
+                        "SchwabAuthManager: HTTP %d (4xx) during token refresh (attempt %d/%d).",
+                        response.status_code, attempt, max_attempts,
+                    )
+                    if attempt < max_attempts:
+                        logger.info("SchwabAuthManager: backing off for %.1fs before retry...", backoff_sec)
+                        time.sleep(backoff_sec)
+                        continue
+                    else:
+                        self.auth_circuit_open = True
+                        self.auth_circuit_failure_count += 1
+                        logger.critical(
+                            "SchwabAuthManager: token refresh failed %d consecutive times with 4xx errors. "
+                            "TRIPPING AUTH CIRCUIT BREAKER (AUTH_LOCKED).",
+                            max_attempts,
+                        )
+                        raise AuthCircuitBreakerError(
+                            f"OAuth token refresh returned HTTP {response.status_code}. "
+                            "Auth circuit breaker TRIPPED (AUTH_LOCKED)."
+                        )
+
+                response.raise_for_status()
+                self.auth_circuit_open = False
+                self.auth_circuit_failure_count = 0
+                self._ingest_token_response(response.json())
+                return
+
+            except requests.HTTPError as exc:
+                if exc.response is not None and 400 <= exc.response.status_code < 500:
+                    if attempt < max_attempts:
+                        logger.info("SchwabAuthManager: backing off for %.1fs before retry...", backoff_sec)
+                        time.sleep(backoff_sec)
+                        continue
+                    else:
+                        self.auth_circuit_open = True
+                        self.auth_circuit_failure_count += 1
+                        logger.critical(
+                            "SchwabAuthManager: auth circuit breaker TRIPPED (AUTH_LOCKED) after %d consecutive 4xx errors: %s",
+                            max_attempts, exc,
+                        )
+                        raise AuthCircuitBreakerError(
+                            f"OAuth token refresh returned HTTP {exc.response.status_code}. "
+                            "Auth circuit breaker TRIPPED (AUTH_LOCKED)."
+                        ) from exc
+                else:
+                    raise
 
     def _ingest_token_response(self, token_data: dict) -> None:
         """
@@ -424,6 +506,9 @@ class SchwabAuthManager:
     def _refresh_loop(self) -> None:
         """Background daemon: poll every 60 seconds and refresh when needed."""
         while not self._stop_event.wait(timeout=60):
+            if self.auth_circuit_open:
+                logger.debug("SchwabAuthManager: refresh loop idle while auth circuit breaker is OPEN.")
+                continue
             try:
                 with self._lock:
                     # Skip refresh attempt if no refresh token yet (pre-OAuth state)
@@ -431,6 +516,10 @@ class SchwabAuthManager:
                         continue
                     if self._is_token_expired():
                         self._do_refresh()
+            except AuthCircuitBreakerError as exc:
+                logger.error(
+                    "SchwabAuthManager: circuit breaker tripped in background refresh: %s", exc
+                )
             except requests.HTTPError as exc:
                 logger.error(
                     "SchwabAuthManager: HTTP error during background refresh: %s", exc
