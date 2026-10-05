@@ -131,7 +131,7 @@ strategies:
 # ---------------------------------------------------------------------------
 macro:
   # Gemini model identifier
-  gemini_model: "gemini-3.1-pro-preview"
+  gemini_model: "gemini-2.5-pro"
 
   # LLM API call timeout (milliseconds) — 3.1 Pro needs more headroom than Flash
   llm_timeout_ms: 6000
