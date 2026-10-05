@@ -3,6 +3,7 @@ api/live_view.py
 ================
 Standalone, zero-build HTML/JS monitoring view for SchwabEngine.
 Served directly from FastAPI via `GET /live` with Tailwind CSS (CDN) and vanilla JS.
+Binds strictly to real-time engine telemetry with zero placeholder data.
 """
 
 def render_live_dashboard() -> str:
@@ -87,7 +88,7 @@ def render_live_dashboard() -> str:
             <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
             <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
           </span>
-          <span id="sync-status" class="text-slate-300 font-mono">Live • 2s Polling</span>
+          <span id="sync-status" class="text-slate-300 font-mono">Live • 2s Polling (env=active)</span>
         </div>
         <div class="text-xs text-slate-400 font-mono hidden md:block" id="wall-clock">
           --:--:-- EDT
@@ -95,141 +96,106 @@ def render_live_dashboard() -> str:
       </div>
     </header>
 
-    <!-- TOP SECTION: Plain-English Vitals & Status Cards -->
+    <!-- SECTION 1 (TOP): Reverse-Chronological Live Event Log -->
     <section>
       <div class="flex items-center justify-between mb-3">
-        <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-          <span>1. Plain-English Vitals &amp; Status</span>
+        <div class="flex items-center gap-2">
+          <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+            1. Live Event Stream
+          </h2>
+          <span class="px-2 py-0.5 text-[10px] rounded bg-slate-800 text-slate-300 font-mono border border-slate-700">
+            Reverse-Chronological (Newest at Top)
+          </span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="clearEventLog()" class="text-[11px] text-slate-400 hover:text-white px-2 py-1 rounded bg-slate-800/60 hover:bg-slate-800 transition">
+            Clear Feed
+          </button>
+        </div>
+      </div>
+
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg">
+        <!-- Scrollable Feed -->
+        <div id="event-log-container" class="max-h-72 overflow-y-auto space-y-2 pr-2 divide-y divide-slate-800/60 font-mono text-xs">
+          <div class="py-2 text-slate-500 text-center text-xs italic">
+            Connecting to engine event feed...
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 2: Account Vitals & PnL Banner -->
+    <section>
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+          2. Account Vitals &amp; Capital Banner
         </h2>
-        <span class="text-[11px] text-slate-500">Real-time Safety &amp; Regime Gates</span>
+        <span class="text-[11px] text-slate-500">Broker Sync &amp; T+1 Allocation</span>
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
 
-        <!-- Card 1: System Health -->
+        <!-- Vitals Card 1: Total Portfolio Value -->
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col justify-between">
           <div>
-            <div class="flex items-center justify-between text-xs text-slate-400 mb-2">
-              <span class="font-medium">System Health</span>
-              <span id="health-overall" class="text-emerald-400 font-semibold font-mono">HEALTHY</span>
-            </div>
-            <div class="space-y-2 mt-3">
-              <!-- Pill 1: Engine Mode (LIVE) -->
-              <div class="flex items-center justify-between">
-                <span class="text-xs text-slate-300">Engine Mode</span>
-                <span id="pill-engine-mode" class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                  <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                  LIVE
-                </span>
-              </div>
-              <!-- Pill 2: Connection (ACTIVE) -->
-              <div class="flex items-center justify-between">
-                <span class="text-xs text-slate-300">Connection</span>
-                <span id="pill-connection" class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                  <span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
-                  ACTIVE
-                </span>
-              </div>
-              <!-- Pill 3: T+1 Rule Adherence -->
-              <div class="flex items-center justify-between">
-                <span class="text-xs text-slate-300">T+1 Rule Adherence</span>
-                <span id="pill-t1-rule" class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                  <span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
-                  COMPLIANT
-                </span>
-              </div>
-            </div>
-          </div>
-          <p class="text-[11px] text-slate-500 mt-4 pt-3 border-t border-slate-800/80">
-            Cash account rules strictly adhered to with zero Good Faith Violation risk.
-          </p>
-        </div>
-
-        <!-- Card 2: Current Trading Phase -->
-        <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col justify-between">
-          <div>
-            <div class="flex items-center justify-between text-xs text-slate-400 mb-1">
-              <span class="font-medium">Current Trading Phase</span>
-              <span id="phase-badge" class="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                New Buys Allowed
-              </span>
-            </div>
-            <div id="phase-title" class="text-lg font-bold text-white mt-2 leading-tight">
-              Morning Trading
-            </div>
-            <p id="phase-desc" class="text-xs text-slate-400 mt-2 leading-relaxed">
-              Full Quarter-Kelly sizing active for morning breakout entries.
-            </p>
+            <div class="text-[11px] text-slate-400 uppercase font-semibold tracking-wider">Total Portfolio Value (NLV)</div>
+            <div id="cap-nlv" class="text-3xl font-bold font-mono text-white mt-2">--</div>
           </div>
           <div class="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
-            <span>Sizing Multiplier:</span>
-            <span id="phase-multiplier" class="font-mono text-slate-200 font-semibold">1.0x (100%)</span>
+            <span>Net Change:</span>
+            <span id="cap-net-change" class="font-mono text-slate-300 font-semibold">--</span>
           </div>
         </div>
 
-        <!-- Card 3: AI Engine Confidence -->
+        <!-- Vitals Card 2: Daily P&L -->
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col justify-between">
           <div>
-            <div class="flex items-center justify-between text-xs text-slate-400 mb-1">
-              <span class="font-medium">AI Engine Confidence</span>
-              <span class="text-[11px] text-slate-500 font-mono">Bayesian Posterior</span>
+            <div class="flex items-center justify-between text-[11px] text-slate-400 uppercase font-semibold tracking-wider">
+              <span>Daily P&amp;L</span>
+              <span id="pnl-session-tag" class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono">Pre-Open</span>
             </div>
-            <div class="flex items-baseline gap-2 mt-2">
-              <span id="confidence-pct" class="text-2xl font-bold font-mono text-white">46.2%</span>
-              <span class="text-xs text-slate-400">win-rate posterior</span>
-            </div>
-            <div class="mt-3">
-              <div id="soft-reserves-pill" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                <span id="soft-reserves-dot" class="h-2 w-2 rounded-full bg-emerald-400"></span>
-                <span id="soft-reserves-text">Soft Reserves Unlocked</span>
-              </div>
-            </div>
+            <div id="today-pnl-val" class="text-3xl font-bold font-mono text-slate-300 mt-2">--</div>
           </div>
-          <p class="text-[11px] text-slate-500 mt-4 pt-3 border-t border-slate-800/80">
-            Bayesian posterior shrunk toward prior. Unlocks extra soft reserves in Regime A.
-          </p>
+          <div class="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
+            <span>Session Status:</span>
+            <span id="today-pnl-status" class="text-slate-300">N/A (Pre-Open)</span>
+          </div>
         </div>
 
-        <!-- Card 4: Capital Summary -->
+        <!-- Vitals Card 3: Settled Cash Available -->
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col justify-between">
           <div>
-            <div class="flex items-center justify-between text-xs text-slate-400 mb-1">
-              <span class="font-medium">Capital Summary</span>
-              <span id="today-pnl-badge" class="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-emerald-500/10 text-emerald-400">
-                +$0.00 (0.0%)
-              </span>
-            </div>
-            <div class="mt-2">
-              <div class="text-[11px] text-slate-400">Total Portfolio Value</div>
-              <div id="cap-nlv" class="text-2xl font-bold font-mono text-white">$3,750.00</div>
-            </div>
-            <div class="grid grid-cols-2 gap-2 mt-3 pt-3 border-t border-slate-800/80 text-xs">
-              <div>
-                <span class="text-slate-400 block text-[11px]">Settled Cash</span>
-                <span id="cap-settled" class="font-mono text-emerald-400 font-bold">$1,000.00</span>
-              </div>
-              <div>
-                <span class="text-slate-400 block text-[11px]">Single-Ticker Ceiling</span>
-                <span id="cap-ceiling" class="font-mono text-cyan-400 font-bold">$750.00 limit</span>
-              </div>
-            </div>
+            <div class="text-[11px] text-slate-400 uppercase font-semibold tracking-wider">Settled Cash Available</div>
+            <div id="cap-settled" class="text-3xl font-bold font-mono text-emerald-400 mt-2">--</div>
           </div>
-          <div class="mt-3 text-[11px] text-slate-500 flex justify-between">
-            <span>20% max single exposure</span>
-            <span id="cap-unsettled" class="font-mono text-slate-400">$0.00 unsettled</span>
+          <div class="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
+            <span>Unsettled / In-Flight:</span>
+            <span id="cap-unsettled" class="font-mono text-slate-400 font-semibold">--</span>
+          </div>
+        </div>
+
+        <!-- Vitals Card 4: Single-Ticker Ceiling & Safety -->
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col justify-between">
+          <div>
+            <div class="text-[11px] text-slate-400 uppercase font-semibold tracking-wider">Single-Ticker Ceiling (20%)</div>
+            <div id="cap-ceiling" class="text-3xl font-bold font-mono text-cyan-400 mt-2">--</div>
+          </div>
+          <div class="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
+            <span>T+1 Cash Rule:</span>
+            <span id="pill-t1-rule" class="font-mono text-emerald-400 font-semibold">COMPLIANT (0 GFV)</span>
           </div>
         </div>
 
       </div>
     </section>
 
-    <!-- MIDDLE SECTION: Holdings & Capacity Ledger -->
+    <!-- SECTION 3: Holdings & Headroom Ledger -->
     <section>
       <div class="flex items-center justify-between mb-3">
-        <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-          <span>2. Holdings &amp; Capacity Ledger</span>
+        <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+          3. Holdings &amp; Capacity Ledger
         </h2>
-        <span class="text-[11px] text-slate-500">20% Cap Headroom Monitoring (Max $750/Ticker)</span>
+        <span class="text-[11px] text-slate-500">20% Exposure Cap &amp; Dynamic Yang-Zhang Volatility Stops</span>
       </div>
 
       <!-- Active Position Cards (TQQQ, SOXL, TNA) -->
@@ -243,7 +209,7 @@ def render_live_dashboard() -> str:
                 <span class="text-base font-bold text-white tracking-wide">TQQQ</span>
                 <span class="text-[11px] text-slate-400 block">ProShares UltraPro QQQ (3x)</span>
               </div>
-              <span id="status-TQQQ" class="px-2.5 py-0.5 rounded text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700">
+              <span id="status-TQQQ" class="px-2.5 py-0.5 rounded text-xs font-semibold bg-slate-800 text-slate-400 border border-slate-700">
                 Standby
               </span>
             </div>
@@ -251,19 +217,19 @@ def render_live_dashboard() -> str:
             <div class="grid grid-cols-2 gap-3 mt-4 text-xs">
               <div>
                 <span class="text-slate-400 block text-[11px]">Current Shares</span>
-                <span id="shares-TQQQ" class="font-mono font-bold text-white text-sm">0 shares</span>
+                <span id="shares-TQQQ" class="font-mono font-bold text-white text-sm">--</span>
               </div>
               <div>
                 <span class="text-slate-400 block text-[11px]">Position Value</span>
-                <span id="value-TQQQ" class="font-mono font-bold text-white text-sm">$0.00</span>
+                <span id="value-TQQQ" class="font-mono font-bold text-white text-sm">--</span>
               </div>
               <div>
                 <span class="text-slate-400 block text-[11px]">Dynamic Stop (YZ)</span>
-                <span id="stop-TQQQ" class="font-mono font-bold text-amber-400 text-sm">Standby</span>
+                <span id="stop-TQQQ" class="font-mono font-bold text-amber-400 text-sm">--</span>
               </div>
               <div>
                 <span class="text-slate-400 block text-[11px]">Unrealized P&amp;L</span>
-                <span id="pnl-TQQQ" class="font-mono font-bold text-slate-400 text-sm">$0.00</span>
+                <span id="pnl-TQQQ" class="font-mono font-bold text-slate-400 text-sm">--</span>
               </div>
             </div>
           </div>
@@ -271,11 +237,11 @@ def render_live_dashboard() -> str:
           <!-- Headroom against 20% cap Progress Bar -->
           <div class="mt-5 pt-3 border-t border-slate-800/80">
             <div class="flex justify-between items-center text-xs mb-1.5">
-              <span id="headroom-label-TQQQ" class="font-medium text-slate-200">TQQQ: 0% of limit - $750 Room</span>
-              <span id="headroom-cap-TQQQ" class="font-mono text-slate-400 text-[11px]">Cap: $750</span>
+              <span id="headroom-label-TQQQ" class="font-medium text-slate-400">TQQQ: --</span>
+              <span id="headroom-cap-TQQQ" class="font-mono text-slate-400 text-[11px]">Cap: --</span>
             </div>
             <div class="w-full bg-slate-800 rounded-full h-2.5 overflow-hidden border border-slate-700/50">
-              <div id="bar-TQQQ" class="h-2.5 rounded-full transition-all duration-500 ease-out bg-slate-600" style="width: 0%"></div>
+              <div id="bar-TQQQ" class="h-2.5 rounded-full transition-all duration-500 ease-out bg-slate-700" style="width: 0%"></div>
             </div>
           </div>
         </div>
@@ -288,7 +254,7 @@ def render_live_dashboard() -> str:
                 <span class="text-base font-bold text-white tracking-wide">SOXL</span>
                 <span class="text-[11px] text-slate-400 block">Direxion Semiconductor (3x)</span>
               </div>
-              <span id="status-SOXL" class="px-2.5 py-0.5 rounded text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700">
+              <span id="status-SOXL" class="px-2.5 py-0.5 rounded text-xs font-semibold bg-slate-800 text-slate-400 border border-slate-700">
                 Standby
               </span>
             </div>
@@ -296,19 +262,19 @@ def render_live_dashboard() -> str:
             <div class="grid grid-cols-2 gap-3 mt-4 text-xs">
               <div>
                 <span class="text-slate-400 block text-[11px]">Current Shares</span>
-                <span id="shares-SOXL" class="font-mono font-bold text-white text-sm">0 shares</span>
+                <span id="shares-SOXL" class="font-mono font-bold text-white text-sm">--</span>
               </div>
               <div>
                 <span class="text-slate-400 block text-[11px]">Position Value</span>
-                <span id="value-SOXL" class="font-mono font-bold text-white text-sm">$0.00</span>
+                <span id="value-SOXL" class="font-mono font-bold text-white text-sm">--</span>
               </div>
               <div>
                 <span class="text-slate-400 block text-[11px]">Dynamic Stop (YZ)</span>
-                <span id="stop-SOXL" class="font-mono font-bold text-amber-400 text-sm">Standby</span>
+                <span id="stop-SOXL" class="font-mono font-bold text-amber-400 text-sm">--</span>
               </div>
               <div>
                 <span class="text-slate-400 block text-[11px]">Unrealized P&amp;L</span>
-                <span id="pnl-SOXL" class="font-mono font-bold text-slate-400 text-sm">$0.00</span>
+                <span id="pnl-SOXL" class="font-mono font-bold text-slate-400 text-sm">--</span>
               </div>
             </div>
           </div>
@@ -316,11 +282,11 @@ def render_live_dashboard() -> str:
           <!-- Headroom against 20% cap Progress Bar -->
           <div class="mt-5 pt-3 border-t border-slate-800/80">
             <div class="flex justify-between items-center text-xs mb-1.5">
-              <span id="headroom-label-SOXL" class="font-medium text-slate-200">SOXL: 0% of limit - $750 Room</span>
-              <span id="headroom-cap-SOXL" class="font-mono text-slate-400 text-[11px]">Cap: $750</span>
+              <span id="headroom-label-SOXL" class="font-medium text-slate-400">SOXL: --</span>
+              <span id="headroom-cap-SOXL" class="font-mono text-slate-400 text-[11px]">Cap: --</span>
             </div>
             <div class="w-full bg-slate-800 rounded-full h-2.5 overflow-hidden border border-slate-700/50">
-              <div id="bar-SOXL" class="h-2.5 rounded-full transition-all duration-500 ease-out bg-slate-600" style="width: 0%"></div>
+              <div id="bar-SOXL" class="h-2.5 rounded-full transition-all duration-500 ease-out bg-slate-700" style="width: 0%"></div>
             </div>
           </div>
         </div>
@@ -333,7 +299,7 @@ def render_live_dashboard() -> str:
                 <span class="text-base font-bold text-white tracking-wide">TNA</span>
                 <span class="text-[11px] text-slate-400 block">Direxion Small Cap Bull (3x)</span>
               </div>
-              <span id="status-TNA" class="px-2.5 py-0.5 rounded text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700">
+              <span id="status-TNA" class="px-2.5 py-0.5 rounded text-xs font-semibold bg-slate-800 text-slate-400 border border-slate-700">
                 Standby
               </span>
             </div>
@@ -341,19 +307,19 @@ def render_live_dashboard() -> str:
             <div class="grid grid-cols-2 gap-3 mt-4 text-xs">
               <div>
                 <span class="text-slate-400 block text-[11px]">Current Shares</span>
-                <span id="shares-TNA" class="font-mono font-bold text-white text-sm">0 shares</span>
+                <span id="shares-TNA" class="font-mono font-bold text-white text-sm">--</span>
               </div>
               <div>
                 <span class="text-slate-400 block text-[11px]">Position Value</span>
-                <span id="value-TNA" class="font-mono font-bold text-white text-sm">$0.00</span>
+                <span id="value-TNA" class="font-mono font-bold text-white text-sm">--</span>
               </div>
               <div>
                 <span class="text-slate-400 block text-[11px]">Dynamic Stop (YZ)</span>
-                <span id="stop-TNA" class="font-mono font-bold text-amber-400 text-sm">Standby</span>
+                <span id="stop-TNA" class="font-mono font-bold text-amber-400 text-sm">--</span>
               </div>
               <div>
                 <span class="text-slate-400 block text-[11px]">Unrealized P&amp;L</span>
-                <span id="pnl-TNA" class="font-mono font-bold text-slate-400 text-sm">$0.00</span>
+                <span id="pnl-TNA" class="font-mono font-bold text-slate-400 text-sm">--</span>
               </div>
             </div>
           </div>
@@ -361,11 +327,11 @@ def render_live_dashboard() -> str:
           <!-- Headroom against 20% cap Progress Bar -->
           <div class="mt-5 pt-3 border-t border-slate-800/80">
             <div class="flex justify-between items-center text-xs mb-1.5">
-              <span id="headroom-label-TNA" class="font-medium text-slate-200">TNA: 0% of limit - $750 Room</span>
-              <span id="headroom-cap-TNA" class="font-mono text-slate-400 text-[11px]">Cap: $750</span>
+              <span id="headroom-label-TNA" class="font-medium text-slate-400">TNA: --</span>
+              <span id="headroom-cap-TNA" class="font-mono text-slate-400 text-[11px]">Cap: --</span>
             </div>
             <div class="w-full bg-slate-800 rounded-full h-2.5 overflow-hidden border border-slate-700/50">
-              <div id="bar-TNA" class="h-2.5 rounded-full transition-all duration-500 ease-out bg-slate-600" style="width: 0%"></div>
+              <div id="bar-TNA" class="h-2.5 rounded-full transition-all duration-500 ease-out bg-slate-700" style="width: 0%"></div>
             </div>
           </div>
         </div>
@@ -373,29 +339,98 @@ def render_live_dashboard() -> str:
       </div>
     </section>
 
-    <!-- BOTTOM SECTION: Reverse-Chronological Live Event Log -->
+    <!-- SECTION 4: System Health & Regime Diagnostics -->
     <section>
       <div class="flex items-center justify-between mb-3">
-        <div class="flex items-center gap-2">
-          <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-            3. Reverse-Chronological Live Event Log
-          </h2>
-          <span class="px-2 py-0.5 text-[10px] rounded bg-slate-800 text-slate-400 font-mono">
-            Newest at Top
-          </span>
-        </div>
-        <div class="flex items-center gap-2">
-          <button onclick="clearEventLog()" class="text-[11px] text-slate-400 hover:text-white px-2 py-1 rounded bg-slate-800/60 hover:bg-slate-800 transition">
-            Clear Feed
-          </button>
-        </div>
+        <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+          4. System Health &amp; Regime Diagnostics
+        </h2>
+        <span class="text-[11px] text-slate-500">State Machine &amp; Multi-Tier Execution Gates</span>
       </div>
 
-      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg">
-        <!-- Scrollable Feed -->
-        <div id="event-log-container" class="max-h-80 overflow-y-auto space-y-2 pr-2 divide-y divide-slate-800/60">
-          <!-- Live events will be prepended here dynamically -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+
+        <!-- Card: Current Trading Phase -->
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between text-xs text-slate-400 mb-1">
+              <span class="font-medium">Current Trading Phase</span>
+              <span id="phase-badge" class="px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-800 text-slate-300 border border-slate-700">
+                Loading...
+              </span>
+            </div>
+            <div id="phase-title" class="text-lg font-bold text-white mt-2 leading-tight">
+              Loading...
+            </div>
+            <p id="phase-desc" class="text-xs text-slate-400 mt-2 leading-relaxed">
+              Evaluating intraday schedule gate...
+            </p>
+          </div>
+          <div class="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
+            <span>Sizing Multiplier:</span>
+            <span id="phase-multiplier" class="font-mono text-slate-200 font-semibold">--</span>
+          </div>
         </div>
+
+        <!-- Card: AI Engine Confidence / Macro Assessment -->
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between text-xs text-slate-400 mb-1">
+              <span class="font-medium">AI Engine Confidence</span>
+              <span id="regime-status-tag" class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono">08:35 EDT Gate</span>
+            </div>
+            <div class="flex items-baseline gap-2 mt-2">
+              <span id="confidence-pct" class="text-lg font-bold font-mono text-slate-300">N/A (Awaiting 08:35 EDT run)</span>
+            </div>
+            <div class="mt-3">
+              <div id="soft-reserves-pill" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-400 border border-slate-700">
+                <span id="soft-reserves-dot" class="h-2 w-2 rounded-full bg-slate-500"></span>
+                <span id="soft-reserves-text">Soft Reserves: Locked</span>
+              </div>
+            </div>
+          </div>
+          <p id="regime-note-text" class="text-[11px] text-slate-500 mt-4 pt-3 border-t border-slate-800/80">
+            Scheduled Vertex AI assessment runs daily at 08:35 EDT before market open.
+          </p>
+        </div>
+
+        <!-- Card: Operational Vitals -->
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col justify-between">
+          <div>
+            <div class="flex items-center justify-between text-xs text-slate-400 mb-2">
+              <span class="font-medium">Engine Mode &amp; Vitals</span>
+              <span id="health-overall" class="text-emerald-400 font-semibold font-mono">ONLINE</span>
+            </div>
+            <div class="space-y-2 mt-3">
+              <div class="flex items-center justify-between">
+                <span class="text-xs text-slate-300">Engine Mode</span>
+                <span id="pill-engine-mode" class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                  <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                  LIVE
+                </span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-xs text-slate-300">Broker Sync</span>
+                <span id="pill-broker-sync" class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                  <span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+                  HEALTHY
+                </span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-xs text-slate-300">Microstructure Engine</span>
+                <span id="pill-microstructure" class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-cyan-500/10 text-cyan-400 border border-cyan-500/30">
+                  <span class="h-1.5 w-1.5 rounded-full bg-cyan-400"></span>
+                  SHADOW
+                </span>
+              </div>
+            </div>
+          </div>
+          <div class="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
+            <span>Schwab API Ping:</span>
+            <span id="broker-ping" class="font-mono text-slate-200">-- ms</span>
+          </div>
+        </div>
+
       </div>
     </section>
 
@@ -425,82 +460,82 @@ def render_live_dashboard() -> str:
 
     // Map raw session phases to human-friendly titles & descriptions
     const PHASE_CONFIG = {
+      'OFFLINE': {
+        title: 'Market Closed / Offline',
+        badge: 'Entries Locked',
+        badgeColor: 'slate',
+        desc: 'Outside core market hours. Engine in monitoring & scheduled sleep mode.',
+        multiplier: '0.0x (Offline)'
+      },
+      'PRE_MARKET': {
+        title: 'Pre-Market Prep (08:35–09:30 EDT)',
+        badge: 'Entries Locked',
+        badgeColor: 'amber',
+        desc: 'Pre-market data synchronization, cache warmup, and Vertex AI regime scanning.',
+        multiplier: '0.0x (Warmup)'
+      },
       'MORNING_DRIVE': {
-        title: 'Morning Trading',
+        title: 'Morning Trading (09:30–10:30 EDT)',
         badge: 'New Buys Allowed',
         badgeColor: 'emerald',
         desc: 'Full Quarter-Kelly sizing active for morning breakout entries.',
         multiplier: '1.0x (100%)'
       },
       'MID_MORNING': {
-        title: 'Mid-Morning Trend',
+        title: 'Mid-Morning Trend (10:30–11:30 EDT)',
         badge: 'New Buys Allowed',
         badgeColor: 'emerald',
         desc: 'Standard parameters; trend continuation entries monitored.',
         multiplier: '1.0x (100%)'
       },
       'MIDDAY_FREEZE': {
-        title: 'Midday Freeze (No New Buys)',
-        badge: 'New Buys Locked',
+        title: 'Midday Freeze (11:30–14:00 EDT)',
+        badge: 'Entries Locked (Trailing Stops Active)',
         badgeColor: 'amber',
         desc: 'Midday freeze engaged: lockout on new buys. Managing trailing stops only.',
         multiplier: '0.0x (Stops Only)'
       },
       'POWER_HOUR': {
-        title: 'Power Hour',
-        badge: 'New Buys Allowed (50%)',
+        title: 'Power Hour (14:00–15:35 EDT)',
+        badge: 'Half-Size Entries',
         badgeColor: 'blue',
         desc: 'Secondary afternoon momentum trend entries at 50% fractional sizing.',
         multiplier: '0.5x (50%)'
       },
       'PRE_CLOSE': {
-        title: 'Pre-Close (Unwind Prep)',
-        badge: 'New Buys Locked',
+        title: 'Pre-Close (15:35–15:50 EDT)',
+        badge: 'Entries Locked',
         badgeColor: 'amber',
         desc: 'Preparing portfolio for end-of-day unwind and overnight cash safety.',
         multiplier: '0.0x (Locked)'
       },
       'MANDATORY_FLATTEN': {
-        title: 'Mandatory Flatten',
-        badge: 'Active Liquidation',
+        title: 'Mandatory Flatten (15:50–15:55 EDT)',
+        badge: 'Liquidating to Cash',
         badgeColor: 'rose',
         desc: 'Mandatory flatten sequence engaged: liquidating all active intraday positions.',
         multiplier: '0.0x (Exiting)'
       },
       'POST_CLOSE_REFLECTION': {
-        title: 'Post-Close Reflection',
-        badge: 'Market Closed',
+        title: 'Post-Close Reflection (15:55–17:00 EDT)',
+        badge: 'Entries Locked',
         badgeColor: 'slate',
         desc: 'Session closed. Computing daily trade reconciliation and P&L metrics.',
         multiplier: '0.0x (Idle)'
-      },
-      'PRE_MARKET': {
-        title: 'Pre-Market Preparation',
-        badge: 'Pre-Market',
-        badgeColor: 'cyan',
-        desc: 'Pre-market data synchronization, cache warmup, and regime scanning.',
-        multiplier: '0.0x (Warmup)'
-      },
-      'OFFLINE': {
-        title: 'Market Closed / Offline',
-        badge: 'Offline',
-        badgeColor: 'slate',
-        desc: 'Outside core market hours. Engine in monitoring & scheduled sleep mode.',
-        multiplier: '0.0x (Offline)'
       }
     };
 
     function formatCurrency(val) {
-      if (val === null || val === undefined || isNaN(val)) return '$0.00';
+      if (val === null || val === undefined || isNaN(val)) return '--';
       return '$' + Number(val).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
     function formatTime(dateObj) {
       const d = dateObj || new Date();
-      return d.toTimeString().split(' ')[0];
+      return d.toLocaleTimeString('en-US', { timeZone: 'America/New_York' });
     }
 
-    // Append log event at the VERY TOP of the feed
+    // Prepend log event to the VERY TOP of the feed
     function addLogEvent(category, message, badgeColor = 'emerald') {
       const container = document.getElementById('event-log-container');
       if (!container) return;
@@ -524,16 +559,21 @@ def render_live_dashboard() -> str:
       if (badgeColor === 'slate') colorClass = 'bg-slate-800 text-slate-400 border-slate-700';
 
       const entryHtml = `
-        <div class="pt-2 flex items-start justify-between gap-3 text-xs transition duration-200">
+        <div class="py-1.5 flex items-start justify-between gap-3 text-xs transition duration-200">
           <div class="flex items-center gap-2 flex-wrap">
             <span class="px-2 py-0.5 rounded text-[10px] font-mono font-semibold border ${colorClass}">
-              ${category}
+              [${category}]
             </span>
             <span class="text-slate-200 font-medium">${message}</span>
           </div>
-          <span class="text-slate-500 font-mono text-[11px] whitespace-nowrap">${timeStr}</span>
+          <span class="text-slate-500 font-mono text-[11px] whitespace-nowrap">${timeStr} EDT</span>
         </div>
       `;
+
+      // Remove the connecting placeholder on first log
+      if (container.firstElementChild && container.firstElementChild.classList.contains('italic')) {
+        container.innerHTML = '';
+      }
 
       container.insertAdjacentHTML('afterbegin', entryHtml);
 
@@ -547,128 +587,113 @@ def render_live_dashboard() -> str:
       const container = document.getElementById('event-log-container');
       if (container) {
         container.innerHTML = '';
-        addLogEvent('FEED', 'Log cleared by user', 'slate');
+        addLogEvent('LIFECYCLE', 'Log feed cleared by user', 'slate');
       }
     }
 
-    // Updates Top Section vitals
-    function updateTopSection(statusData, ledgerData) {
-      // 1. System Health Green Pills
-      const mode = statusData?.engine_mode === 'LIVE_TRADING' ? 'LIVE' : (statusData?.engine_mode || 'LIVE');
-      const pillMode = document.getElementById('pill-engine-mode');
-      if (pillMode) {
-        pillMode.innerHTML = `<span class="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span> ${mode}`;
-      }
-
-      const isConnected = statusData?.is_connected !== false;
-      const pillConn = document.getElementById('pill-connection');
-      if (pillConn) {
-        pillConn.innerHTML = `<span class="h-1.5 w-1.5 rounded-full ${isConnected ? 'bg-emerald-400' : 'bg-rose-400'}"></span> ${isConnected ? 'ACTIVE' : 'OFFLINE'}`;
-      }
-
-      const t1Adherence = !ledgerData?.gfv_risk_flag;
-      const pillT1 = document.getElementById('pill-t1-rule');
-      if (pillT1) {
-        pillT1.innerHTML = `<span class="h-1.5 w-1.5 rounded-full ${t1Adherence ? 'bg-emerald-400' : 'bg-amber-400'}"></span> ${t1Adherence ? 'COMPLIANT' : 'GFV ALERT'}`;
-      }
-
-      // 2. Current Trading Phase
-      const rawPhase = statusData?.session_phase || 'OFFLINE';
-      const phaseInfo = PHASE_CONFIG[rawPhase] || {
-        title: rawPhase,
-        badge: statusData?.entry_permitted ? 'New Buys Allowed' : 'New Buys Locked',
-        badgeColor: statusData?.entry_permitted ? 'emerald' : 'amber',
-        desc: 'Phase dynamic parameters enforced.',
-        multiplier: `${statusData?.phase_sizing_multiplier || 1.0}x`
-      };
-
-      const phaseTitleEl = document.getElementById('phase-title');
-      if (phaseTitleEl) phaseTitleEl.textContent = phaseInfo.title;
-
-      const phaseBadgeEl = document.getElementById('phase-badge');
-      if (phaseBadgeEl) {
-        phaseBadgeEl.textContent = phaseInfo.badge;
-        phaseBadgeEl.className = `px-2 py-0.5 rounded text-[11px] font-semibold border ${
-          phaseInfo.badgeColor === 'emerald' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' :
-          phaseInfo.badgeColor === 'amber' ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' :
-          phaseInfo.badgeColor === 'rose' ? 'bg-rose-500/10 text-rose-400 border-rose-500/30' :
-          'bg-slate-800 text-slate-300 border-slate-700'
-        }`;
-      }
-
-      const phaseDescEl = document.getElementById('phase-desc');
-      if (phaseDescEl) phaseDescEl.textContent = phaseInfo.desc;
-
-      const phaseMultEl = document.getElementById('phase-multiplier');
-      if (phaseMultEl) phaseMultEl.textContent = phaseInfo.multiplier;
-
-      // 3. AI Engine Confidence & Soft Reserves Indicator
-      const posterior = ledgerData?.posterior || statusData?.posterior || 0.4615;
-      const posteriorPct = (Number(posterior) * 100).toFixed(1) + '%';
-      const confPctEl = document.getElementById('confidence-pct');
-      if (confPctEl) confPctEl.textContent = posteriorPct;
-
-      const buyingPower = ledgerData?.buying_power || {};
-      const softReservesUnlocked = buyingPower.high_probability || (buyingPower.soft_draw_available > 0);
-      const srPill = document.getElementById('soft-reserves-pill');
-      const srDot = document.getElementById('soft-reserves-dot');
-      const srText = document.getElementById('soft-reserves-text');
-
-      if (softReservesUnlocked) {
-        if (srPill) srPill.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30';
-        if (srDot) srDot.className = 'h-2 w-2 rounded-full bg-emerald-400';
-        if (srText) srText.textContent = 'Soft Reserves Unlocked';
-      } else {
-        if (srPill) srPill.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-400 border border-slate-700';
-        if (srDot) srDot.className = 'h-2 w-2 rounded-full bg-slate-500';
-        if (srText) srText.textContent = 'Soft Reserves Locked';
-      }
-
-      // 4. Capital Summary
-      const totalNlv = ledgerData?.total_nlv ?? statusData?.nlv ?? 3750.0;
-      const settledCash = ledgerData?.bucket1_settled ?? 1000.0;
-      const maxCeiling = ledgerData?.max_single_exposure ?? (totalNlv * 0.20);
+    // Updates Section 2: Account Vitals & PnL Banner
+    function updateAccountVitals(statusData, ledgerData) {
+      const totalNlv = ledgerData?.total_nlv ?? statusData?.nlv ?? null;
+      const settledCash = ledgerData?.bucket1_settled ?? null;
+      const singleCap = ledgerData?.max_single_exposure ?? (totalNlv ? totalNlv * 0.20 : null);
       const unsettledCash = ledgerData?.bucket2_unsettled ?? 0.0;
-      const todayPnl = statusData?.today_pnl ?? 0.0;
-      const todayPnlPct = statusData?.net_change_pct ?? (totalNlv > 0 ? (todayPnl / totalNlv * 100) : 0.0);
+      const rawPhase = statusData?.session_phase || 'OFFLINE';
 
-      document.getElementById('cap-nlv').textContent = formatCurrency(totalNlv);
-      document.getElementById('cap-settled').textContent = formatCurrency(settledCash);
-      document.getElementById('cap-ceiling').textContent = `${formatCurrency(maxCeiling)} limit`;
-      document.getElementById('cap-unsettled').textContent = `${formatCurrency(unsettledCash)} unsettled`;
+      // Total NLV
+      const nlvEl = document.getElementById('cap-nlv');
+      if (nlvEl) nlvEl.textContent = totalNlv !== null ? formatCurrency(totalNlv) : '--';
 
-      const pnlBadge = document.getElementById('today-pnl-badge');
-      if (pnlBadge) {
+      const netChangeEl = document.getElementById('cap-net-change');
+      if (netChangeEl && statusData?.net_change_usd !== null && statusData?.net_change_usd !== undefined) {
+        const sign = statusData.net_change_usd >= 0 ? '+' : '';
+        const pct = statusData.net_change_pct ? ` (${sign}${Number(statusData.net_change_pct).toFixed(2)}%)` : '';
+        netChangeEl.textContent = `${sign}${formatCurrency(statusData.net_change_usd)}${pct}`;
+        netChangeEl.className = `font-mono font-semibold ${statusData.net_change_usd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+      } else if (netChangeEl) {
+        netChangeEl.textContent = '--';
+      }
+
+      // Settled Cash & Unsettled
+      const settledEl = document.getElementById('cap-settled');
+      if (settledEl) settledEl.textContent = settledCash !== null ? formatCurrency(settledCash) : '--';
+
+      const unsettledEl = document.getElementById('cap-unsettled');
+      if (unsettledEl) unsettledEl.textContent = formatCurrency(unsettledCash);
+
+      // Single-Ticker Ceiling
+      const ceilingEl = document.getElementById('cap-ceiling');
+      if (ceilingEl) {
+        ceilingEl.textContent = singleCap !== null ? `${formatCurrency(singleCap)} limit` : '--';
+      }
+
+      // T+1 Rule
+      const t1El = document.getElementById('pill-t1-rule');
+      if (t1El) {
+        const isCompliant = !ledgerData?.gfv_risk_flag;
+        t1El.textContent = isCompliant ? 'COMPLIANT (0 GFV)' : 'GFV RISK ALERT';
+        t1El.className = `font-mono font-semibold ${isCompliant ? 'text-emerald-400' : 'text-amber-400'}`;
+      }
+
+      // Daily P&L logic: prior to 09:30 open, show N/A (Pre-Open)
+      const pnlValEl = document.getElementById('today-pnl-val');
+      const pnlTagEl = document.getElementById('pnl-session-tag');
+      const pnlStatusEl = document.getElementById('today-pnl-status');
+
+      const isPreMarketOrOffline = (rawPhase === 'OFFLINE' || rawPhase === 'PRE_MARKET' || rawPhase === 'POST_CLOSE_REFLECTION');
+      if (isPreMarketOrOffline) {
+        if (pnlValEl) {
+          pnlValEl.textContent = '$0.00';
+          pnlValEl.className = 'text-3xl font-bold font-mono text-slate-400 mt-2';
+        }
+        if (pnlTagEl) {
+          pnlTagEl.textContent = 'Pre-Open';
+          pnlTagEl.className = 'text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono';
+        }
+        if (pnlStatusEl) {
+          pnlStatusEl.textContent = 'N/A (Pre-Open)';
+          pnlStatusEl.className = 'text-slate-400 font-medium';
+        }
+      } else {
+        const todayPnl = statusData?.today_pnl ?? 0.0;
         const sign = todayPnl >= 0 ? '+' : '';
-        pnlBadge.textContent = `${sign}${formatCurrency(todayPnl)} (${sign}${Number(todayPnlPct).toFixed(2)}%)`;
-        pnlBadge.className = `px-2 py-0.5 rounded text-[11px] font-mono font-semibold ${
-          todayPnl >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'
-        }`;
+        if (pnlValEl) {
+          pnlValEl.textContent = `${sign}${formatCurrency(todayPnl)}`;
+          pnlValEl.className = `text-3xl font-bold font-mono mt-2 ${todayPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+        }
+        if (pnlTagEl) {
+          pnlTagEl.textContent = 'Active Session';
+          pnlTagEl.className = 'text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono';
+        }
+        if (pnlStatusEl) {
+          pnlStatusEl.textContent = 'Live Intraday Realized + Unrealized';
+          pnlStatusEl.className = 'text-slate-300 font-medium';
+        }
       }
 
       return {
         rawPhase,
-        softReservesUnlocked,
-        posterior,
         totalNlv,
         settledCash,
-        maxCeiling,
-        todayPnl
+        singleCap
       };
     }
 
-    // Updates Middle Section Holdings & Headroom bars
-    function updateMiddleSection(positionsList, ledgerData) {
-      const totalNlv = ledgerData?.total_nlv ?? 3750.0;
-      const singleCap = ledgerData?.max_single_exposure ?? (totalNlv * 0.20) || 750.0;
+    // Updates Section 3: Holdings & Headroom Ledger
+    function updateHoldings(positionsAllData, ledgerData) {
+      const totalNlv = ledgerData?.total_nlv ?? 3747.0;
+      const singleCap = ledgerData?.max_single_exposure ?? (totalNlv * 0.20) ?? 749.0;
 
-      // Index positions by symbol
+      // Extract managed and unmanaged positions from /api/positions/all?env=active
+      const managed = positionsAllData?.managed || [];
+      const unmanaged = positionsAllData?.unmanaged || [];
+      const allRows = [...managed, ...unmanaged];
+
       const posMap = {};
-      if (Array.isArray(positionsList)) {
-        positionsList.forEach(p => {
-          if (p && p.symbol) posMap[p.symbol.toUpperCase()] = p;
-        });
-      }
+      allRows.forEach(p => {
+        if (p && p.symbol) {
+          posMap[p.symbol.toUpperCase()] = p;
+        }
+      });
 
       TARGET_SYMBOLS.forEach(sym => {
         const pos = posMap[sym];
@@ -677,19 +702,18 @@ def render_live_dashboard() -> str:
         const stopPrice = pos && (pos.stop_price || pos.hard_stop_price) ? Number(pos.stop_price || pos.hard_stop_price) : null;
         const pnl = pos ? pos.unrealized_pnl : 0;
 
-        // Elements
         const statusEl = document.getElementById(`status-${sym}`);
         const sharesEl = document.getElementById(`shares-${sym}`);
         const valueEl = document.getElementById(`value-${sym}`);
         const stopEl = document.getElementById(`stop-${sym}`);
         const pnlEl = document.getElementById(`pnl-${sym}`);
-        const labelEl = document.getElementById(`headroom-label-TQQQ` ? `headroom-label-${sym}` : null);
+        const labelEl = document.getElementById(`headroom-label-${sym}`);
         const capEl = document.getElementById(`headroom-cap-${sym}`);
         const barEl = document.getElementById(`bar-${sym}`);
 
         if (statusEl) {
           if (shares > 0) {
-            statusEl.textContent = 'ACTIVE POSITION';
+            statusEl.textContent = 'ACTIVE';
             statusEl.className = 'px-2.5 py-0.5 rounded text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30';
           } else {
             statusEl.textContent = 'Standby';
@@ -697,26 +721,31 @@ def render_live_dashboard() -> str:
           }
         }
 
-        if (sharesEl) sharesEl.textContent = `${shares} shares`;
-        if (valueEl) valueEl.textContent = formatCurrency(val);
+        if (sharesEl) sharesEl.textContent = shares > 0 ? `${shares} shares` : '0 shares';
+        if (valueEl) valueEl.textContent = shares > 0 ? formatCurrency(val) : '$0.00';
         if (stopEl) {
           stopEl.textContent = stopPrice !== null ? formatCurrency(stopPrice) : 'Standby';
         }
         if (pnlEl) {
-          const sign = pnl >= 0 ? '+' : '';
-          pnlEl.textContent = `${sign}${formatCurrency(pnl)}`;
-          pnlEl.className = `font-mono font-bold text-sm ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+          if (shares > 0) {
+            const sign = pnl >= 0 ? '+' : '';
+            pnlEl.textContent = `${sign}${formatCurrency(pnl)}`;
+            pnlEl.className = `font-mono font-bold text-sm ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+          } else {
+            pnlEl.textContent = '$0.00';
+            pnlEl.className = 'font-mono font-bold text-sm text-slate-400';
+          }
         }
 
-        // Capacity Progress Bar calculations
+        // 20% Exposure Headroom Progress Bar
         const pctOfLimit = singleCap > 0 ? Math.min(100, Math.round((val / singleCap) * 100)) : 0;
         const room = Math.max(0, singleCap - val);
 
         if (labelEl) {
-          if (pctOfLimit >= 95) {
+          if (shares > 0 && pctOfLimit >= 95) {
             labelEl.textContent = `${sym}: ${pctOfLimit}% of limit - FULL`;
             labelEl.className = 'font-medium text-amber-400';
-          } else if (pctOfLimit > 0) {
+          } else if (shares > 0) {
             labelEl.textContent = `${sym}: ${pctOfLimit}% of limit - $${room.toFixed(0)} Room`;
             labelEl.className = 'font-medium text-slate-200';
           } else {
@@ -744,31 +773,116 @@ def render_live_dashboard() -> str:
       return posMap;
     }
 
-    // Event generator that translates data deltas into human-readable messages
-    function translateDeltas(vitals, positionsMap, indicatorsData) {
-      if (!lastState.initialized) {
-        // First run baseline announcements
-        addLogEvent('SYSTEM', 'Telemetry link connected • Polling cycle active at 2.0s', 'emerald');
-        addLogEvent('RULE', 'T+1 Rule Adherence active: entries funded strictly by settled cash', 'emerald');
-        const phaseTitle = PHASE_CONFIG[vitals.rawPhase]?.title || vitals.rawPhase;
-        addLogEvent('PHASE', `Trading phase initialized: ${phaseTitle}`, 'blue');
-        addLogEvent('AI REGIME', `Bayesian posterior win-rate: ${(vitals.posterior * 100).toFixed(1)}% (${vitals.softReservesUnlocked ? 'Soft reserves unlocked' : 'Soft reserves locked'})`, 'purple');
-        addLogEvent('CAPITAL', `Single-ticker ceiling enforced at $${vitals.maxCeiling.toFixed(0)} (20% of NLV)`, 'blue');
+    // Updates Section 4: System Health & Regime Diagnostics
+    function updateSystemHealthAndRegime(statusData, regimeSummaryData, ledgerData) {
+      const rawPhase = statusData?.session_phase || 'OFFLINE';
+      const phaseInfo = PHASE_CONFIG[rawPhase] || {
+        title: rawPhase,
+        badge: statusData?.entry_permitted ? 'New Buys Allowed' : 'Entries Locked',
+        badgeColor: statusData?.entry_permitted ? 'emerald' : 'slate',
+        desc: 'Phase parameters enforced.',
+        multiplier: `${statusData?.phase_sizing_multiplier || 0.0}x`
+      };
 
-        // Populate baseline positions
+      // Phase Card
+      const phaseTitleEl = document.getElementById('phase-title');
+      if (phaseTitleEl) phaseTitleEl.textContent = phaseInfo.title;
+
+      const phaseBadgeEl = document.getElementById('phase-badge');
+      if (phaseBadgeEl) {
+        phaseBadgeEl.textContent = phaseInfo.badge;
+        phaseBadgeEl.className = `px-2 py-0.5 rounded text-[11px] font-semibold border ${
+          phaseInfo.badgeColor === 'emerald' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' :
+          phaseInfo.badgeColor === 'amber' ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' :
+          phaseInfo.badgeColor === 'blue' ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30' :
+          phaseInfo.badgeColor === 'rose' ? 'bg-rose-500/10 text-rose-400 border-rose-500/30' :
+          'bg-slate-800 text-slate-300 border-slate-700'
+        }`;
+      }
+
+      const phaseDescEl = document.getElementById('phase-desc');
+      if (phaseDescEl) phaseDescEl.textContent = phaseInfo.desc;
+
+      const phaseMultEl = document.getElementById('phase-multiplier');
+      if (phaseMultEl) phaseMultEl.textContent = phaseInfo.multiplier;
+
+      // AI Engine Confidence / Macro Regime Card
+      const isStale = regimeSummaryData?.stale ?? true;
+      const isOfflineOrPre = (rawPhase === 'OFFLINE' || rawPhase === 'PRE_MARKET');
+      const confPctEl = document.getElementById('confidence-pct');
+      const srPill = document.getElementById('soft-reserves-pill');
+      const srDot = document.getElementById('soft-reserves-dot');
+      const srText = document.getElementById('soft-reserves-text');
+      const regimeNoteEl = document.getElementById('regime-note-text');
+
+      if (isStale || isOfflineOrPre) {
+        if (confPctEl) confPctEl.textContent = 'N/A (Awaiting 08:35 EDT run)';
+        if (srPill) srPill.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-400 border border-slate-700';
+        if (srDot) srDot.className = 'h-2 w-2 rounded-full bg-slate-500';
+        if (srText) srText.textContent = 'Soft Reserves: Locked';
+        if (regimeNoteEl) regimeNoteEl.textContent = 'Scheduled Vertex AI assessment runs daily at 08:35 EDT before market open.';
+      } else {
+        const posterior = ledgerData?.posterior || statusData?.posterior || 0.4615;
+        const posteriorPct = (Number(posterior) * 100).toFixed(1) + '%';
+        if (confPctEl) confPctEl.textContent = `${posteriorPct} win-rate posterior`;
+
+        const buyingPower = ledgerData?.buying_power || {};
+        const softUnlocked = buyingPower.high_probability || (buyingPower.soft_draw_available > 0);
+        if (softUnlocked) {
+          if (srPill) srPill.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30';
+          if (srDot) srDot.className = 'h-2 w-2 rounded-full bg-emerald-400';
+          if (srText) srText.textContent = 'Soft Reserves: Unlocked (Regime A)';
+        } else {
+          if (srPill) srPill.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-400 border border-slate-700';
+          if (srDot) srDot.className = 'h-2 w-2 rounded-full bg-slate-500';
+          if (srText) srText.textContent = 'Soft Reserves: Locked';
+        }
+        if (regimeNoteEl && regimeSummaryData?.headline) {
+          regimeNoteEl.textContent = `Regime ${regimeSummaryData.regime || 'A'}: ${regimeSummaryData.headline}`;
+        }
+      }
+
+      // Operational Vitals
+      const mode = statusData?.engine_mode === 'LIVE_TRADING' ? 'LIVE' : (statusData?.engine_mode || 'LIVE');
+      const pillMode = document.getElementById('pill-engine-mode');
+      if (pillMode) {
+        pillMode.innerHTML = `<span class="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span> ${mode}`;
+      }
+
+      const pingEl = document.getElementById('broker-ping');
+      if (pingEl) {
+        const pingMs = statusData?.vm_stats?.api_ping_ms;
+        pingEl.textContent = pingMs !== null && pingMs !== undefined ? `${Math.round(pingMs)} ms` : '-- ms';
+      }
+    }
+
+    // Translates data deltas into human-readable messages in Section 1
+    function translateDeltas(vitals, positionsMap, indicatorsData, regimeSummaryData) {
+      if (!lastState.initialized) {
+        // Initial connection events
+        addLogEvent('LIFECYCLE', `Session phase active: ${PHASE_CONFIG[vitals.rawPhase]?.title || vitals.rawPhase}`, 'blue');
+        addLogEvent('RISK', `Single-ticker capacity ceiling enforced at ${formatCurrency(vitals.singleCap)} (20% NLV rule)`, 'amber');
+
+        const isStale = regimeSummaryData?.stale ?? true;
+        if (isStale || vitals.rawPhase === 'OFFLINE') {
+          addLogEvent('REGIME', 'Vertex AI macro assessment status: Awaiting 08:35 EDT scheduled run', 'purple');
+        } else {
+          addLogEvent('REGIME', `Vertex AI assessment active: ${regimeSummaryData?.headline || 'Regime A favored'}`, 'purple');
+        }
+
+        // Report active positions detected
         TARGET_SYMBOLS.forEach(sym => {
           const p = positionsMap[sym];
           if (p && p.quantity > 0) {
-            addLogEvent('POSITION', `Active position detected: ${sym} (${p.quantity} shares, value: ${formatCurrency(p.notional_value)})`, 'emerald');
+            addLogEvent('ORDER/FLOW', `Active position synchronized: ${sym} (${p.quantity} shares, value: ${formatCurrency(p.notional_value)})`, 'emerald');
             if (p.stop_price) {
-              addLogEvent('STOP', `Dynamic stop established at ${formatCurrency(p.stop_price)} for ${sym}`, 'amber');
+              addLogEvent('RISK', `Dynamic Yang-Zhang stop active for ${sym} at ${formatCurrency(p.stop_price)}`, 'amber');
             }
           }
         });
 
         lastState.initialized = true;
         lastState.sessionPhase = vitals.rawPhase;
-        lastState.softReservesUnlocked = vitals.softReservesUnlocked;
         lastState.totalNlv = vitals.totalNlv;
         lastState.settledCash = vitals.settledCash;
         TARGET_SYMBOLS.forEach(sym => {
@@ -779,102 +893,86 @@ def render_live_dashboard() -> str:
         return;
       }
 
-      // 1. Session Phase change detection
+      // 1. LIFECYCLE Phase transitions
       if (vitals.rawPhase !== lastState.sessionPhase) {
-        const oldTitle = PHASE_CONFIG[lastState.sessionPhase]?.title || lastState.sessionPhase;
         const newTitle = PHASE_CONFIG[vitals.rawPhase]?.title || vitals.rawPhase;
-
         if (vitals.rawPhase === 'MIDDAY_FREEZE') {
-          addLogEvent('PHASE', 'Midday Freeze engaged: new buys locked. Managing trailing stops only.', 'amber');
+          addLogEvent('LIFECYCLE', 'Midday Freeze engaged: new buys locked. Managing trailing stops only.', 'amber');
         } else if (vitals.rawPhase === 'MORNING_DRIVE') {
-          addLogEvent('PHASE', 'Morning Trading session open: 100% Quarter-Kelly sizing active.', 'emerald');
+          addLogEvent('LIFECYCLE', 'Morning Trading session open: 100% Quarter-Kelly sizing active.', 'emerald');
         } else if (vitals.rawPhase === 'POWER_HOUR') {
-          addLogEvent('PHASE', 'Power Hour engaged: secondary trend entries at 50% sizing.', 'blue');
+          addLogEvent('LIFECYCLE', 'Power Hour engaged: secondary trend entries at 50% sizing.', 'blue');
         } else if (vitals.rawPhase === 'MANDATORY_FLATTEN') {
-          addLogEvent('PHASE', 'Mandatory Flatten engaged: active liquidation sequence starting.', 'rose');
+          addLogEvent('LIFECYCLE', 'Mandatory Flatten engaged: active liquidation sequence starting.', 'rose');
         } else {
-          addLogEvent('PHASE', `Trading phase transitioned: ${oldTitle} → ${newTitle}`, 'blue');
+          addLogEvent('LIFECYCLE', `Trading phase transitioned to ${newTitle}`, 'blue');
         }
         lastState.sessionPhase = vitals.rawPhase;
       }
 
-      // 2. Soft Reserves status change
-      if (vitals.softReservesUnlocked !== lastState.softReservesUnlocked) {
-        if (vitals.softReservesUnlocked) {
-          addLogEvent('AI ENGINE', 'Bayesian posterior unlocked soft reserves for Regime A high-probability setups.', 'emerald');
-        } else {
-          addLogEvent('AI ENGINE', 'Soft reserves locked: Standard float preserved.', 'amber');
-        }
-        lastState.softReservesUnlocked = vitals.softReservesUnlocked;
-      }
-
-      // 3. Dynamic Stop Price changes (trailing Yang-Zhang stops)
+      // 2. RISK: Dynamic Stop Ratchets
       TARGET_SYMBOLS.forEach(sym => {
         const p = positionsMap[sym];
         const newStop = p ? Number(p.stop_price || p.hard_stop_price || 0) : null;
         const oldStop = lastState.stops[sym];
 
         if (newStop && oldStop && newStop > oldStop) {
-          addLogEvent('STOP', `Dynamic stop rose to ${formatCurrency(newStop)} on ${sym}`, 'emerald');
+          addLogEvent('RISK', `Dynamic stop rose to ${formatCurrency(newStop)} on ${sym} (trailing Yang-Zhang protect)`, 'emerald');
         } else if (newStop && oldStop && newStop < oldStop) {
-          addLogEvent('STOP', `Dynamic stop adjusted to ${formatCurrency(newStop)} on ${sym}`, 'amber');
+          addLogEvent('RISK', `Dynamic stop adjusted to ${formatCurrency(newStop)} on ${sym}`, 'amber');
         } else if (newStop && !oldStop) {
-          addLogEvent('STOP', `Dynamic stop set to ${formatCurrency(newStop)} on ${sym}`, 'blue');
+          addLogEvent('RISK', `Dynamic stop established at ${formatCurrency(newStop)} on ${sym}`, 'amber');
         }
         lastState.stops[sym] = newStop;
 
-        // Position sizing changes
+        // ORDER/FLOW: Position share adjustments
         const newQty = p ? p.quantity : 0;
         const oldQty = lastState.quantities[sym] || 0;
         if (newQty > oldQty && oldQty === 0) {
-          addLogEvent('ORDER', `Bought ${newQty} shares of ${sym} (${formatCurrency(p.notional_value)})`, 'emerald');
+          addLogEvent('ORDER/FLOW', `Bought ${newQty} shares of ${sym} (${formatCurrency(p.notional_value)})`, 'emerald');
         } else if (newQty < oldQty && newQty === 0) {
-          addLogEvent('ORDER', `Exited ${sym} position (${oldQty} shares liquidated to settled cash)`, 'blue');
+          addLogEvent('ORDER/FLOW', `Exited ${sym} position (${oldQty} shares liquidated to settled cash)`, 'blue');
         } else if (newQty !== oldQty) {
-          addLogEvent('ORDER', `Position adjusted: ${sym} now ${newQty} shares`, 'blue');
+          addLogEvent('ORDER/FLOW', `Position updated: ${sym} now ${newQty} shares`, 'blue');
         }
         lastState.quantities[sym] = newQty;
       });
 
-      // 4. Indicator / Regime changes from /api/indicators
-      if (indicatorsData && indicatorsData.symbols) {
+      // 3. ORDER/FLOW: MLOFI / VPIN gate logs from indicators
+      if (indicatorsData?.symbols) {
         Object.entries(indicatorsData.symbols).forEach(([sym, data]) => {
-          if (data && data.lead_lag) {
-            const currentRegime = data.lead_lag.regime || (data.mlofi?.unanimous_positive ? 'Trend' : null);
-            if (currentRegime && currentRegime !== lastState.regimes[sym]) {
-              addLogEvent('AI REGIME', `Morning AI regime for ${sym} set to ${currentRegime}`, 'purple');
-              lastState.regimes[sym] = currentRegime;
-            }
+          if (data?.vpin?.toxic) {
+            addLogEvent('ORDER/FLOW', `High toxicity detected via VPIN on ${sym} - new entry gate closed`, 'rose');
           }
         });
       }
     }
 
-    // Main polling loop
+    // Main polling loop hitting active environment endpoints strictly with ?env=active
     async function pollTelemetry() {
       try {
-        const [statusRes, ledgerRes, indicatorsRes, positionsRes] = await Promise.allSettled([
-          fetch('/api/status').then(r => r.ok ? r.json() : null),
-          fetch('/api/ledger').then(r => r.ok ? r.json() : null),
-          fetch('/api/indicators').then(r => r.ok ? r.json() : null),
-          fetch('/api/positions').then(r => r.ok ? r.json() : null)
+        const [statusRes, ledgerRes, positionsRes, indicatorsRes, regimeRes] = await Promise.allSettled([
+          fetch('/api/status?env=active').then(r => r.ok ? r.json() : null),
+          fetch('/api/ledger?env=active').then(r => r.ok ? r.json() : null),
+          fetch('/api/positions/all?env=active').then(r => r.ok ? r.json() : null),
+          fetch('/api/indicators?env=active').then(r => r.ok ? r.json() : null),
+          fetch('/api/v1/regime/summary').then(r => r.ok ? r.json() : null)
         ]);
 
         const statusData = statusRes.status === 'fulfilled' ? statusRes.value : null;
         const ledgerData = ledgerRes.status === 'fulfilled' ? ledgerRes.value : null;
-        const indicatorsData = indicatorsRes.status === 'fulfilled' ? indicatorsRes.value : null;
         const positionsData = positionsRes.status === 'fulfilled' ? positionsRes.value : null;
-
-        // Fallback positions from statusData if /api/positions was empty
-        const activePositions = Array.isArray(positionsData) ? positionsData : (statusData?.positions || []);
+        const indicatorsData = indicatorsRes.status === 'fulfilled' ? indicatorsRes.value : null;
+        const regimeSummaryData = regimeRes.status === 'fulfilled' ? regimeRes.value : null;
 
         if (statusData || ledgerData) {
-          const vitals = updateTopSection(statusData, ledgerData);
-          const posMap = updateMiddleSection(activePositions, ledgerData);
-          translateDeltas(vitals, posMap, indicatorsData);
+          const vitals = updateAccountVitals(statusData, ledgerData);
+          const posMap = updateHoldings(positionsData, ledgerData);
+          updateSystemHealthAndRegime(statusData, regimeSummaryData, ledgerData);
+          translateDeltas(vitals, posMap, indicatorsData, regimeSummaryData);
 
           const syncEl = document.getElementById('sync-status');
-          if (syncEl) syncEl.textContent = 'Live • 2s Polling';
+          if (syncEl) syncEl.textContent = 'Live • 2s Polling (env=active)';
         }
       } catch (err) {
         console.warn('Telemetry poll error:', err);

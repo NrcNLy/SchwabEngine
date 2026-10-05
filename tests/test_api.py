@@ -203,12 +203,11 @@ def test_live_monitoring_endpoint(client, prefix):
     assert "SchwabEngine" in text
     assert "cdn.tailwindcss.com" in text
     assert "Engine Mode" in text
-    assert "T+1 Rule Adherence" in text
+    assert "T+1" in text
     assert "Current Trading Phase" in text
     assert "AI Engine Confidence" in text
-    assert "Capital Summary" in text
-    assert "Holdings &amp; Capacity Ledger" in text or "Holdings & Capacity Ledger" in text
+    assert "Holdings" in text
     assert "TQQQ" in text and "SOXL" in text and "TNA" in text
-    assert "Reverse-Chronological Live Event Log" in text
+    assert "Live Event Stream" in text
 
 
