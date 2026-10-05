@@ -407,8 +407,8 @@ class SchwabStreamer:
                     "service":    "LEVELONE_EQUITIES",
                     "requestid":  str(_next_request_id()),
                     "command":    "SUBS",
-                    "SchwabClientCustomerId": "",   # Re-used from login session
-                    "SchwabClientCorrelId":   "",
+                    "SchwabClientCustomerId": self._client_ids.get("SchwabClientCustomerId", ""),
+                    "SchwabClientCorrelId":   self._client_ids.get("SchwabClientCorrelId", ""),
                     "parameters": {
                         "keys":   ",".join(self._symbols),
                         "fields": self._fields,

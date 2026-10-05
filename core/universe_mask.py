@@ -16,12 +16,11 @@ class UniverseExclusionMask:
     def __init__(self, cfg: Dict[str, Any]):
         engine = cfg.get("engine", {}) or {}
         recon = cfg.get("reconciliation", {}) or {}
-        pm = cfg.get("portfolio_manager", {}) or {}
 
         self._universe: Set[str] = {str(s).upper() for s in engine.get("symbols", [])}
         self._excluded: Set[str] = {"SWVXX"}
         self._excluded |= {str(s).upper() for s in recon.get("exclude_symbols", [])}
-        self._excluded |= {str(s).upper() for s in pm.get("exclude_symbols", [])}
+        self._excluded |= {str(s).upper() for s in engine.get("exclude_symbols", [])}
 
     @property
     def universe(self) -> Set[str]:
