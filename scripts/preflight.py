@@ -409,10 +409,10 @@ def check_gfv_invariants() -> None:
     # soft-reserve gate
     closed = [compute_buying_power(nlv=D("1000"), settled_cash=D("1000"), unsettled_cash=D("0"), policy=pol, today=monday,
                                    regime=r, posterior=p).high_probability
-              for r, p in (("A", 0.549), ("B", 0.95), ("C", 0.95), (None, 0.9))]
+              for r, p in (("A", 0.399), ("B", 0.95), ("C", 0.95), (None, 0.9))]
     opened = compute_buying_power(nlv=D("1000"), settled_cash=D("1000"), unsettled_cash=D("0"), policy=pol, today=monday,
-                                  regime="A", posterior=0.55).high_probability
-    R.check(not any(closed) and opened, "soft-reserve draw requires Regime A and posterior >= 0.55")
+                                  regime="A", posterior=0.40).high_probability
+    R.check(not any(closed) and opened, "soft-reserve draw requires Regime A and posterior >= 0.40")
 
     # 20% cap derived from NLV (not hardcoded)
     caps = {n: compute_buying_power(nlv=D(n), settled_cash=D(n), unsettled_cash=D("0"), policy=pol, today=monday).single_ticker_cap

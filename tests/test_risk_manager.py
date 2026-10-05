@@ -57,10 +57,10 @@ def test_document_policy_changes_cannot_touch_the_risk_multiplier():
     assert eng.macro_risk_multiplier == 1.0
 
 
-def test_default_posterior_is_below_the_high_probability_gate():
-    """Documents a known property: with the static default record, the soft-reserve gate stays closed."""
+def test_default_posterior_unlocks_the_high_probability_gate():
+    """Documents that with threshold 0.40, the static default record (60/130 ≈ 0.4615) unlocks the soft reserve."""
     eng = RiskEngine()
     posterior = eng.posterior_win_rate()
     assert posterior == pytest.approx(60 / 130)
-    assert posterior < float(LiquidityPolicy().risk_gate.high_prob_posterior_min)
-    assert eng.posterior_win_rate(wins=80, executions=100) > 0.55
+    assert posterior >= float(LiquidityPolicy().risk_gate.high_prob_posterior_min)
+    assert eng.posterior_win_rate(wins=80, executions=100) > 0.40

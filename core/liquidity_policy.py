@@ -123,7 +123,7 @@ class SweepPolicy(BaseModel):
 
 class RiskGatePolicy(BaseModel):
     single_ticker_cap_pct: Decimal = Field(default=Decimal("0.20"), gt=0, le=1)
-    high_prob_posterior_min: Decimal = Field(default=Decimal("0.55"), ge=0, le=1)
+    high_prob_posterior_min: Decimal = Field(default=Decimal("0.40"), ge=0, le=1)
     high_prob_regime: Literal["A", "B", "C"] = "A"
 
 

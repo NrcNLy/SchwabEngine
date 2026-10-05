@@ -318,6 +318,39 @@ class SettlementLedger:
             ))
             return pos
 
+    def adopt_position(
+        self,
+        symbol: str,
+        quantity: int,
+        entry_price: Decimal | float,
+        current_price: Optional[Decimal | float] = None,
+        *,
+        stop_price: Optional[Decimal | float] = None,
+        target_price: Optional[Decimal | float] = None,
+        regime: str = "A",
+        simulated: bool = False,
+        opened_at: Optional[datetime] = None,
+    ) -> ManagedPosition:
+        """Adopts an existing holding into the managed positions ledger."""
+        sym = symbol.upper()
+        entry_px = _d(entry_price)
+        last_px = _d(current_price) if current_price is not None else entry_px
+        with self._lock:
+            pos = ManagedPosition(
+                symbol=sym,
+                quantity=int(quantity),
+                entry_price=entry_px,
+                last_price=last_px,
+                stop_price=_d(stop_price) if stop_price is not None else None,
+                target_price=_d(target_price) if target_price is not None else None,
+                regime=regime,
+                simulated=simulated,
+                opened_at=opened_at or datetime.now(_EDT),
+            )
+            self.positions[sym] = pos
+            logger.info("Adopted managed position: %s x%d @ $%s (current: $%s)", sym, quantity, entry_px, last_px)
+            return pos
+
     def record_sell(
         self,
         symbol: str,

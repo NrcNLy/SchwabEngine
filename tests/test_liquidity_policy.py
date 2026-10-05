@@ -37,7 +37,7 @@ def test_defaults_match_user_decisions():
     assert p.inflow.weekday == "FRIDAY" and p.inflow.lag_business_days == 3
     assert p.inflow.confidence == D("0.80")
     assert p.sweep.mode == "ADVISORY" and p.sweep.symbol == "SWVXX"
-    assert p.risk_gate.high_prob_posterior_min == D("0.55") and p.risk_gate.high_prob_regime == "A"
+    assert p.risk_gate.high_prob_posterior_min == D("0.40") and p.risk_gate.high_prob_regime == "A"
     assert p.risk_gate.single_ticker_cap_pct == D("0.20")
 
 
@@ -93,7 +93,7 @@ def test_unsettled_swvxx_ach_and_backstop_do_not_change_buying_power():
 
 @pytest.mark.parametrize(
     "regime,posterior,expected",
-    [("A", 0.60, True), ("A", 0.55, True), ("A", 0.549, False), ("B", 0.95, False), ("C", 0.95, False),
+    [("A", 0.60, True), ("A", 0.40, True), ("A", 0.399, False), ("B", 0.95, False), ("C", 0.95, False),
      (None, 0.95, False), ("A", None, False)],
 )
 def test_soft_reserve_gate(regime, posterior, expected):

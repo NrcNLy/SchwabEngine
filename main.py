@@ -214,6 +214,20 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
         raise StartupError(f"First broker balance sync failed: {exc}") from exc
     ctx.broker_sync = sync
 
+    # Adopt existing broker holdings as actively managed inventory
+    for bp_item in sync.get_positions():
+        stop_val = round(float(bp_item.avg_cost) * (1.0 - float(cfg.get("risk", {}).get("tier2_stop_pct", 0.04))), 2)
+        ledger.adopt_position(
+            symbol=bp_item.symbol,
+            quantity=bp_item.quantity,
+            entry_price=bp_item.avg_cost,
+            current_price=bp_item.current_price,
+            stop_price=stop_val,
+            regime="A",
+            simulated=False,
+        )
+    sync.set_managed_symbols(ledger.positions.keys())
+
     # Conservative pre-check ceiling for StrategyEngine (no soft-reserve draw without a regime/posterior).
     def ceiling():
         bp = ledger_buying_power(ctx, "active")
