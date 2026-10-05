@@ -35,6 +35,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from core.ledger import SettlementLedger
 from core.liquidity_policy import BuyingPowerBreakdown, ZERO, is_business_day, q
 from core.runtime import EngineContext, ledger_buying_power, lifecycle_phase, now_et, parse_hhmm
+from core.session import TradingPhase, get_session_phase, is_entry_permitted
 
 logger = logging.getLogger("engine")
 
@@ -141,9 +142,10 @@ class _EngineBase:
         if self.ctx.is_halted:
             return "kill switch engaged"
         if not self.ignore_session:
-            phase = lifecycle_phase(now_et(), self.cfg)
-            if phase != "CORE_SESSION":
-                return f"outside core session ({phase})"
+            t_phase = get_session_phase(now_et(), self.cfg)
+            permitted, _, reason = is_entry_permitted(t_phase, self.cfg)
+            if not permitted:
+                return f"session phase {t_phase.value}: {reason}"
         if sym in self._in_flight or sym in self._exiting:
             return "order already in flight"
         if sym in self.ledger.positions:
@@ -244,6 +246,13 @@ class LiveEngine(_EngineBase):
         self.loop = loop
         self._stop_ids: Dict[str, str] = {}
         self._open_order_ids: Dict[str, str] = {}   # order id -> symbol (engine-placed, still working)
+        from indicators.volatility import YangZhangEstimator
+        yz_cfg = (cfg.get("risk", {}) or {}).get("yang_zhang_stops", {}) or {}
+        self._yz_window = int(yz_cfg.get("rolling_window", 30))
+        self._yz_multipliers = yz_cfg.get("ticker_multipliers", {"TQQQ": 1.8, "SOXL": 2.0, "TNA": 2.2})
+        self._yz_default_k = float(yz_cfg.get("default_k_stop", 2.0))
+        self._yz_dt_days = float(yz_cfg.get("dt_annualization_days", 1.0))
+        self._yz_estimators: Dict[str, YangZhangEstimator] = {}
         strategy.set_signal_callback(self._on_signal)
 
     # -- streamer thread entry points --------------------------------------
@@ -259,8 +268,31 @@ class LiveEngine(_EngineBase):
             px = Decimal(str(price))
             self.ledger.mark_price(sym, px)
             self.strategy.on_tick(sym, fields)
+
+            # Update Yang-Zhang volatility bar tracker
+            open_p = fields.get("open_price", price)
+            high_p = fields.get("high_price", price)
+            low_p = fields.get("low_price", price)
+            close_p = price
+            est = self._yz_estimators.get(sym)
+            if est is None:
+                from indicators.volatility import YangZhangEstimator
+                est = YangZhangEstimator(window_size=self._yz_window)
+                self._yz_estimators[sym] = est
+            yz_vol = est.add_bar(open_p, high_p, low_p, close_p)
+
             pos = self.ledger.positions.get(sym)
             if pos is not None:
+                # Dynamic volatility stop ratchet evaluation
+                if self.ctx.risk_manager is not None:
+                    k_stop = float(self._yz_multipliers.get(sym, self._yz_default_k))
+                    new_stop, ratcheted = self.ctx.risk_manager.evaluate_trailing_stop(
+                        pos, float(px), yz_vol, k_stop=k_stop, dt_days=self._yz_dt_days
+                    )
+                    if ratcheted:
+                        logger.debug("[%s] Trailing stop ratcheted to $%s (HWM: $%s, YZ vol: %.4f)",
+                                     sym, pos.stop_price, pos.high_water_mark, yz_vol)
+
                 reason = None
                 if pos.stop_price is not None and px <= pos.stop_price:
                     reason = "TIER1_STOP"
@@ -309,6 +341,14 @@ class LiveEngine(_EngineBase):
                 return False
             entry = Decimal(str(sig.entry_price))
             qty = size_entry(int(sig.quantity), entry, bp)
+            # Apply temporal gate sizing multiplier (e.g. 50% during POWER_HOUR)
+            if not self.ignore_session:
+                t_phase = get_session_phase(now_et(), self.cfg)
+                _, phase_mult, _ = is_entry_permitted(t_phase, self.cfg)
+                if phase_mult < 1.0:
+                    scaled_qty = math.floor(qty * phase_mult)
+                    logger.info("[%s] Temporal gate (%s) scaled sizing: %d -> %d shares", sym, t_phase.value, qty, scaled_qty)
+                    qty = scaled_qty
             if qty < 1:
                 logger.info("[%s] Sized to 0 shares (max order $%s, entry $%s).", sym, bp.max_order_notional, entry)
                 return False
@@ -501,6 +541,10 @@ class SimEngine(_EngineBase):
 
         pos = self.ledger.positions.get(sym)
         if pos is not None:
+            # Dynamic volatility stop ratchet evaluation
+            if self.ctx.risk_manager is not None:
+                yz_vol = float(getattr(event, "atr", 0.0)) / max(float(price), 1.0)
+                self.ctx.risk_manager.evaluate_trailing_stop(pos, float(price), yz_vol, k_stop=2.0)
             if pos.stop_price is not None and price <= pos.stop_price:
                 await self._sim_exit(sym, price, "TIER1_STOP")
             elif pos.target_price is not None and price >= pos.target_price:
@@ -525,6 +569,13 @@ class SimEngine(_EngineBase):
                 sym, float(event.atr), float(self.ledger.nlv),
                 price=float(price), max_notional=float(bp.max_order_notional),
             )
+            if not self.ignore_session:
+                t_phase = get_session_phase(now_et(), self.cfg)
+                _, phase_mult, _ = is_entry_permitted(t_phase, self.cfg)
+                if phase_mult < 1.0:
+                    scaled_shares = math.floor(shares * phase_mult)
+                    logger.info("[%s] Sim temporal gate (%s) scaled sizing: %d -> %d", sym, t_phase.value, shares, scaled_shares)
+                    shares = scaled_shares
             if shares < 1:
                 return
             cost = q(price * shares)

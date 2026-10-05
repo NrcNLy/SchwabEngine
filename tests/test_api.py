@@ -31,7 +31,8 @@ STATUS_KEYS = {
     "status", "system_state", "system_reasons", "auth_status", "auth_expires_in_s", "env", "data_source",
     "engine_mode", "is_connected", "uptime_seconds", "active_positions", "nlv", "net_change_usd",
     "net_change_pct", "today_pnl", "today_realized_pnl", "unrealized_pnl", "circuit_breaker_limit",
-    "circuit_breaker_triggered", "external_positions_detected", "timestamp_edt", "lifecycle_phase", "vm_stats",
+    "circuit_breaker_triggered", "external_positions_detected", "timestamp_edt", "lifecycle_phase",
+    "session_phase", "entry_permitted", "phase_sizing_multiplier", "vm_stats",
 }
 
 

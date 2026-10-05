@@ -63,6 +63,12 @@ class ManagedPosition:
     regime: str = "A"
     opened_at: datetime = field(default_factory=lambda: datetime.now(_EDT))
     simulated: bool = True
+    high_water_mark: Decimal = field(default=Decimal("0.00"))
+    volatility_stop_distance: Optional[Decimal] = None
+
+    def __post_init__(self):
+        if self.high_water_mark <= Decimal("0.00"):
+            self.high_water_mark = max(self.entry_price, self.last_price)
 
     @property
     def notional(self) -> Decimal:
@@ -71,6 +77,25 @@ class ManagedPosition:
     @property
     def unrealized_pnl(self) -> Decimal:
         return q((self.last_price - self.entry_price) * self.quantity)
+
+    def update_trailing_stop(self, current_price: Decimal | float, stop_distance: Decimal | float) -> bool:
+        """
+        Updates the position's high-water-mark and ratchets stop_price upward.
+        Strictly monotonic: candidate stop only replaces stop_price if candidate > stop_price.
+        Returns True if stop_price was adjusted upward.
+        """
+        px = _d(current_price)
+        dist = _d(stop_distance)
+        self.last_price = px
+        if px > self.high_water_mark:
+            self.high_water_mark = px
+
+        self.volatility_stop_distance = q(dist)
+        candidate = q(self.high_water_mark - dist)
+        if self.stop_price is None or candidate > self.stop_price:
+            self.stop_price = candidate
+            return True
+        return False
 
 
 @dataclass

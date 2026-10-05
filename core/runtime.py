@@ -61,6 +61,9 @@ def now_et() -> datetime:
     return datetime.now(_EDT)
 
 
+from core.session import TradingPhase, get_session_phase
+
+
 def lifecycle_phase(now: Optional[datetime] = None, cfg: Optional[Dict[str, Any]] = None) -> str:
     """
     Phase from the ET wall clock: PRE_MARKET 08:35-09:30, CORE_SESSION 09:30-eod,

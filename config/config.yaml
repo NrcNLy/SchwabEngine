@@ -55,6 +55,32 @@ risk:
   # ATR trailing step: activate ATR trail once price gains this multiple of R
   atr_trail_trigger_r: 1.5
 
+  # Temporal Session Gating (Intraday State Machine)
+  temporal_gates:
+    enabled: true
+    morning_drive_start: "09:30:00"
+    morning_drive_end: "10:30:00"
+    mid_morning_end: "11:30:00"
+    midday_freeze_start: "11:30:00"
+    midday_freeze_end: "14:00:00"
+    power_hour_start: "14:00:00"
+    power_hour_end: "15:35:00"
+    power_hour_sizing_multiplier: 0.50
+    pre_close_start: "15:35:00"
+    mandatory_flatten_start: "15:50:00"
+    mandatory_flatten_deadline: "15:55:00"
+
+  # Yang-Zhang Dynamic Volatility Trailing Stops
+  yang_zhang_stops:
+    enabled: true
+    rolling_window: 30
+    default_k_stop: 2.0
+    dt_annualization_days: 1.0
+    ticker_multipliers:
+      TQQQ: 1.8
+      SOXL: 2.0
+      TNA: 2.2
+
 # ---------------------------------------------------------------------------
 # Trading Universe & Wash-Sale Rotation Map
 # ---------------------------------------------------------------------------

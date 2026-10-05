@@ -36,6 +36,9 @@ export interface EngineStatus {
   external_positions_detected: boolean;
   timestamp_edt: string;
   lifecycle_phase?: LifecyclePhase;
+  session_phase?: string;
+  entry_permitted?: boolean;
+  phase_sizing_multiplier?: number;
   vm_stats?: VmStats;
 }
 

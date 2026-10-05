@@ -72,6 +72,7 @@ from core.runtime import (
     lifecycle_phase,
     now_et,
 )
+from core.session import get_session_phase, is_entry_permitted
 from services.regime_summary import build_regime_summary
 
 __all__ = ["build_app", "EngineContext", "compute_system_state"]
@@ -443,6 +444,9 @@ def build_app(ctx: EngineContext):
             "external_positions_detected": len(unmanaged) > 0,
             "timestamp_edt": datetime.now(_EDT).isoformat(),
             "lifecycle_phase": lifecycle_phase(now_et(), ctx.cfg),
+            "session_phase": get_session_phase(now_et(), ctx.cfg).value,
+            "entry_permitted": is_entry_permitted(get_session_phase(now_et(), ctx.cfg), ctx.cfg)[0],
+            "phase_sizing_multiplier": is_entry_permitted(get_session_phase(now_et(), ctx.cfg), ctx.cfg)[1],
             "vm_stats": vm_stats,
         }
 

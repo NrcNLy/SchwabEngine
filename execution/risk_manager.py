@@ -16,6 +16,7 @@ the external backstop never contribute to it.
 
 import math
 import logging
+from typing import Any, Optional
 
 logger = logging.getLogger("risk_manager")
 
@@ -148,3 +149,52 @@ class RiskEngine:
             f"Raw Shares: {raw_shares} | Multiplier: {mult:.4f} -> Final Target Shares: {scaled_shares}"
         )
         return scaled_shares
+
+    def calculate_yang_zhang_stop_distance(
+        self,
+        high_water_mark: float,
+        yz_vol: float,
+        k_stop: float = 2.0,
+        dt_days: float = 1.0,
+    ) -> float:
+        """
+        Calculates the volatility buffer distance for a trailing stop:
+            Stop Distance = High Water Mark * (k_stop * sigma_yz * sqrt(dt / 252))
+
+        If yz_vol is 0 or uninitialized, falls back to a 2% default floor to avoid zero distance.
+        """
+        if high_water_mark <= 0:
+            return 0.0
+
+        effective_vol = float(yz_vol)
+        if effective_vol <= 0.0:
+            # Safe floor fallback (2% distance)
+            return high_water_mark * 0.02
+
+        # Scale time factor: dt_days in trading days (default 1.0 day annualization root)
+        # sqrt(dt_days / 252.0)
+        time_factor = math.sqrt(max(dt_days, 1e-4) / 252.0)
+        distance = high_water_mark * (float(k_stop) * effective_vol * time_factor)
+        return max(distance, high_water_mark * 0.005)  # minimum 0.5% buffer
+
+    def evaluate_trailing_stop(
+        self,
+        position: Any,
+        current_price: float,
+        yz_vol: float,
+        k_stop: float = 2.0,
+        dt_days: float = 1.0,
+    ) -> tuple[float, bool]:
+        """
+        Calculates the stop distance and updates the position's monotonic stop ratchet.
+        Returns (new_stop_price: float, adjusted: bool).
+        """
+        hwm = float(getattr(position, "high_water_mark", getattr(position, "entry_price", current_price)))
+        hwm = max(hwm, current_price)
+        dist = self.calculate_yang_zhang_stop_distance(hwm, yz_vol, k_stop=k_stop, dt_days=dt_days)
+        adjusted = False
+        if hasattr(position, "update_trailing_stop"):
+            adjusted = position.update_trailing_stop(current_price, dist)
+        stop_price = float(position.stop_price) if position.stop_price is not None else (hwm - dist)
+        return stop_price, adjusted
+
