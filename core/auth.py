@@ -240,6 +240,8 @@ class SchwabAuthManager:
         self._lock = threading.Lock()
         self.auth_circuit_open: bool = False
         self.auth_circuit_failure_count: int = 0
+        self._last_trip_time: Optional[float] = None
+        self._circuit_cooldown_seconds: float = 300.0
 
         # Background refresh thread
         self._refresh_thread: Optional[threading.Thread] = None
@@ -301,13 +303,16 @@ class SchwabAuthManager:
         """
         with self._lock:
             if self.auth_circuit_open:
-                raise AuthCircuitBreakerError(
-                    "SchwabAuthManager: authentication circuit breaker is OPEN (AUTH_LOCKED). "
-                    "Automated outbound calls suppressed until reset via /api/auth/reset or re-authorization."
-                )
-            if self._is_token_expired():
+                if self._last_trip_time is not None and (time.monotonic() - self._last_trip_time) >= self._circuit_cooldown_seconds:
+                    logger.info("SchwabAuthManager: circuit breaker cooldown elapsed. Entering HALF-OPEN state for retry.")
+                else:
+                    raise AuthCircuitBreakerError(
+                        "SchwabAuthManager: authentication circuit breaker is OPEN (AUTH_LOCKED). "
+                        "Automated outbound calls suppressed until reset via /api/auth/reset or re-authorization."
+                    )
+            if self._is_token_expired() or self.auth_circuit_open:
                 logger.warning(
-                    "SchwabAuthManager: access token expired — synchronous refresh."
+                    "SchwabAuthManager: access token expired or circuit half-open — synchronous refresh."
                 )
                 self._do_refresh()
             return self._access_token  # type: ignore[return-value]
@@ -402,10 +407,13 @@ class SchwabAuthManager:
           transition system to AUTH_LOCKED, and suppress further outbound calls.
         """
         if self.auth_circuit_open:
-            raise AuthCircuitBreakerError(
-                "SchwabAuthManager: authentication circuit breaker is OPEN (AUTH_LOCKED). "
-                "Refresh suppressed until manual reset via /api/auth/reset or new OAuth code."
-            )
+            if self._last_trip_time is not None and (time.monotonic() - self._last_trip_time) >= self._circuit_cooldown_seconds:
+                logger.info("SchwabAuthManager: testing circuit in HALF-OPEN state.")
+            else:
+                raise AuthCircuitBreakerError(
+                    "SchwabAuthManager: authentication circuit breaker is OPEN (AUTH_LOCKED). "
+                    "Refresh suppressed until manual reset via /api/auth/reset or new OAuth code."
+                )
 
         if not self._refresh_token:
             raise RuntimeError(
@@ -440,6 +448,7 @@ class SchwabAuthManager:
                     else:
                         self.auth_circuit_open = True
                         self.auth_circuit_failure_count += 1
+                        self._last_trip_time = time.monotonic()
                         logger.critical(
                             "SchwabAuthManager: token refresh failed %d consecutive times with 4xx errors. "
                             "TRIPPING AUTH CIRCUIT BREAKER (AUTH_LOCKED).",
@@ -451,8 +460,14 @@ class SchwabAuthManager:
                         )
 
                 response.raise_for_status()
+                
+                # Check if we are recovering from an open circuit
+                if self.auth_circuit_open:
+                    logger.critical("SchwabAuthManager: Auth restored. Circuit closed.")
+                
                 self.auth_circuit_open = False
                 self.auth_circuit_failure_count = 0
+                self._last_trip_time = None
                 self._ingest_token_response(response.json())
                 return
 
@@ -465,6 +480,7 @@ class SchwabAuthManager:
                     else:
                         self.auth_circuit_open = True
                         self.auth_circuit_failure_count += 1
+                        self._last_trip_time = time.monotonic()
                         logger.critical(
                             "SchwabAuthManager: auth circuit breaker TRIPPED (AUTH_LOCKED) after %d consecutive 4xx errors: %s",
                             max_attempts, exc,

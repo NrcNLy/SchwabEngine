@@ -156,13 +156,18 @@ class RiskEngine:
         high_water_mark: float,
         yz_vol: float,
         k_stop: float = 2.0,
-        dt_days: float = 1.0,
+        dt_days: Optional[float] = None,
+        intraday_fraction: float = 1.0 / 390.0,
+        min_stop_distance_pct: float = 0.005,
     ) -> float:
         """
         Calculates the volatility buffer distance for a trailing stop:
-            Stop Distance = High Water Mark * (k_stop * sigma_yz * sqrt(dt / 252))
+            Stop Distance = High Water Mark * (k_stop * sigma_yz * time_factor)
+            where time_factor = math.sqrt(intraday_fraction / 252.0)
 
         If yz_vol is 0 or uninitialized, falls back to a 2% default floor to avoid zero distance.
+        Maintains a mathematical floor (min_stop_distance_pct = 0.005 or 0.5%) so low-volatility
+        compression cannot collapse the stop distance into the bid-ask spread.
         """
         if high_water_mark <= 0:
             return 0.0
@@ -172,11 +177,13 @@ class RiskEngine:
             # Safe floor fallback (2% distance)
             return high_water_mark * 0.02
 
-        # Scale time factor: dt_days in trading days (default 1.0 day annualization root)
-        # sqrt(dt_days / 252.0)
-        time_factor = math.sqrt(max(dt_days, 1e-4) / 252.0)
+        # Scale daily volatility to intraday resolution using the true intraday bar fraction:
+        # time_factor = math.sqrt(intraday_fraction / 252.0), where intraday_fraction = 1.0 / 390.0 for 1-minute bars.
+        fraction = float(dt_days) if dt_days is not None else float(intraday_fraction)
+        time_factor = math.sqrt(max(fraction, 1e-8) / 252.0)
         distance = high_water_mark * (float(k_stop) * effective_vol * time_factor)
-        return max(distance, high_water_mark * 0.005)  # minimum 0.5% buffer
+        floor_distance = high_water_mark * float(min_stop_distance_pct)
+        return max(distance, floor_distance, 0.01)  # minimum 0.5% buffer, bounded at 1 tick ($0.01)
 
     def evaluate_trailing_stop(
         self,
@@ -184,18 +191,56 @@ class RiskEngine:
         current_price: float,
         yz_vol: float,
         k_stop: float = 2.0,
-        dt_days: float = 1.0,
+        dt_days: Optional[float] = None,
+        intraday_fraction: float = 1.0 / 390.0,
+        hurst_exponent: Optional[float] = None,
+        min_stop_distance_pct: float = 0.005,
     ) -> tuple[float, bool]:
         """
-        Calculates the stop distance and updates the position's monotonic stop ratchet.
+        Calculates the stop distance and updates the position's monotonic stop ratchet
+        gated by the Hurst Exponent regime filter.
+
+        Regime Gating Rules:
+            - If H <= 0.50 (mean-reverting chop): Freeze the trailing stop ratchet.
+              Maintain existing stop level and prevent upward creep during microstructural consolidation.
+            - If H > 0.55 (directional persistence): Permit the dynamic stop to ratchet upward with price excursions.
+            - If 0.50 < H <= 0.55 (random walk): Retain previous ratchet state.
+
         Returns (new_stop_price: float, adjusted: bool).
         """
         hwm = float(getattr(position, "high_water_mark", getattr(position, "entry_price", current_price)))
         hwm = max(hwm, current_price)
-        dist = self.calculate_yang_zhang_stop_distance(hwm, yz_vol, k_stop=k_stop, dt_days=dt_days)
+
+        # Regime gating via Hurst Exponent
+        ratchet_permitted = getattr(position, "ratchet_permitted", True)
+        if hurst_exponent is not None:
+            h = float(hurst_exponent)
+            if h <= 0.50:
+                ratchet_permitted = False
+            elif h > 0.55:
+                ratchet_permitted = True
+            # 0.50 < h <= 0.55 retains previous ratchet_permitted state
+
+        if hasattr(position, "ratchet_permitted"):
+            position.ratchet_permitted = ratchet_permitted
+
+        dist = self.calculate_yang_zhang_stop_distance(
+            hwm,
+            yz_vol,
+            k_stop=k_stop,
+            dt_days=dt_days,
+            intraday_fraction=intraday_fraction,
+            min_stop_distance_pct=min_stop_distance_pct,
+        )
         adjusted = False
         if hasattr(position, "update_trailing_stop"):
-            adjusted = position.update_trailing_stop(current_price, dist)
+            try:
+                adjusted = position.update_trailing_stop(
+                    current_price, dist, ratchet_permitted=ratchet_permitted
+                )
+            except TypeError:
+                adjusted = position.update_trailing_stop(current_price, dist)
+
         stop_price = float(position.stop_price) if position.stop_price is not None else (hwm - dist)
         return stop_price, adjusted
 

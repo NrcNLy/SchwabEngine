@@ -50,6 +50,9 @@ data/nlv_anchor_*.json
 data/vault/
 data/*.tmp
 data/*.json.*.tmp
+data/*.db
+data/*.db-wal
+data/*.db-shm
 scratch/sample_data/
 state/
 

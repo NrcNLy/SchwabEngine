@@ -76,6 +76,10 @@ class AccountFirewallError(RuntimeError):
     """Raised when the account firewall pre-flight check fails."""
 
 
+class GoodFaithViolationBlockedError(RuntimeError):
+    """Raised when an intraday sell order is blocked to prevent a Good Faith Violation (GFV)."""
+
+
 class OrderManager:
     """
     Authenticated order submission with account firewall enforcement.
@@ -123,6 +127,7 @@ class OrderManager:
         self._account_number: Optional[str] = None
         self._firewall_ok:    bool = False
         self._tier2_stops:    Dict[str, Dict[str, Any]] = {}
+        self.telemetry:       Any = None
 
     # ------------------------------------------------------------------
     # Account Firewall
@@ -250,9 +255,7 @@ class OrderManager:
             self._account_number[-4:] if self._account_number else "?",
         )
 
-        is_essential = reason in ("MANDATORY_FLATTEN", "EMERGENCY", "API_EMERGENCY")
-        action = "MANDATORY_FLATTEN" if is_essential else "MARKET_SELL"
-        resp     = self._rest.place_order(self._account_hash, body, is_essential=is_essential, action=action)
+        resp     = self._rest.place_order(self._account_hash, body, is_essential=False, action="LIMIT_BUY")
         order_id = self._extract_order_id(resp.headers.get("Location", ""))
 
         logger.info(
@@ -302,7 +305,7 @@ class OrderManager:
             symbol, qty, price,
         )
 
-        resp     = self._rest.place_order(self._account_hash, body)
+        resp     = self._rest.place_order(self._account_hash, body, is_essential=True, action="TIER2_STOP")
         order_id = self._extract_order_id(resp.headers.get("Location", ""))
 
         logger.info(
@@ -315,6 +318,19 @@ class OrderManager:
             "quantity": qty,
             "last_update_time": time.monotonic(),
         }
+        if self.telemetry is not None:
+            self.telemetry.record_event(
+                aggregate_id=symbol.upper(),
+                event_type="TIER2_STOP_PLACED",
+                payload={
+                    "symbol": symbol.upper(),
+                    "quantity": qty,
+                    "stop_price": float(stop_price),
+                    "order_id": order_id,
+                    "category": "RISK",
+                    "message": f"Tier-2 catastrophe stop placed for {symbol.upper()} x{qty} @ ${price} (id={order_id})",
+                },
+            )
         return order_id
 
     def update_broker_stop(
@@ -386,6 +402,20 @@ class OrderManager:
             "OrderManager: Tier-2 stop cancel-replace executed for %s — old=%s, new=%s @ $%.2f",
             sym, oid, new_id, new_stop_price,
         )
+        if self.telemetry is not None:
+            self.telemetry.record_event(
+                aggregate_id=sym,
+                event_type="TIER2_STOP_REPLACED",
+                payload={
+                    "symbol": sym,
+                    "quantity": quantity,
+                    "old_order_id": oid,
+                    "new_order_id": new_id,
+                    "new_stop_price": float(new_stop_price),
+                    "category": "RISK",
+                    "message": f"Tier-2 catastrophe stop cancel-replace executed for {sym} — old={oid}, new={new_id} @ ${float(new_stop_price):.2f}",
+                },
+            )
         return new_id, True
 
     replace_broker_stop = update_broker_stop
@@ -404,6 +434,12 @@ class OrderManager:
             - EOD liquidation sweep (3:55 PM EDT).
             - Manual emergency exit.
 
+        Hard Pre-Trade GFV Check:
+        Verifies whether targeted shares were purchased with settled funds.
+        If purchased with unsettled funds (and not yet settled), blocks the sell order
+        and raises GoodFaithViolationBlockedError to force an overnight hold, overriding
+        intraday EOD liquidation routines.
+
         Note: Market orders have no price parameter — the ``price`` field is
         omitted from the order body to avoid HTTP 400.
 
@@ -415,28 +451,69 @@ class OrderManager:
         Returns:
             Order ID of the market sell order.
         """
-        self._require_firewall()
+        sym = symbol.upper()
         qty = int(quantity)
+
+        # 1. Hard Pre-Trade GFV Check
+        if self._ledger is not None and hasattr(self._ledger, "can_sell_position"):
+            can_sell, veto_msg = self._ledger.can_sell_position(sym, qty)
+            if not can_sell:
+                logger.critical(
+                    "OrderManager: GFV EXECUTION VETO — Refusing to sell %s x%d [%s]. %s (Forced Overnight Hold).",
+                    sym, qty, reason, veto_msg,
+                )
+                if self.telemetry is not None:
+                    self.telemetry.record_event(
+                        aggregate_id=sym,
+                        event_type="GFV_SELL_BLOCKED",
+                        payload={
+                            "symbol": sym,
+                            "quantity": qty,
+                            "reason": reason,
+                            "veto_reason": veto_msg,
+                            "action": "FORCED_OVERNIGHT_HOLD",
+                            "category": "GFV_PROTECTION",
+                            "message": f"Sell order for {sym} blocked to prevent Good Faith Violation: {veto_msg}",
+                        },
+                    )
+                raise GoodFaithViolationBlockedError(veto_msg)
+
+        self._require_firewall()
 
         body = self._build_order(
             instruction=_INST_SELL,
             order_type=_OT_MARKET,
-            symbol=symbol,
+            symbol=sym,
             quantity=qty,
         )
 
         logger.info(
             "OrderManager: MARKET SELL %s ×%d [reason=%s]",
-            symbol, qty, reason,
+            sym, qty, reason,
         )
 
-        resp     = self._rest.place_order(self._account_hash, body)
+        is_essential = reason in ("MANDATORY_FLATTEN", "EMERGENCY", "API_EMERGENCY", "TIER1_STOP", "TIER2_STOP")
+        action = reason if is_essential else "MARKET_SELL"
+        resp     = self._rest.place_order(self._account_hash, body, is_essential=is_essential, action=action)
         order_id = self._extract_order_id(resp.headers.get("Location", ""))
 
         logger.info(
             "OrderManager: MARKET SELL order placed — id=%s | %s ×%d",
-            order_id, symbol, qty,
+            order_id, sym, qty,
         )
+        if self.telemetry is not None:
+            self.telemetry.record_event(
+                aggregate_id=symbol.upper(),
+                event_type="MARKET_SELL",
+                payload={
+                    "symbol": symbol.upper(),
+                    "quantity": qty,
+                    "reason": reason,
+                    "order_id": order_id,
+                    "category": "ORDER/FLOW",
+                    "message": f"Market sell executed for {symbol.upper()} x{qty} [reason={reason}]",
+                },
+            )
         return order_id
 
     # ------------------------------------------------------------------

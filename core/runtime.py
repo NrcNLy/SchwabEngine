@@ -32,6 +32,7 @@ from core.liquidity_policy import (
     load_policy,
 )
 from core.nlv_anchor import NlvAnchor
+from core.telemetry import SQLiteWALEventStore
 
 logger = logging.getLogger("runtime")
 _EDT = pytz.timezone("America/New_York")
@@ -143,6 +144,7 @@ class EngineContext:
         self.api_latency_ms: Optional[float] = None
         self.sim_regimes: Dict[str, str] = {}   # dry-run pipeline regime per symbol
         self.microstructure = None
+        self.telemetry: SQLiteWALEventStore = SQLiteWALEventStore()
 
         self._start_time = datetime.utcnow()
 

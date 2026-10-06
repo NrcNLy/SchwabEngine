@@ -109,3 +109,103 @@ def test_buy_then_sell_round_trip_books_realized_pnl_and_unsettled_proceeds():
     assert lg.realized_pnl_today(date(2026, 10, 2)) == D("15.00")
     assert lg.unsettled_total == D("165.00")
     assert lg.positions == {}
+
+
+def test_three_bucket_capital_states():
+    lg = ledger("1000")
+    assert lg.settled_cash == D("1000.00")
+    assert lg.unsettled_cash == D("0.00")
+    assert lg.locked_cash == D("0.00")
+
+    # Reserve capital for SOXL
+    assert lg.allocate_capital("SOXL", D("200")) is True
+    assert lg.settled_cash == D("800.00")
+    assert lg.unsettled_cash == D("0.00")
+    assert lg.locked_cash == D("200.00")
+
+    # Fill SOXL at 190 (surplus 10 returned to settled)
+    pos = lg.confirm_buy("SOXL", 2, "95", simulated=True, when=FRIDAY_NOON)
+    assert lg.settled_cash == D("810.00")
+    assert lg.unsettled_cash == D("0.00")
+    assert lg.locked_cash == D("0.00")
+    assert pos.funded_with_settled is True
+
+    # Sell SOXL -> proceeds enter unsettled_cash
+    proceeds = lg.record_sell("SOXL", 2, "100", simulated=True, when=FRIDAY_NOON)
+    assert proceeds == D("200.00")
+    assert lg.settled_cash == D("810.00")
+    assert lg.unsettled_cash == D("200.00")
+    assert lg.locked_cash == D("0.00")
+
+
+def test_gfv_position_settled_vs_unsettled_funding():
+    lg = ledger("1000")
+    # 1. Position bought with settled funds is GFV safe on same day
+    lg.allocate_capital("SOXL", D("100"))
+    pos_settled = lg.confirm_buy("SOXL", 2, "50", simulated=True, when=FRIDAY_NOON, funded_with_settled=True)
+    assert pos_settled.funded_with_settled is True
+    safe, msg = pos_settled.is_gfv_safe_to_sell(today=date(2026, 10, 2))
+    assert safe is True
+    can_sell, _ = lg.can_sell_position("SOXL", today=date(2026, 10, 2))
+    assert can_sell is True
+    assert lg.evaluate_gfv_compliance("SOXL", today=date(2026, 10, 2)) is True
+
+    # 2. Position bought with unsettled funds is BLOCKED on trade date
+    pos_unsettled = lg.adopt_position(
+        "TNA", 10, "40", simulated=False, opened_at=FRIDAY_NOON,
+        funded_with_settled=False, settle_date=date(2026, 10, 5)
+    )
+    assert pos_unsettled.funded_with_settled is False
+    assert pos_unsettled.settle_date == date(2026, 10, 5)
+
+    # Friday (trade date) -> BLOCKED
+    safe_fri, msg_fri = pos_unsettled.is_gfv_safe_to_sell(today=date(2026, 10, 2))
+    assert safe_fri is False
+    assert "GFV VETO" in msg_fri
+    can_sell_fri, veto_fri = lg.can_sell_position("TNA", today=date(2026, 10, 2))
+    assert can_sell_fri is False
+    assert "GFV VETO" in veto_fri
+    assert lg.evaluate_gfv_compliance("TNA", today=date(2026, 10, 2)) is False
+
+    # Monday (settlement date) -> ALLOWED
+    safe_mon, msg_mon = pos_unsettled.is_gfv_safe_to_sell(today=date(2026, 10, 5))
+    assert safe_mon is True
+    assert "settled" in msg_mon.lower()
+    can_sell_mon, _ = lg.can_sell_position("TNA", today=date(2026, 10, 5))
+    assert can_sell_mon is True
+    assert lg.evaluate_gfv_compliance("TNA", today=date(2026, 10, 5)) is True
+
+
+def test_strict_reconciliation_lock_live_sell_requires_execution_payload():
+    import pytest
+    from core.ledger import ReconciliationLockError
+
+    lg = ledger("1000")
+    lg.adopt_position("SOXL", 10, "50", simulated=False, opened_at=FRIDAY_NOON)
+
+    # 1. Calling record_sell with simulated=False and no execution_payload MUST raise ReconciliationLockError
+    with pytest.raises(ReconciliationLockError, match="Definitive completed execution payload from Schwab API is required"):
+        lg.record_sell("SOXL", 10, "55", simulated=False, when=FRIDAY_NOON)
+
+    # 2. Calling record_sell with unconfirmed / non-terminal payload MUST raise ReconciliationLockError
+    pending_payload = {
+        "status": "QUEUED",
+        "filledQuantity": 0,
+        "orderActivityCollection": [],
+    }
+    with pytest.raises(ReconciliationLockError, match="Execution payload for SOXL is not filled"):
+        lg.record_sell("SOXL", 10, "55", simulated=False, when=FRIDAY_NOON, execution_payload=pending_payload)
+
+    # 3. Calling record_sell with definitive FILLED payload succeeds and credits unsettled cash
+    filled_payload = {
+        "status": "FILLED",
+        "filledQuantity": 10,
+        "orderActivityCollection": [
+            {"executionLegs": [{"legId": 1, "quantity": 10, "price": 55.0}]}
+        ],
+    }
+    proceeds = lg.record_sell("SOXL", 10, "55", simulated=False, when=FRIDAY_NOON, execution_payload=filled_payload)
+    assert proceeds == D("550.00")
+    assert lg.unsettled_cash == D("550.00")
+    assert "SOXL" not in lg.positions
+

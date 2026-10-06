@@ -477,6 +477,27 @@ def build_app(ctx: EngineContext):
             return {"enabled": False, "symbols": {}, "recent_decisions": [], "latency_max_us": 0.0}
         return ctx.microstructure.indicators(symbol)
 
+    # ---- telemetry events (SQLite WAL) --------------------------------
+
+    @router.get("/events")
+    async def get_events(aggregate_id: Optional[str] = None, limit: int = 200):
+        """
+        Retrieves immutable historical event telemetry from SQLite WAL database.
+        Non-blocking async query preserves high-frequency writer responsiveness.
+        """
+        store = getattr(ctx, "telemetry", None)
+        if store is None:
+            from core.telemetry import SQLiteWALEventStore
+            store = SQLiteWALEventStore()
+            ctx.telemetry = store
+
+        events = await store.fetch_historical_events_async(aggregate_id=aggregate_id, limit=limit)
+        return {
+            "events": [e.model_dump() for e in events],
+            "count": len(events),
+            "aggregate_id": aggregate_id,
+        }
+
     # ---- positions / orders / ledger ----------------------------------
 
     @router.get("/positions")
@@ -522,6 +543,7 @@ def build_app(ctx: EngineContext):
             return {
                 "env": env, "data_source": "UNAVAILABLE", "available": False, "synced": False,
                 "total_nlv": 0.0, "nlv": 0.0, "total_equity": 0.0,
+                "settled_cash": 0.0, "unsettled_cash": 0.0, "locked_cash": 0.0,
                 "bucket1_settled": 0.0, "bucket2_unsettled": 0.0, "bucket3_pending": 0.0,
                 "max_single_exposure": 0.0, "max_order_value": 0.0, "max_risk_per_trade": 0.0,
                 "daily_drawdown_limit": 0.0, "quarter_kelly_size": 0.0,
@@ -546,6 +568,9 @@ def build_app(ctx: EngineContext):
             "total_nlv": _f(ledger.nlv),
             "nlv": _f(ledger.nlv),
             "total_equity": _f(ledger.nlv),
+            "settled_cash": _f(ledger.settled_cash),
+            "unsettled_cash": _f(ledger.unsettled_cash),
+            "locked_cash": _f(ledger.locked_cash),
             "bucket1_settled": _f(ledger.settled),
             "bucket2_unsettled": _f(ledger.unsettled_total),
             "bucket3_pending": _f(ledger.pending_ach),

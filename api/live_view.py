@@ -536,11 +536,11 @@ def render_live_dashboard() -> str:
     }
 
     // Prepend log event to the VERY TOP of the feed
-    function addLogEvent(category, message, badgeColor = 'emerald') {
+    function addLogEvent(category, message, badgeColor = 'emerald', eventTime = null) {
       const container = document.getElementById('event-log-container');
       if (!container) return;
 
-      const now = new Date();
+      const now = eventTime || new Date();
       const timeStr = formatTime(now);
 
       // Deduplicate identical messages occurring within 10 seconds
@@ -990,7 +990,30 @@ def render_live_dashboard() -> str:
       }
     }, 1000);
 
+    async function hydrateHistoricalEvents() {
+      try {
+        const res = await fetch('/api/events?limit=100');
+        if (res.ok) {
+          const data = await res.json();
+          const events = data.events || [];
+          events.slice().reverse().forEach(e => {
+            const cat = e.payload?.category || (e.event_type.startsWith('RISK') ? 'RISK' : 'ORDER/FLOW');
+            const msg = e.payload?.message || `${e.event_type} on ${e.aggregate_id}`;
+            let color = 'emerald';
+            if (cat === 'RISK') color = 'amber';
+            else if (cat === 'REGIME') color = 'purple';
+            else if (cat === 'LIFECYCLE') color = 'blue';
+            else if (e.event_type.includes('TRIGGER') || e.event_type.includes('STOP')) color = 'rose';
+            addLogEvent(cat, msg, color, new Date(e.timestamp));
+          });
+        }
+      } catch (err) {
+        console.debug('Event hydration error:', err);
+      }
+    }
+
     // Initial poll + interval
+    hydrateHistoricalEvents();
     pollTelemetry();
     setInterval(pollTelemetry, POLL_INTERVAL_MS);
   </script>

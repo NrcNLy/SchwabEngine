@@ -52,6 +52,10 @@ class UnsettledLot:
     source: str
 
 
+class ReconciliationLockError(RuntimeError):
+    """Raised when an attempt to credit cash buckets or record fills violates the Strict Reconciliation Lock."""
+
+
 @dataclass
 class ManagedPosition:
     symbol: str
@@ -65,6 +69,9 @@ class ManagedPosition:
     simulated: bool = True
     high_water_mark: Decimal = field(default=Decimal("0.00"))
     volatility_stop_distance: Optional[Decimal] = None
+    ratchet_permitted: bool = True
+    funded_with_settled: bool = True
+    settle_date: Optional[date] = None
 
     def __post_init__(self):
         if self.high_water_mark <= Decimal("0.00"):
@@ -78,10 +85,33 @@ class ManagedPosition:
     def unrealized_pnl(self) -> Decimal:
         return q((self.last_price - self.entry_price) * self.quantity)
 
-    def update_trailing_stop(self, current_price: Decimal | float, stop_distance: Decimal | float) -> bool:
+    def is_gfv_safe_to_sell(self, today: Optional[date] = None) -> Tuple[bool, str]:
+        """
+        Evaluates whether selling this position today is compliant with T+1 settlement rules.
+        - If funded with settled cash, same-day exit is 100% GFV-safe.
+        - If funded with unsettled cash, selling prior to settle_date causes a Good Faith Violation (GFV).
+        """
+        if self.funded_with_settled:
+            return True, f"Shares of {self.symbol} were acquired with settled funds (GFV safe)."
+        current_date = today or today_et()
+        if self.settle_date is not None and current_date >= self.settle_date:
+            return True, f"Shares of {self.symbol} settled on {self.settle_date} (GFV safe)."
+        return False, (
+            f"GFV VETO: {self.symbol} shares acquired with unsettled funds. "
+            f"Selling before {self.settle_date or 'T+1'} settlement causes a Good Faith Violation (overnight hold required)."
+        )
+
+    def update_trailing_stop(
+        self,
+        current_price: Decimal | float,
+        stop_distance: Decimal | float,
+        ratchet_permitted: bool = True,
+    ) -> bool:
         """
         Updates the position's high-water-mark and ratchets stop_price upward.
-        Strictly monotonic: candidate stop only replaces stop_price if candidate > stop_price.
+        Strictly monotonic: candidate stop only replaces stop_price if candidate > stop_price
+        AND ratchet_permitted is True (Hurst persistence gate).
+        If ratchet_permitted is False (Hurst <= 0.50 chop), existing stop_price is maintained.
         Returns True if stop_price was adjusted upward.
         """
         px = _d(current_price)
@@ -91,6 +121,10 @@ class ManagedPosition:
             self.high_water_mark = px
 
         self.volatility_stop_distance = q(dist)
+        self.ratchet_permitted = ratchet_permitted
+        if not ratchet_permitted:
+            return False
+
         candidate = q(self.high_water_mark - dist)
         if self.stop_price is None or candidate > self.stop_price:
             self.stop_price = candidate
@@ -143,6 +177,7 @@ class SettlementLedger:
         self._lots: List[UnsettledLot] = []
         self._pending_ach: Decimal = ZERO
         self._reservations: Dict[str, Decimal] = {}
+        self._reservation_funded_settled: Dict[str, bool] = {}
 
         self.positions: Dict[str, ManagedPosition] = {}
         self._trades: List[TradeRecord] = []
@@ -160,6 +195,24 @@ class SettlementLedger:
     # ------------------------------------------------------------------
     # Read-only views
     # ------------------------------------------------------------------
+
+    @property
+    def settled_cash(self) -> Decimal:
+        """Cleared funds available for trading (Bucket 1)."""
+        with self._lock:
+            return self._settled
+
+    @property
+    def unsettled_cash(self) -> Decimal:
+        """Sale proceeds waiting for T+1 settlement (Bucket 2 - Hard Reserve)."""
+        with self._lock:
+            return self.unsettled_total
+
+    @property
+    def locked_cash(self) -> Decimal:
+        """Committed funds reserved for pending in-flight orders."""
+        with self._lock:
+            return q(sum(self._reservations.values(), ZERO))
 
     @property
     def bucket1_settled(self) -> float:
@@ -277,29 +330,93 @@ class SettlementLedger:
                 return False, f"cost ${cost:.2f} exceeds policy buying power ${ceiling:.2f}"
         return True, "ok"
 
-    def allocate_capital(self, ticker: str, amount) -> bool:
-        """Reserves settled cash for an entry. Never touches Bucket 2."""
+    def allocate_capital(self, ticker: str, amount, allow_unsettled: bool = False) -> bool:
+        """
+        Reserves cash for an entry. By default (allow_unsettled=False), strictly allocates
+        from settled cash (Bucket 1). If allow_unsettled=True, can draw from unsettled funds
+        if settled cash is insufficient, which tags the subsequent fill as unsettled.
+        """
         amt = q(_d(amount))
         with self._lock:
-            ok, reason = self.check_order_allowed(amt)
-            if not ok:
-                logger.error("Allocation refused for %s: %s", ticker, reason)
-                return False
-            self._settled -= amt
-            self._reservations[ticker] = self._reservations.get(ticker, ZERO) + amt
-            logger.info("Reserved $%s of SETTLED cash for %s.", amt, ticker)
-            return True
+            if not allow_unsettled:
+                ok, reason = self.check_order_allowed(amt)
+                if not ok:
+                    logger.error("Allocation refused for %s: %s", ticker, reason)
+                    return False
+                self._settled -= amt
+                self._reservations[ticker] = self._reservations.get(ticker, ZERO) + amt
+                self._reservation_funded_settled[ticker] = True
+                logger.info("Reserved $%s of SETTLED cash for %s.", amt, ticker)
+                return True
+            else:
+                available_settled = max(self._settled - self.cash_buffer, ZERO)
+                total_avail = available_settled + self.unsettled_total
+                if amt > total_avail:
+                    logger.error("Allocation refused for %s: cost $%s exceeds total cash $%s.", ticker, amt, total_avail)
+                    return False
+                if amt <= available_settled:
+                    self._settled -= amt
+                    self._reservations[ticker] = self._reservations.get(ticker, ZERO) + amt
+                    self._reservation_funded_settled[ticker] = True
+                    logger.info("Reserved $%s of SETTLED cash for %s.", amt, ticker)
+                else:
+                    from_settled = available_settled
+                    from_unsettled = amt - from_settled
+                    self._settled -= from_settled
+                    remaining_to_deduct = from_unsettled
+                    updated_lots = []
+                    for lot in self._lots:
+                        if remaining_to_deduct <= ZERO:
+                            updated_lots.append(lot)
+                        elif lot.amount <= remaining_to_deduct:
+                            remaining_to_deduct -= lot.amount
+                        else:
+                            updated_lots.append(UnsettledLot(
+                                amount=lot.amount - remaining_to_deduct,
+                                trade_date=lot.trade_date,
+                                settle_date=lot.settle_date,
+                                source=lot.source,
+                            ))
+                            remaining_to_deduct = ZERO
+                    self._lots = updated_lots
+                    self._reservations[ticker] = self._reservations.get(ticker, ZERO) + amt
+                    self._reservation_funded_settled[ticker] = False
+                    logger.warning("Reserved $%s ($%s unsettled) for %s. POSITION WILL REQUIRE OVERNIGHT HOLD.",
+                                   amt, from_unsettled, ticker)
+                return True
 
     def cancel_reservation(self, ticker: str) -> None:
         with self._lock:
             amt = self._reservations.pop(ticker, ZERO)
-            self._settled += amt
+            was_settled = self._reservation_funded_settled.pop(ticker, True)
+            if was_settled:
+                self._settled += amt
+            else:
+                if amt > ZERO:
+                    self._lots.append(UnsettledLot(
+                        amount=amt,
+                        trade_date=today_et(),
+                        settle_date=next_business_day(today_et()),
+                        source=f"CANCEL_RESERVATION:{ticker}",
+                    ))
             if amt:
-                logger.info("Released reservation $%s for %s back to settled cash.", amt, ticker)
+                logger.info("Released reservation $%s for %s back to cash.", amt, ticker)
 
-    def evaluate_gfv_compliance(self, ticker: str) -> bool:
-        """Every entry is settled-funded, so exits are always GFV-safe."""
-        return True
+    def can_sell_position(self, symbol: str, quantity: int = 0, today: Optional[date] = None) -> Tuple[bool, str]:
+        """
+        Pre-trade check: verifies if shares of `symbol` are safe to sell today without
+        causing a Good Faith Violation.
+        """
+        with self._lock:
+            sym = symbol.upper()
+            pos = self.positions.get(sym)
+            if pos is None:
+                return True, f"No active position in {sym}."
+            return pos.is_gfv_safe_to_sell(today=today)
+
+    def evaluate_gfv_compliance(self, ticker: str, today: Optional[date] = None) -> bool:
+        """Returns True if the position in ticker can be sold without GFV."""
+        return self.can_sell_position(ticker, today=today)[0]
 
     # ------------------------------------------------------------------
     # Fills
@@ -316,30 +433,57 @@ class SettlementLedger:
         regime: str = "A",
         simulated: bool = True,
         when: Optional[datetime] = None,
+        funded_with_settled: Optional[bool] = None,
+        settle_date: Optional[date] = None,
+        execution_payload: Optional[Dict[str, Any]] = None,
     ) -> ManagedPosition:
         px = _d(price)
         cost = q(px * quantity)
+        trade_dt = when or datetime.now(_EDT)
+        trade_day = trade_dt.astimezone(_EDT).date()
+        eff_settle_date = settle_date or next_business_day(trade_day)
+
         with self._lock:
             reserved = self._reservations.pop(symbol, ZERO)
+            was_settled_res = self._reservation_funded_settled.pop(symbol, True)
+            is_settled = funded_with_settled if funded_with_settled is not None else was_settled_res
+
             # Settle the difference between the reservation and the actual fill.
-            self._settled += reserved - cost
+            diff = reserved - cost
+            if diff != ZERO:
+                if was_settled_res:
+                    self._settled += diff
+                else:
+                    if diff > ZERO:
+                        self._lots.append(UnsettledLot(
+                            amount=diff, trade_date=trade_day,
+                            settle_date=eff_settle_date, source=f"RESERVATION_SURPLUS:{symbol}"
+                        ))
+                    else:
+                        self._settled += diff
+
             existing = self.positions.get(symbol)
             if existing:
                 total_qty = existing.quantity + quantity
                 avg = q((existing.entry_price * existing.quantity + px * quantity) / total_qty)
                 existing.quantity, existing.entry_price, existing.last_price = total_qty, avg, px
+                if not is_settled:
+                    existing.funded_with_settled = False
+                    existing.settle_date = max(existing.settle_date or eff_settle_date, eff_settle_date)
                 pos = existing
             else:
                 pos = ManagedPosition(
                     symbol=symbol, quantity=quantity, entry_price=px, last_price=px,
                     stop_price=_d(stop) if stop is not None else None,
                     target_price=_d(target) if target is not None else None,
-                    regime=regime, simulated=simulated, opened_at=when or datetime.now(_EDT),
+                    regime=regime, simulated=simulated, opened_at=trade_dt,
+                    funded_with_settled=is_settled,
+                    settle_date=eff_settle_date if not is_settled else None,
                 )
                 self.positions[symbol] = pos
             self._trades.append(TradeRecord(
                 symbol=symbol, side="BUY", quantity=quantity, price=px, cost_basis=cost,
-                timestamp=when or datetime.now(_EDT), simulated=simulated, regime=regime,
+                timestamp=trade_dt, simulated=simulated, regime=regime,
             ))
             return pos
 
@@ -355,11 +499,16 @@ class SettlementLedger:
         regime: str = "A",
         simulated: bool = False,
         opened_at: Optional[datetime] = None,
+        funded_with_settled: bool = True,
+        settle_date: Optional[date] = None,
     ) -> ManagedPosition:
         """Adopts an existing holding into the managed positions ledger."""
         sym = symbol.upper()
         entry_px = _d(entry_price)
         last_px = _d(current_price) if current_price is not None else entry_px
+        trade_dt = opened_at or datetime.now(_EDT)
+        trade_day = trade_dt.astimezone(_EDT).date()
+        eff_settle = settle_date or (next_business_day(trade_day) if not funded_with_settled else None)
         with self._lock:
             pos = ManagedPosition(
                 symbol=sym,
@@ -370,10 +519,13 @@ class SettlementLedger:
                 target_price=_d(target_price) if target_price is not None else None,
                 regime=regime,
                 simulated=simulated,
-                opened_at=opened_at or datetime.now(_EDT),
+                opened_at=trade_dt,
+                funded_with_settled=funded_with_settled,
+                settle_date=eff_settle,
             )
             self.positions[sym] = pos
-            logger.info("Adopted managed position: %s x%d @ $%s (current: $%s)", sym, quantity, entry_px, last_px)
+            logger.info("Adopted managed position: %s x%d @ $%s (settled_funding=%s)",
+                        sym, quantity, entry_px, funded_with_settled)
             return pos
 
     def record_sell(
@@ -384,10 +536,38 @@ class SettlementLedger:
         *,
         simulated: bool = True,
         when: Optional[datetime] = None,
+        execution_payload: Optional[Dict[str, Any]] = None,
     ) -> Decimal:
-        """Closes (part of) a position. Proceeds become an UNSETTLED lot (Hard Reserve)."""
+        """
+        Closes (part of) a position. Proceeds become an UNSETTLED lot (Bucket 2 / Hard Reserve).
+
+        Strict Reconciliation Lock:
+        For live orders (simulated=False), the ledger will REFUSE to credit cash buckets
+        or modify the position unless a definitive, completed execution payload from
+        the Schwab API is provided (e.g. status='FILLED' or non-zero filledQuantity).
+        """
         px = _d(price)
         with self._lock:
+            # Strict Reconciliation Lock for live executions
+            if not simulated:
+                if execution_payload is None:
+                    raise ReconciliationLockError(
+                        f"Strict Reconciliation Lock: Refusing to credit sale proceeds for {symbol}. "
+                        "Definitive completed execution payload from Schwab API is required for live orders."
+                    )
+                status = str(execution_payload.get("status", "")).upper()
+                filled_qty = int(float(execution_payload.get("filledQuantity", 0) or 0))
+                has_legs = False
+                for act in execution_payload.get("orderActivityCollection", []) or []:
+                    if act.get("executionLegs"):
+                        has_legs = True
+                        break
+                if status not in ("FILLED", "EXECUTED") and filled_qty <= 0 and not has_legs:
+                    raise ReconciliationLockError(
+                        f"Strict Reconciliation Lock: Execution payload for {symbol} is not filled "
+                        f"(status='{status}', filledQuantity={filled_qty}). Refusing to credit cash."
+                    )
+
             pos = self.positions.get(symbol)
             qty = min(quantity, pos.quantity) if pos else quantity
             proceeds = q(px * qty)
@@ -493,11 +673,14 @@ class SettlementLedger:
     # ------------------------------------------------------------------
 
     def snapshot(self):
-        """Legacy-compatible snapshot object plus the derived risk figures."""
+        """Legacy-compatible snapshot object plus three-bucket capital states."""
         with self._lock:
             ledger = self
 
             class Snapshot:
+                settled_cash = ledger._settled
+                unsettled_cash = ledger.unsettled_total
+                locked_cash = ledger.locked_cash
                 bucket1_settled = ledger._settled
                 bucket2_unsettled = ledger.unsettled_total
                 bucket3_pending_ach = ledger._pending_ach

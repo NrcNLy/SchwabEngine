@@ -76,6 +76,8 @@ risk:
     rolling_window: 30
     default_k_stop: 2.0
     dt_annualization_days: 1.0
+    intraday_fraction: 0.002564102564102564  # 1.0 / 390.0 (1-minute bars)
+    min_stop_distance_pct: 0.005             # 0.5% buffer floor
     ticker_multipliers:
       TQQQ: 1.8
       SOXL: 2.0

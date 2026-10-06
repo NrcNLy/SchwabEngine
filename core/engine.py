@@ -36,6 +36,7 @@ from core.ledger import SettlementLedger
 from core.liquidity_policy import BuyingPowerBreakdown, ZERO, is_business_day, q
 from core.runtime import EngineContext, ledger_buying_power, lifecycle_phase, now_et, parse_hhmm
 from core.session import TradingPhase, get_session_phase, is_entry_permitted
+from execution.order_manager import GoodFaithViolationBlockedError
 
 logger = logging.getLogger("engine")
 
@@ -128,6 +129,10 @@ class _EngineBase:
         self.settings = settings
         self.ignore_session = ignore_session
         self.micro = getattr(ctx, "microstructure", None)
+        self.telemetry = getattr(ctx, "telemetry", None)
+        if self.telemetry is None:
+            from core.telemetry import SQLiteWALEventStore
+            self.telemetry = SQLiteWALEventStore()
         self._in_flight: Set[str] = set()
         self._exiting: Set[str] = set()
         self._last_flatten_attempt = 0.0
@@ -253,6 +258,8 @@ class LiveEngine(_EngineBase):
     ):
         super().__init__(ctx, cfg, ledger, settings, ignore_session=False)
         self.om = order_manager
+        if hasattr(self.om, "telemetry") and getattr(self.om, "telemetry", None) is None:
+            self.om.telemetry = self.telemetry
         self.strategy = strategy
         self.loop = loop
         self._stop_ids: Dict[str, str] = {}
@@ -263,6 +270,8 @@ class LiveEngine(_EngineBase):
         self._yz_multipliers = yz_cfg.get("ticker_multipliers", {"TQQQ": 1.8, "SOXL": 2.0, "TNA": 2.2})
         self._yz_default_k = float(yz_cfg.get("default_k_stop", 2.0))
         self._yz_dt_days = float(yz_cfg.get("dt_annualization_days", 1.0))
+        self._yz_intraday_fraction = float(yz_cfg.get("intraday_fraction", 1.0 / 390.0))
+        self._yz_min_stop_pct = float(yz_cfg.get("min_stop_distance_pct", 0.005))
         self._yz_estimators: Dict[str, YangZhangEstimator] = {}
         strategy.set_signal_callback(self._on_signal)
         if self.micro is not None:
@@ -302,18 +311,43 @@ class LiveEngine(_EngineBase):
                 est = YangZhangEstimator(window_size=self._yz_window)
                 self._yz_estimators[sym] = est
             yz_vol = est.add_bar(open_p, high_p, low_p, close_p)
+            hurst_h = est.current_hurst()
 
             pos = self.ledger.positions.get(sym)
             if pos is not None:
-                # Dynamic volatility stop ratchet evaluation
+                # Dynamic volatility stop ratchet evaluation gated by Hurst Exponent
                 if self.ctx.risk_manager is not None:
                     k_stop = float(self._yz_multipliers.get(sym, self._yz_default_k))
                     new_stop, ratcheted = self.ctx.risk_manager.evaluate_trailing_stop(
-                        pos, float(px), yz_vol, k_stop=k_stop, dt_days=self._yz_dt_days
+                        pos,
+                        float(px),
+                        yz_vol,
+                        k_stop=k_stop,
+                        intraday_fraction=self._yz_intraday_fraction,
+                        hurst_exponent=hurst_h,
+                        min_stop_distance_pct=self._yz_min_stop_pct,
                     )
                     if ratcheted:
-                        logger.debug("[%s] Trailing stop ratcheted to $%s (HWM: $%s, YZ vol: %.4f)",
-                                     sym, pos.stop_price, pos.high_water_mark, yz_vol)
+                        logger.debug(
+                            "[%s] Trailing stop ratcheted to $%s (HWM: $%s, YZ vol: %.4f, Hurst: %s)",
+                            sym, pos.stop_price, pos.high_water_mark, yz_vol,
+                            f"{hurst_h:.3f}" if hurst_h is not None else "N/A",
+                        )
+                        if self.telemetry is not None:
+                            self.telemetry.record_event(
+                                aggregate_id=sym,
+                                event_type="DYNAMIC_STOP_RATCHET",
+                                payload={
+                                    "symbol": sym,
+                                    "stop_price": str(pos.stop_price),
+                                    "high_water_mark": str(pos.high_water_mark),
+                                    "yz_vol": float(yz_vol),
+                                    "hurst": hurst_h,
+                                    "distance": str(pos.volatility_stop_distance),
+                                    "category": "RISK",
+                                    "message": f"Dynamic stop rose to ${pos.stop_price} on {sym} (trailing Yang-Zhang protect)",
+                                },
+                            )
 
                 reason = None
                 if pos.stop_price is not None and px <= pos.stop_price:
@@ -321,6 +355,20 @@ class LiveEngine(_EngineBase):
                 elif pos.target_price is not None and px >= pos.target_price:
                     reason = "TARGET"
                 if reason:
+                    if self.telemetry is not None:
+                        self.telemetry.record_event(
+                            aggregate_id=sym,
+                            event_type="TIER1_STOP_TRIGGER" if reason == "TIER1_STOP" else "TARGET_TRIGGER",
+                            payload={
+                                "symbol": sym,
+                                "price": str(px),
+                                "stop_price": str(pos.stop_price) if pos.stop_price else None,
+                                "target_price": str(pos.target_price) if pos.target_price else None,
+                                "reason": reason,
+                                "category": "ORDER/FLOW",
+                                "message": f"{reason} triggered on {sym} @ ${px}",
+                            },
+                        )
                     self.loop.call_soon_threadsafe(self._request_exit, sym, reason)
         except Exception:
             logger.exception("Tick handling failed for %s", sym)
@@ -464,6 +512,13 @@ class LiveEngine(_EngineBase):
         pos = self.ledger.positions.get(sym)
         if pos is None:
             return False
+
+        # Pre-exit GFV veto check: hold overnight if shares were purchased with unsettled funds
+        can_sell, veto_reason = self.ledger.can_sell_position(sym, pos.quantity)
+        if not can_sell:
+            logger.warning("[%s] Exit blocked by GFV protection (%s). Position held overnight.", sym, veto_reason)
+            return False
+
         self._exiting.add(sym)
         try:
             qty = pos.quantity
@@ -477,6 +532,9 @@ class LiveEngine(_EngineBase):
 
             try:
                 oid = await asyncio.to_thread(self.om.execute_market_sell, sym, qty, reason)
+            except GoodFaithViolationBlockedError as gfv_err:
+                logger.warning("[%s] Market sell blocked by GFV protection (%s). Position held overnight.", sym, gfv_err)
+                return False
             except Exception as exc:
                 logger.critical("[%s] MARKET SELL FAILED (%s) [%s]. Re-arming broker stop.", sym, exc, reason)
                 await self._rearm_stop(sym, pos.quantity, pos.entry_price)
@@ -490,7 +548,7 @@ class LiveEngine(_EngineBase):
                 await self._rearm_stop(sym, qty, pos.entry_price)
                 return False
             price = avg if avg is not None else pos.last_price
-            self.ledger.record_sell(sym, filled, price, simulated=False)
+            self.ledger.record_sell(sym, filled, price, simulated=False, execution_payload=doc)
             logger.info("[%s] Exit %s: sold %d @ %s", sym, reason, filled, price)
             return filled >= qty
         finally:
@@ -514,6 +572,10 @@ class LiveEngine(_EngineBase):
                 logger.warning("Could not cancel engine order %s: %s", oid, exc)
             self._open_order_ids.pop(oid, None)
         self._stop_ids.clear()
+
+        # Add a deterministic synchronization delay to allow the broker to confirm cancellations 
+        # and the streamer to process any in-flight partial fills.
+        await asyncio.sleep(2)
 
         closed = 0
         for pos in self.ledger.get_positions():
@@ -593,17 +655,72 @@ class SimEngine(_EngineBase):
         self.ctx.mark_tick("MOCK")
         self.ledger.mark_price(sym, price)
         code = regime_code_from_ci(float(event.choppiness_index), self._trend_max, self._chop_min)
+        old_code = self.ctx.sim_regimes.get(sym)
         self.ctx.sim_regimes[sym] = code
+        if old_code is not None and old_code != code and self.telemetry is not None:
+            self.telemetry.record_event(
+                aggregate_id=sym,
+                event_type="REGIME_TRANSITION",
+                payload={
+                    "symbol": sym,
+                    "old_regime": old_code,
+                    "new_regime": code,
+                    "choppiness_index": float(event.choppiness_index),
+                    "category": "REGIME",
+                    "message": f"Regime changed on {sym}: {old_code} -> {code} (CI={float(event.choppiness_index):.1f})",
+                },
+            )
 
         pos = self.ledger.positions.get(sym)
         if pos is not None:
             # Dynamic volatility stop ratchet evaluation
             if self.ctx.risk_manager is not None:
                 yz_vol = float(getattr(event, "atr", 0.0)) / max(float(price), 1.0)
-                self.ctx.risk_manager.evaluate_trailing_stop(pos, float(price), yz_vol, k_stop=2.0)
+                hurst_h = getattr(event, "hurst", None)
+                new_stop, ratcheted = self.ctx.risk_manager.evaluate_trailing_stop(
+                    pos, float(price), yz_vol, k_stop=2.0, hurst_exponent=hurst_h
+                )
+                if ratcheted and self.telemetry is not None:
+                    self.telemetry.record_event(
+                        aggregate_id=sym,
+                        event_type="DYNAMIC_STOP_RATCHET",
+                        payload={
+                            "symbol": sym,
+                            "stop_price": str(pos.stop_price),
+                            "high_water_mark": str(pos.high_water_mark),
+                            "yz_vol": float(yz_vol),
+                            "hurst": hurst_h,
+                            "category": "RISK",
+                            "message": f"Dynamic stop rose to ${pos.stop_price} on {sym}",
+                        },
+                    )
             if pos.stop_price is not None and price <= pos.stop_price:
+                if self.telemetry is not None:
+                    self.telemetry.record_event(
+                        aggregate_id=sym,
+                        event_type="TIER1_STOP_TRIGGER",
+                        payload={
+                            "symbol": sym,
+                            "price": str(price),
+                            "stop_price": str(pos.stop_price),
+                            "category": "ORDER/FLOW",
+                            "message": f"Tier-1 stop hit on {sym} @ ${price}",
+                        },
+                    )
                 await self._sim_exit(sym, price, "TIER1_STOP")
             elif pos.target_price is not None and price >= pos.target_price:
+                if self.telemetry is not None:
+                    self.telemetry.record_event(
+                        aggregate_id=sym,
+                        event_type="TARGET_TRIGGER",
+                        payload={
+                            "symbol": sym,
+                            "price": str(price),
+                            "target_price": str(pos.target_price),
+                            "category": "ORDER/FLOW",
+                            "message": f"Target hit on {sym} @ ${price}",
+                        },
+                    )
                 await self._sim_exit(sym, price, "TARGET")
             return
 
@@ -656,6 +773,10 @@ class SimEngine(_EngineBase):
             return False
         pos = self.ledger.positions.get(sym)
         if pos is None:
+            return False
+        can_sell, veto_reason = self.ledger.can_sell_position(sym, pos.quantity)
+        if not can_sell:
+            logger.warning("[%s] SIM exit blocked by GFV protection: %s (holding overnight)", sym, veto_reason)
             return False
         self._exiting.add(sym)
         try:

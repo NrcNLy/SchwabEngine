@@ -40,6 +40,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Deque, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class OHLCBar:
@@ -153,9 +155,94 @@ class YangZhangEstimator:
             return 0.0
         return compute_yang_zhang_volatility(list(self._bars))
 
+    def current_hurst(self) -> Optional[float]:
+        """
+        Calculates the rolling Hurst exponent from closed-bar log returns.
+        Returns a float between 0.0 and 1.0, or None if fewer than 10 closed bars exist.
+        """
+        bars = list(self._bars)
+        if len(bars) < 10:
+            return None
+        closes = np.array([b.close for b in bars], dtype=float)
+        if np.any(closes <= 0):
+            return None
+        log_returns = np.diff(np.log(closes))
+        return compute_hurst_rs(log_returns)
+
     @property
     def bar_count(self) -> int:
         return len(self._bars)
 
     def clear(self) -> None:
         self._bars.clear()
+
+
+def anis_lloyd_expected_rs(n: int) -> float:
+    """
+    Theoretical expected R/S value for i.i.d. Gaussian series of length n (Anis & Lloyd, 1976).
+    Corrects small-sample bias so that Brownian noise centers at H = 0.50.
+    """
+    if n <= 2:
+        return 1.0
+    term1 = math.gamma((n - 1) / 2.0) / (math.sqrt(math.pi) * math.gamma(n / 2.0))
+    term2 = sum(math.sqrt((n - i) / i) for i in range(1, n))
+    return term1 * term2
+
+
+def compute_hurst_rs(log_returns: Sequence[float] | np.ndarray) -> float:
+    """
+    Computes the Hurst Exponent (H) using Rescaled Range (R/S) analysis with Anis-Lloyd correction.
+
+    Interpretation:
+        H <= 0.50: Mean-reverting / anti-persistent (chop / consolidation)
+        0.50 < H <= 0.55: Geometric Brownian Motion (random walk / uninformative)
+        H > 0.55: Trend-reinforcing / persistent (directional momentum)
+
+    Returns:
+        float: Estimated Hurst exponent in [0.0, 1.0]. Returns 0.50 on insufficient data (<10 points)
+               or zero variance.
+    """
+    series = np.asarray(log_returns, dtype=float)
+    n = len(series)
+    if n < 10:
+        return 0.50
+
+    stdev = float(np.std(series))
+    if stdev < 1e-9:
+        return 0.50
+
+    candidate_lags = [8, 12, 16, 24, 32, 48, 64]
+    lags = [tau for tau in candidate_lags if tau <= n]
+    if len(lags) < 2:
+        lags = [max(4, n // 3), max(6, (2 * n) // 3), n]
+        lags = sorted(list(set([l for l in lags if 4 <= l <= n])))
+        if len(lags) < 2:
+            return 0.50
+
+    log_lags: List[float] = []
+    log_ratio: List[float] = []
+
+    for tau in lags:
+        k = n // tau
+        if k == 0:
+            continue
+        sub = series[: k * tau].reshape(k, tau)
+        means = np.mean(sub, axis=1, keepdims=True)
+        y = sub - means
+        z = np.cumsum(y, axis=1)
+        z_pad = np.pad(z, ((0, 0), (1, 0)), mode="constant")
+        ranges = np.ptp(z_pad, axis=1)
+        stds = np.std(sub, axis=1, ddof=1)
+        valid = stds > 1e-9
+        if np.any(valid):
+            avg_rs = float(np.mean(ranges[valid] / stds[valid]))
+            e_rs = anis_lloyd_expected_rs(tau)
+            if avg_rs > 0 and e_rs > 0:
+                log_lags.append(float(np.log(tau)))
+                log_ratio.append(float(np.log(avg_rs) - np.log(e_rs)))
+
+    if len(log_lags) < 2:
+        return 0.50
+
+    slope, _ = np.polyfit(log_lags, log_ratio, 1)
+    return float(np.clip(0.5 + slope, 0.0, 1.0))
