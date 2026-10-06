@@ -212,6 +212,29 @@ class _EngineBase:
                             count = await self.flatten_all("EOD_FLAT")
                             logger.info("EOD flatten pass closed %d position(s).", count)
 
+                    if t >= self.settings.flat_deadline and done.get("flatten_sweep") != today:
+                        done["flatten_sweep"] = today
+                        remaining = len(self.ledger.positions)
+                        syms = sorted(self.ledger.positions.keys())
+                        try:
+                            from core.notifier import send_alert
+                            if remaining == 0:
+                                send_alert(
+                                    title="15:55 Flatten Sweep Complete",
+                                    message="All engine positions successfully liquidated to 100% cash.",
+                                    priority="high",
+                                    tags=["broom", "checkered_flag"],
+                                )
+                            else:
+                                send_alert(
+                                    title="15:55 Flatten Sweep Alert - Open Positions!",
+                                    message=f"Sweep completed but {remaining} position(s) remain open: {syms}. Check Schwab immediately.",
+                                    priority="urgent",
+                                    tags=["rotating_light", "warning"],
+                                )
+                        except Exception:
+                            pass
+
                     if (self.settings.flat_deadline <= t < close and self.ledger.positions
                             and time.monotonic() - last_audit >= 60):
                         last_audit = time.monotonic()
@@ -234,7 +257,22 @@ class _EngineBase:
     @staticmethod
     async def _run_governor(governor: Any) -> None:
         try:
-            await governor.pre_market_macro()
+            res = await governor.pre_market_macro()
+            try:
+                from core.notifier import send_alert
+                msg = "Pre-market macro regime evaluated and strategy configuration updated."
+                if isinstance(res, dict):
+                    regime = res.get("regime") or res.get("target_regime")
+                    if regime:
+                        msg = f"08:35 macro regime determined: {regime}."
+                send_alert(
+                    title="08:35 Macro Regime Determined",
+                    message=msg,
+                    priority="low",
+                    tags=["chart_with_upwards_trend", "crystal_ball"],
+                )
+            except Exception:
+                pass
         except Exception:
             logger.exception("Governor pre-market macro failed (Tier 1 unaffected).")
 
@@ -493,6 +531,16 @@ class LiveEngine(_EngineBase):
             regime=sig.regime.value, simulated=False,
         )
         logger.info("[%s] Entry filled: %d @ %s", sym, filled, price)
+        try:
+            from core.notifier import send_alert
+            send_alert(
+                title=f"Order Filled: BUY {filled} {sym}",
+                message=f"Filled {filled} shares of {sym} at ${price} (Regime: {sig.regime.value}).",
+                priority="default",
+                tags=["shopping_cart", "chart_with_upwards_trend"],
+            )
+        except Exception:
+            pass
 
         stop_px = q(price * (Decimal("1") - self.settings.tier2_stop_pct))
         try:
@@ -550,6 +598,16 @@ class LiveEngine(_EngineBase):
             price = avg if avg is not None else pos.last_price
             self.ledger.record_sell(sym, filled, price, simulated=False, execution_payload=doc)
             logger.info("[%s] Exit %s: sold %d @ %s", sym, reason, filled, price)
+            try:
+                from core.notifier import send_alert
+                send_alert(
+                    title=f"Order Filled: SELL {filled} {sym}",
+                    message=f"Exit {reason}: sold {filled} {sym} at ${price}.",
+                    priority="default",
+                    tags=["moneybag", "outbox_tray"],
+                )
+            except Exception:
+                pass
             return filled >= qty
         finally:
             self._exiting.discard(sym)
@@ -765,6 +823,16 @@ class SimEngine(_EngineBase):
             target = q(price + self._rr * Decimal("1.5") * atr)
             self.ledger.confirm_buy(sym, shares, price, stop=stop, target=target, regime=code, simulated=True)
             logger.info("[%s] SIM entry: %d @ %s (stop %s, target %s)", sym, shares, price, stop, target)
+            try:
+                from core.notifier import send_alert
+                send_alert(
+                    title=f"Order Filled: BUY {shares} {sym} (SIM)",
+                    message=f"Simulated fill: {shares} shares of {sym} at ${price} (Regime: {code}).",
+                    priority="default",
+                    tags=["shopping_cart", "chart_with_upwards_trend"],
+                )
+            except Exception:
+                pass
         finally:
             self._in_flight.discard(sym)
 
@@ -782,6 +850,16 @@ class SimEngine(_EngineBase):
         try:
             self.ledger.record_sell(sym, pos.quantity, price, simulated=True)
             logger.info("[%s] SIM exit %s @ %s", sym, reason, price)
+            try:
+                from core.notifier import send_alert
+                send_alert(
+                    title=f"Order Filled: SELL {pos.quantity} {sym} (SIM)",
+                    message=f"Simulated exit {reason}: sold {pos.quantity} {sym} at ${price}.",
+                    priority="default",
+                    tags=["moneybag", "outbox_tray"],
+                )
+            except Exception:
+                pass
             return True
         finally:
             self._exiting.discard(sym)

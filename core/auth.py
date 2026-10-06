@@ -392,9 +392,21 @@ class SchwabAuthManager:
     def reset_circuit_breaker(self) -> None:
         """Manually reset the authentication circuit breaker."""
         with self._lock:
+            was_open = self.auth_circuit_open
             self.auth_circuit_open = False
             self.auth_circuit_failure_count = 0
             logger.info("SchwabAuthManager: authentication circuit breaker reset manually.")
+            if was_open:
+                try:
+                    from core.notifier import send_alert
+                    send_alert(
+                        title="Schwab Developer Access Restored!",
+                        message="Authentication circuit breaker manually reset to CLOSED. Automated broker calls restored.",
+                        priority="urgent",
+                        tags=["white_check_mark", "lock"],
+                    )
+                except Exception:
+                    pass
 
     def _do_refresh(self, backoff_sec: float = 10.0) -> None:
         """
@@ -454,6 +466,16 @@ class SchwabAuthManager:
                             "TRIPPING AUTH CIRCUIT BREAKER (AUTH_LOCKED).",
                             max_attempts,
                         )
+                        try:
+                            from core.notifier import send_alert
+                            send_alert(
+                                title="Auth Circuit Breaker TRIPPED!",
+                                message=f"OAuth token refresh failed {max_attempts} consecutive times (HTTP {response.status_code}). Engine locked.",
+                                priority="urgent",
+                                tags=["rotating_light", "warning"],
+                            )
+                        except Exception:
+                            pass
                         raise AuthCircuitBreakerError(
                             f"OAuth token refresh returned HTTP {response.status_code}. "
                             "Auth circuit breaker TRIPPED (AUTH_LOCKED)."
@@ -464,6 +486,16 @@ class SchwabAuthManager:
                 # Check if we are recovering from an open circuit
                 if self.auth_circuit_open:
                     logger.critical("SchwabAuthManager: Auth restored. Circuit closed.")
+                    try:
+                        from core.notifier import send_alert
+                        send_alert(
+                            title="Schwab Developer Access Restored!",
+                            message="Authentication circuit breaker recovered to CLOSED / HALF-OPEN state. Automated broker calls restored.",
+                            priority="urgent",
+                            tags=["white_check_mark", "lock"],
+                        )
+                    except Exception:
+                        pass
                 
                 self.auth_circuit_open = False
                 self.auth_circuit_failure_count = 0
@@ -485,6 +517,16 @@ class SchwabAuthManager:
                             "SchwabAuthManager: auth circuit breaker TRIPPED (AUTH_LOCKED) after %d consecutive 4xx errors: %s",
                             max_attempts, exc,
                         )
+                        try:
+                            from core.notifier import send_alert
+                            send_alert(
+                                title="Auth Circuit Breaker TRIPPED!",
+                                message=f"Auth circuit breaker TRIPPED after {max_attempts} consecutive 4xx errors: {exc}",
+                                priority="urgent",
+                                tags=["rotating_light", "warning"],
+                            )
+                        except Exception:
+                            pass
                         raise AuthCircuitBreakerError(
                             f"OAuth token refresh returned HTTP {exc.response.status_code}. "
                             "Auth circuit breaker TRIPPED (AUTH_LOCKED)."

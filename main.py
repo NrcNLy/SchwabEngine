@@ -311,6 +311,18 @@ async def run(args: argparse.Namespace) -> int:
 
     ctx.flatten_cb = engine.flatten_all
 
+    # Verification ping to ntfy alert topic on startup
+    try:
+        from core.notifier import send_alert
+        send_alert(
+            title="SchwabEngine Startup",
+            message="SchwabEngine Alert Pipe Active on schwab-trader VM",
+            priority="default",
+            tags=["rocket", "satellite"],
+        )
+    except Exception:
+        pass
+
     governor = make_governor() if (live or args.governor) else None
     tasks.append(asyncio.create_task(engine.run_schedulers(stop, governor), name="schedulers"))
 
