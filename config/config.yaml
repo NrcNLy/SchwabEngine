@@ -39,12 +39,12 @@ risk:
   cash_buffer: 10.00
 
   # NLV-relative limits (single source of truth for ledger, API and UI)
-  single_ticker_cap_pct: 0.20     # max notional per ticker = 20% of NLV
-  max_risk_per_trade_pct: 0.01    # 1% of NLV
-  daily_drawdown_pct: 0.03        # 3% of NLV circuit breaker
+  single_ticker_cap_pct: 0.33     # max notional per ticker = 33% of NLV
+  max_risk_per_trade_pct: 0.02    # 2% of NLV
+  daily_drawdown_pct: 0.05        # 5% of NLV circuit breaker
 
   # Maximum loss per trade (used in Quarter-Kelly sizing)
-  max_loss_per_trade: 10.00
+  max_loss_per_trade: 50.00
 
   # Tier-2 broker-side catastrophe stop: percentage below entry price
   tier2_stop_pct: 0.04   # 4.0%

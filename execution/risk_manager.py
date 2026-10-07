@@ -23,7 +23,7 @@ logger = logging.getLogger("risk_manager")
 
 # Prior used for Bayesian shrinkage and the Kelly robustness constant.
 PRIOR_MEAN = 0.5
-ROBUSTNESS_KAPPA = 30
+ROBUSTNESS_KAPPA = 15
 
 
 class RiskEngine:

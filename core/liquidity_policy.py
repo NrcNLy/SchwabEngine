@@ -106,7 +106,7 @@ class InflowSchedule(BaseModel):
 
 
 class SoftReservePolicy(BaseModel):
-    pct_nlv: Decimal = Field(default=Decimal("0.10"), ge=0, le=1)
+    pct_nlv: Decimal = Field(default=Decimal("0.05"), ge=0, le=1)
     floor_usd: Decimal = Field(default=Decimal("100.00"), ge=0)
     max_draw_fraction: Decimal = Field(default=Decimal("0.50"), ge=0, le=1)
     min_cash_buffer: Decimal = Field(default=Decimal("10.00"), ge=0)
@@ -122,7 +122,7 @@ class SweepPolicy(BaseModel):
 
 
 class RiskGatePolicy(BaseModel):
-    single_ticker_cap_pct: Decimal = Field(default=Decimal("0.20"), gt=0, le=1)
+    single_ticker_cap_pct: Decimal = Field(default=Decimal("0.33"), gt=0, le=1)
     high_prob_posterior_min: Decimal = Field(default=Decimal("0.40"), ge=0, le=1)
     high_prob_regime: Literal["A", "B", "C"] = "A"
 

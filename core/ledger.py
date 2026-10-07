@@ -160,9 +160,9 @@ class SettlementLedger:
         self,
         baseline_settled: Decimal | float = 0,
         *,
-        single_ticker_cap_pct: Decimal | float = "0.20",
-        risk_per_trade_pct: Decimal | float = "0.01",
-        daily_drawdown_pct: Decimal | float = "0.03",
+        single_ticker_cap_pct: Decimal | float = "0.33",
+        risk_per_trade_pct: Decimal | float = "0.02",
+        daily_drawdown_pct: Decimal | float = "0.05",
         cash_buffer: Decimal | float = "10.00",
         data_source: str = "SANDBOX_SIM",
     ):
