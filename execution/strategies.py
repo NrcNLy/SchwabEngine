@@ -1124,6 +1124,32 @@ class StrategyEngine:
             signal = self._check_vwap_mr_signal(state, now)
 
         if signal is not None and signal.quantity >= _MIN_SIGNAL_QUANTITY:
+            # Clamp position size against ledger's max single-ticker cap and available buying power
+            max_shares_by_cap = int(float(self._ledger.max_single_exposure) // float(signal.entry_price))
+            max_shares_by_cash = int((float(self._ledger.settled_cash) - float(self._ledger.cash_buffer)) // float(signal.entry_price))
+            max_allowed = min(max_shares_by_cap, max_shares_by_cash)
+            clamped_quantity = min(signal.quantity, max_allowed)
+            
+            if clamped_quantity <= 0:
+                logger.warning(
+                    "StrategyEngine: %s signal suppressed — 0 shares fit cap ($%.2f) or cash ($%.2f).",
+                    signal.symbol, float(self._ledger.max_single_exposure), float(self._ledger.settled_cash) - float(self._ledger.cash_buffer)
+                )
+                from core.notifier import send_alert
+                import threading
+                threading.Thread(
+                    target=send_alert,
+                    args=(
+                        f"[SUPPRESSED] {signal.symbol} Order Rejected",
+                        f"Zero shares fit within the single-ticker cap (${float(self._ledger.max_single_exposure):.2f}) or available buying power.",
+                        "high",
+                        "warning,no_entry_sign"
+                    ),
+                    daemon=True
+                ).start()
+                return
+
+            signal.quantity = clamped_quantity
             # Verify compliance ledger approves the order cost
             order_cost = signal.entry_price * signal.quantity
             allowed, reason = self._ledger.check_order_allowed(order_cost)
@@ -1132,21 +1158,53 @@ class StrategyEngine:
                     "StrategyEngine: signal for %s suppressed by ledger: %s",
                     signal.symbol, reason,
                 )
+                from core.notifier import send_alert
+                import threading
+                threading.Thread(
+                    target=send_alert,
+                    args=(
+                        f"[SUPPRESSED] {signal.symbol} Order Rejected",
+                        f"Reason: {reason}",
+                        "high",
+                        "warning,no_entry_sign"
+                    ),
+                    daemon=True
+                ).start()
                 return
 
+            # Fix Premature Flag Consumption: Only consume the ORB slot if it passed the ledger gate
+            if signal.strategy == "15m_ORB":
+                state.orb_signal_fired = True
+
             state.last_signal_times[signal.strategy] = now
+            
+            risk_amt = float(signal.entry_price - signal.stop_price) * signal.quantity
+            total_notional = float(signal.entry_price) * signal.quantity
             logger.info(
                 "SIGNAL %-10s | %s %s × %d @ $%.2f | stop=$%.2f target=$%.2f | "
                 "risk=$%.2f",
                 signal.strategy, signal.symbol, signal.direction,
                 signal.quantity, signal.entry_price,
                 signal.stop_price, signal.target_price,
-                float(signal.entry_price - signal.stop_price) * signal.quantity,
+                risk_amt,
             )
 
             if self._signal_cb:
                 try:
                     self._signal_cb(signal)
+                    
+                    from core.notifier import send_alert
+                    import threading
+                    threading.Thread(
+                        target=send_alert,
+                        args=(
+                            f"[ROUTED] {signal.direction} {signal.quantity} {signal.symbol} @ ~${float(signal.entry_price):.2f}",
+                            f"Strategy: {signal.strategy}\nStop Distance: ${float(signal.entry_price - signal.stop_price):.2f}\nRisk Capital: ${risk_amt:.2f}\nTotal Notional: ${total_notional:.2f}",
+                            "default",
+                            "rocket,moneybag"
+                        ),
+                        daemon=True
+                    ).start()
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
                         "StrategyEngine: signal_callback raised: %s", exc
@@ -1227,8 +1285,6 @@ class StrategyEngine:
         # Pre-signal gate check (e.g. microstructure veto before burning ORB or starting cooldown)
         if self._pre_filter and not self._pre_filter(state.symbol, "15m_ORB"):
             return None
-
-        state.orb_signal_fired = True   # One ORB per day per spec
 
         return TradeSignal(
             timestamp=now,

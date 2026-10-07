@@ -181,6 +181,7 @@ class _EngineBase:
         done: Dict[str, date] = {}
         last_anchor = 0.0
         last_audit = 0.0
+        last_phase = None
         macro_at = parse_hhmm(None, "08:35:00")
         rollover_at = parse_hhmm((self.cfg.get("schedule", {}) or {}).get("t1_rollover_time"), "09:00:00")
         close = dtime(16, 15)
@@ -189,6 +190,23 @@ class _EngineBase:
             try:
                 now = now_et()
                 today, t = now.date(), now.time()
+
+                current_phase = get_session_phase(now, self.cfg)
+                if last_phase is not None and current_phase != last_phase:
+                    permitted = is_entry_permitted(current_phase, self.cfg)[0]
+                    from core.notifier import send_alert
+                    import threading
+                    threading.Thread(
+                        target=send_alert,
+                        args=(
+                            f"[PHASE] Engine: {current_phase.value}",
+                            f"State transition from {last_phase.value} to {current_phase.value}. Entry permitted: {permitted}.",
+                            "default",
+                            "clock,repeat"
+                        ),
+                        daemon=True
+                    ).start()
+                last_phase = current_phase
 
                 if time.monotonic() - last_anchor >= 60:
                     last_anchor = time.monotonic()

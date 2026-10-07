@@ -325,7 +325,7 @@ async def run(args: argparse.Namespace) -> int:
     try:
         from core.notifier import send_alert
         send_alert(
-            title="SchwabEngine Startup",
+            title="[SYSTEM] Engine v2.4 Live - Telemetry Active",
             message="SchwabEngine Alert Pipe Active on schwab-trader VM",
             priority="default",
             tags=["rocket", "satellite"],

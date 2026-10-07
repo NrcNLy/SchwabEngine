@@ -1,0 +1,10 @@
+2026-10-07 07:51:41,354 [INFO] Starting MobileWatcher daemon...
+2026-10-07 07:51:41,354 [INFO] Polling target: http://127.0.0.1:8080/api/status?env=sandbox every 60s
+2026-10-07 07:51:41,355 [INFO] Alert channel: https://ntfy.sh/schwab_engine_alerts_nrc
+2026-10-07 08:07:32,002 [INFO] Starting MobileWatcher daemon...
+2026-10-07 08:07:32,002 [INFO] Polling target: http://127.0.0.1:8080/api/status?env=sandbox every 60s
+2026-10-07 08:07:32,002 [INFO] Alert channel: https://ntfy.sh/schwab-trader-nrc-8472
+2026-10-07 08:07:34,029 [INFO] Backend unreachable (tunnel down or rebooting): HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /api/status?env=sandbox (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=8080): Failed to establish a new connection: [WinError 10061] No connection could be made because the target machine actively refused it"))
+2026-10-07 08:07:59,703 [INFO] Starting MobileWatcher daemon...
+2026-10-07 08:07:59,703 [INFO] Polling target: http://127.0.0.1:8080/api/status?env=sandbox every 60s
+2026-10-07 08:07:59,703 [INFO] Alert channel: https://ntfy.sh/schwab-trader-nrc-8472

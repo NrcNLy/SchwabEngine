@@ -318,7 +318,7 @@ class SettlementLedger:
                                f"less ${self.cash_buffer:.2f} buffer (unsettled funds are Hard Reserve)")
             cap = self.max_single_exposure
             if cap > 0 and cost > cap:
-                return False, f"cost ${cost:.2f} exceeds single-ticker cap ${cap:.2f} (20% NLV)"
+                return False, f"cost ${cost:.2f} exceeds single-ticker cap ${cap:.2f} (33% NLV)"
             provider = self._ceiling_provider
         if provider is not None:
             try:
