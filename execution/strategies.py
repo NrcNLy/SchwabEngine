@@ -729,12 +729,12 @@ class StrategyEngine:
 
         try:
             logger.info(
-                "StrategyEngine: preloading 20-day 1m history for %s…", sym
+                "StrategyEngine: preloading 10-day 1m history for %s…", sym
             )
             history = rest_client.get_price_history(
                 symbol=sym,
                 period_type="day",
-                period=20,
+                period=10,
                 frequency_type="minute",
                 frequency=1,
                 need_extended_hours_data=False,
