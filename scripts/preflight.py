@@ -13,12 +13,12 @@ What it checks
  1. Syntax            every Python file compiles
  2. Imports           every runtime module imports
  3. YAML hygiene      config.yaml has no duplicate keys (a duplicate silently shadows the first)
- 4. Config hygiene    live_trading=false, SWVXX excluded, 20% cap, schedule, model allow-list
+ 4. Config hygiene    live_trading=false, SWVXX excluded, 33% cap, schedule, model allow-list
  5. Repo hygiene      secrets / vault / state are gitignored and untracked, no key patterns in tracked
                       files, no hardcoded cap literals in the UI
  6. State I/O         atomic JSON round-trips and thread-safe read-modify-write
  7. GFV invariants    settled-only funding, T+1 rollover, lower-of broker sync, SWVXX/ACH/backstop never
-                      buying power, soft-reserve gate, 20% single-ticker cap derived from NLV
+                      buying power, soft-reserve gate, 33% single-ticker cap derived from NLV
  8. Zero auto-throttle document ingestion / API never touches the risk multiplier
  9. API contract      every endpoint, both mounts, env handling, honest UNAVAILABLE, WebSocket
 10. Macro freshness   strategy_config.json / regime summary age
@@ -224,7 +224,7 @@ def check_yaml_and_config() -> None:
                 detail_fail="SWVXX could be auto-stopped or liquidated")
 
     risk = cfg.get("risk", {}) or {}
-    R.check(float(risk.get("single_ticker_cap_pct", 0)) == 0.20, "risk.single_ticker_cap_pct == 0.20",
+    R.check(float(risk.get("single_ticker_cap_pct", 0)) == 0.33, "risk.single_ticker_cap_pct == 0.33",
             detail_fail=f"found {risk.get('single_ticker_cap_pct')!r}")
     R.check(0 < float(risk.get("max_risk_per_trade_pct", 0)) <= 0.02, "risk.max_risk_per_trade_pct within (0, 2%]")
     R.check(0 < float(risk.get("daily_drawdown_pct", 0)) <= 0.05, "risk.daily_drawdown_pct within (0, 5%]")
@@ -309,7 +309,7 @@ def check_repo_hygiene() -> None:
     for rel in files:
         if rel.startswith("src/") and rel.endswith((".ts", ".tsx")):
             text = (ROOT / rel).read_text(encoding="utf-8", errors="ignore")
-            for literal in ("749.50", "3,747.50", "3747.50", "§1091", "Dual-Tier"):
+            for literal in ("1236.68", "3,747.50", "3747.50", "§1091", "Dual-Tier"):
                 if literal in text:
                     ui_hits.append(f"{rel}:{literal}")
     R.check(not ui_hits, "no hardcoded cap/legal literals in the UI", detail_fail="; ".join(ui_hits))
@@ -414,11 +414,11 @@ def check_gfv_invariants() -> None:
                                   regime="A", posterior=0.40).high_probability
     R.check(not any(closed) and opened, "soft-reserve draw requires Regime A and posterior >= 0.40")
 
-    # 20% cap derived from NLV (not hardcoded)
+    # 33% cap derived from NLV (not hardcoded)
     caps = {n: compute_buying_power(nlv=D(n), settled_cash=D(n), unsettled_cash=D("0"), policy=pol, today=monday).single_ticker_cap
             for n in ("1000", "3747.50", "5000")}
-    R.check(caps == {"1000": D("200.00"), "3747.50": D("749.50"), "5000": D("1000.00")},
-            "single-ticker cap is exactly 20% of NLV", f"NLV 3,747.50 -> cap {caps['3747.50']}")
+    R.check(caps == {"1000": D("330.00"), "3747.50": D("1236.68"), "5000": D("1650.00")},
+            "single-ticker cap is exactly 33% of NLV", f"NLV 3,747.50 -> cap {caps['3747.50']}")
 
     # SWVXX advisory only
     sweeps = [compute_buying_power(nlv=D("1000"), settled_cash=D(s), unsettled_cash=D("0"), policy=pol, today=monday,
@@ -486,7 +486,7 @@ def check_api() -> None:
             "Active env reports UNAVAILABLE instead of fabricated data")
 
     ledger = client.get("/api/ledger?env=sandbox").json()
-    R.check(abs(ledger["max_single_exposure"] - ledger["total_nlv"] * 0.20) < 0.011, "ledger cap == 20% of NLV",
+    R.check(abs(ledger["max_single_exposure"] - ledger["total_nlv"] * 0.33) < 0.011, "ledger cap == 33% of NLV",
             f"NLV {ledger['total_nlv']:.2f} -> cap {ledger['max_single_exposure']:.2f}")
 
     pol = client.get("/api/v1/liquidity/policy").json()
@@ -621,7 +621,7 @@ def check_live() -> None:
         R.check(balances.liquidation_value > 0, "account NLV is positive", detail_fail="NLV is zero; check the parse and account")
         R.check(balances.settled_cash <= balances.liquidation_value + D("0.01"), "settled cash does not exceed NLV")
         cap = ledger.max_single_exposure
-        R.check(cap == (balances.liquidation_value * D("0.20")).quantize(D("0.01")), "live single-ticker cap is 20% of broker NLV",
+        R.check(cap == (balances.liquidation_value * D("0.33")).quantize(D("0.01")), "live single-ticker cap is 33% of broker NLV",
                 f"${cap:,.2f}")
         others = sync.get_unmanaged_positions()
         R.ok("external holdings detected", ", ".join(f"{p.symbol} x{p.quantity}" for p in others) or "none")
