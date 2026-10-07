@@ -41,7 +41,7 @@ MOUNTS=(
 )
 
 echo "Running pre-flight (${PREFLIGHT_FLAGS:-dry-run checks only})..."
-sudo docker run --rm "${MOUNTS[@]}" --entrypoint python schwab_engine scripts/preflight.py $PREFLIGHT_FLAGS || true
+sudo docker run --rm "${MOUNTS[@]}" --entrypoint python schwab_engine scripts/preflight.py $PREFLIGHT_FLAGS
 
 echo 'Stopping existing container...'
 sudo docker stop schwab_engine_container 2>/dev/null || true
