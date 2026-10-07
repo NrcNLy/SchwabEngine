@@ -102,6 +102,28 @@ class GovernorDaemon:
                 # or a text string containing valid JSON. We parse it to be safe.
                 response_data = json.loads(response.text)
                 await self.update_strategy_config(response_data)
+                
+                try:
+                    import requests
+                    import asyncio
+                    regime = response_data.get("target_regime", "Unknown")
+                    bias = response_data.get("macro_bias", "Unknown")
+                    msg = f"Regime: {regime} | Bias: {bias}"
+                    headers = {
+                        "Title": "Macro Regime Briefing",
+                        "Tags": "robot,chart_with_upwards_trend"
+                    }
+                    def _push():
+                        requests.post(
+                            "https://ntfy.sh/schwab-trader-nrc-8472",
+                            data=msg.encode("utf-8"),
+                            headers=headers,
+                            timeout=10
+                        )
+                    await asyncio.to_thread(_push)
+                except Exception as ntfy_exc:
+                    logger.warning(f"Failed to push ntfy alert: {ntfy_exc}")
+
                 logger.info("Pre-Market Routine Completed Successfully.")
             except Exception as parse_exc:
                  logger.error(f"Failed to parse or apply structured output: {parse_exc}")
