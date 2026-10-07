@@ -302,14 +302,24 @@ async def run(args: argparse.Namespace) -> int:
         else:
             engine = await build_sim(ctx, cfg, settings, args.ignore_session, tasks)
     except StartupError as exc:
-        logger.critical("LIVE startup refused: %s", exc)
-        for t in tasks:
-            t.cancel()
-        if handles.auth is not None:
-            handles.auth.stop()
-        return 3
+        if "AUTH_LOCKED" in str(exc):
+            logger.critical("LIVE startup refused due to AUTH_LOCKED. Entering idle quarantine.")
+            ctx.system_state = "AUTH_LOCKED"
+            if handles.auth is not None:
+                handles.auth.stop()
+            engine = None
+        else:
+            logger.critical("LIVE startup refused: %s", exc)
+            for t in tasks:
+                t.cancel()
+            if handles.auth is not None:
+                handles.auth.stop()
+            return 3
 
-    ctx.flatten_cb = engine.flatten_all
+    if engine is not None:
+        ctx.flatten_cb = engine.flatten_all
+    else:
+        ctx.flatten_cb = lambda: None
 
     # Verification ping to ntfy alert topic on startup
     try:
@@ -324,7 +334,8 @@ async def run(args: argparse.Namespace) -> int:
         pass
 
     governor = make_governor() if (live or args.governor) else None
-    tasks.append(asyncio.create_task(engine.run_schedulers(stop, governor), name="schedulers"))
+    if engine is not None:
+        tasks.append(asyncio.create_task(engine.run_schedulers(stop, governor), name="schedulers"))
 
     server_cfg = cfg.get("server", {}) or {}
     host = args.host or server_cfg.get("host", "0.0.0.0")
@@ -353,10 +364,11 @@ async def run(args: argparse.Namespace) -> int:
             await asyncio.to_thread(ctx.microstructure.persist)
         if handles.auth is not None:
             handles.auth.stop()
-        open_positions = sorted(engine.ledger.positions.keys())
-        if open_positions:
-            logger.warning("Shutting down with open engine positions %s (broker-side catastrophe stops, if "
-                           "placed, remain working).", open_positions)
+        if engine is not None:
+            open_positions = sorted(engine.ledger.positions.keys())
+            if open_positions:
+                logger.warning("Shutting down with open engine positions %s (broker-side catastrophe stops, if "
+                               "placed, remain working).", open_positions)
         logger.info("Engine stopped.")
     return 0
 
