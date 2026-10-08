@@ -61,7 +61,7 @@ import math
 import statistics
 import threading
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
 from enum import Enum
@@ -1149,7 +1149,7 @@ class StrategyEngine:
                 ).start()
                 return
 
-            signal.quantity = clamped_quantity
+            signal = replace(signal, quantity=clamped_quantity)
             # Verify compliance ledger approves the order cost
             order_cost = signal.entry_price * signal.quantity
             allowed, reason = self._ledger.check_order_allowed(order_cost)

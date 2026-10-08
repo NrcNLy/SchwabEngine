@@ -126,6 +126,7 @@ class SchwabStreamer:
 
         self._loop:   Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread]          = None
+        self._active_ws: Optional[websockets.WebSocketClientProtocol] = None
         self._stop_event = threading.Event()
         self._running    = False
 
@@ -256,6 +257,7 @@ class SchwabStreamer:
                     ping_interval=20,
                     ping_timeout=10,
                 ) as ws:
+                    self._active_ws = ws
                     # === Phase A: ADMIN LOGIN ===
                     await self._send_admin_login(ws, streamer_info)
                     login_response = await self._recv_and_validate(ws, "LOGIN")
