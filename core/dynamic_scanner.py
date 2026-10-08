@@ -2,7 +2,7 @@ import asyncio
 import sqlite3
 import time
 from typing import Any, Dict, List, Tuple
-import aiohttp
+import httpx
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import logging
@@ -58,17 +58,17 @@ class DynamicScanner:
         headers = {"Authorization": f"Bearer {self.auth_token}"}
         all_quotes = {}
         
-        async with aiohttp.ClientSession(headers=headers) as session:
+        async with httpx.AsyncClient(headers=headers, timeout=20.0) as session:
             for i in range(0, len(symbols), 20):
                 chunk = symbols[i:i+20]
                 await self.rate_limiter.consume(1)
                 url = f"{self.base_url}/marketdata/v1/quotes"
                 params = {"symbols": ",".join(chunk)}
                 
-                async with session.get(url, params=params) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
-                    all_quotes.update(data)
+                resp = await session.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+                all_quotes.update(data)
                     
         return all_quotes
 
@@ -159,7 +159,7 @@ class DynamicScanner:
         headers = {"Authorization": f"Bearer {self.auth_token}"}
         baseline_volumes = {}
         
-        async with aiohttp.ClientSession(headers=headers) as session:
+        async with httpx.AsyncClient(headers=headers, timeout=30.0) as session:
             for sym in top_symbols:
                 await self.rate_limiter.consume(1)
                 url = f"{self.base_url}/marketdata/v1/pricehistory"
@@ -167,21 +167,21 @@ class DynamicScanner:
                     "symbol": sym, "periodType": "day", "period": 10,
                     "frequencyType": "minute", "frequency": 1, "needExtendedHoursData": "false"
                 }
-                async with session.get(url, params=params) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
-                    candles = data.get("candles", [])
-                    self._persist_history(sym, candles)
+                resp = await session.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+                candles = data.get("candles", [])
+                self._persist_history(sym, candles)
                     
-                    minute_vols = {}
-                    minute_counts = {}
-                    for c in candles:
-                        # Enforce Eastern Time zone awareness to prevent Docker UTC offset bug
-                        dt = datetime.fromtimestamp(c["datetime"] / 1000.0, tz=ZoneInfo("America/New_York"))
-                        mod = dt.hour * 60 + dt.minute
-                        minute_vols[mod] = minute_vols.get(mod, 0) + c.get("volume", 0)
-                        minute_counts[mod] = minute_counts.get(mod, 0) + 1
-                        
-                    baseline_volumes[sym] = {mod: minute_vols[mod] / count for mod, count in minute_counts.items()}
+                minute_vols = {}
+                minute_counts = {}
+                for c in candles:
+                    # Enforce Eastern Time zone awareness to prevent Docker UTC offset bug
+                    dt = datetime.fromtimestamp(c["datetime"] / 1000.0, tz=ZoneInfo("America/New_York"))
+                    mod = dt.hour * 60 + dt.minute
+                    minute_vols[mod] = minute_vols.get(mod, 0) + c.get("volume", 0)
+                    minute_counts[mod] = minute_counts.get(mod, 0) + 1
+                    
+                baseline_volumes[sym] = {mod: minute_vols[mod] / count for mod, count in minute_counts.items()}
                     
         return baseline_volumes
