@@ -41,6 +41,11 @@ EXPANDED_UNIVERSE = {
 
 async def calibrate_universe():
     try:
+        if Path("/app").exists() and (Path("/app") / "config" / "config.yaml").exists():
+            PROJECT_ROOT = Path("/app")
+        else:
+            PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
         config_path = PROJECT_ROOT / "config" / "config.yaml"
         if not config_path.exists():
             config_path = Path("config/config.yaml")

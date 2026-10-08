@@ -41,7 +41,10 @@ class DynamicScanner:
         self._init_db()
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        from pathlib import Path
+        db_p = Path(self.db_path)
+        db_p.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(str(db_p)) as conn:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute("""
