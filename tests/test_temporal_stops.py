@@ -241,6 +241,6 @@ def test_gfv_and_cap_invariants_preserved():
     assert bp.hard_reserve == D("500.00")
     assert bp.tactical_float <= D("2450.00")
 
-    # Invariant: single ticker cap is exactly 20% of NLV
-    assert bp.single_ticker_cap == D("750.00")
-    assert bp.max_order_notional <= D("750.00")
+    # Invariant: single ticker cap is exactly 33% of NLV
+    assert bp.single_ticker_cap == D("1237.50")
+    assert bp.max_order_notional <= D("1237.50")

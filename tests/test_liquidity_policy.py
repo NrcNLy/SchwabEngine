@@ -38,7 +38,7 @@ def test_defaults_match_user_decisions():
     assert p.inflow.confidence == D("0.80")
     assert p.sweep.mode == "ADVISORY" and p.sweep.symbol == "SWVXX"
     assert p.risk_gate.high_prob_posterior_min == D("0.40") and p.risk_gate.high_prob_regime == "A"
-    assert p.risk_gate.single_ticker_cap_pct == D("0.20")
+    assert p.risk_gate.single_ticker_cap_pct == D("0.33")
 
 
 def test_business_day_math_skips_weekends_and_holidays():
@@ -66,8 +66,8 @@ def test_inflow_validation_rejects_weekend_and_bad_confidence():
         InflowSchedule(amount=D("-1"))
 
 
-@pytest.mark.parametrize("nlv,expected", [("3747.50", "749.50"), ("1000", "200.00"), ("5000", "1000.00")])
-def test_single_ticker_cap_is_exactly_20pct_of_nlv(nlv, expected):
+@pytest.mark.parametrize("nlv,expected", [("3747.50", "1236.68"), ("1000", "330.00"), ("5000", "1650.00")])
+def test_single_ticker_cap_is_exactly_33pct_of_nlv(nlv, expected):
     out = bp(nlv=D(nlv), settled_cash=D(nlv))
     assert out.single_ticker_cap == D(expected)
     assert out.max_order_notional <= D(expected)

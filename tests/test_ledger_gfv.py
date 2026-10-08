@@ -36,16 +36,16 @@ def test_unsettled_funds_cannot_fund_an_order_larger_than_settled():
     assert lg.settled == D("100.00")
 
 
-def test_single_ticker_cap_is_20pct_of_nlv_and_not_hardcoded():
+def test_single_ticker_cap_is_33pct_of_nlv_and_not_hardcoded():
     lg = ledger("3747.50")
     assert lg.nlv == D("3747.50")
-    assert lg.max_single_exposure == D("749.50")
-    ok, why = lg.check_order_allowed(D("750"))
+    assert lg.max_single_exposure == D("1236.68")
+    ok, why = lg.check_order_allowed(D("1237"))
     assert ok is False and "cap" in why
-    assert lg.check_order_allowed(D("749.50"))[0] is True
+    assert lg.check_order_allowed(D("1236.68"))[0] is True
 
     small = ledger("1000")
-    assert small.max_single_exposure == D("200.00")
+    assert small.max_single_exposure == D("330.00")
 
 
 def test_rollover_only_on_or_after_settle_date():

@@ -66,12 +66,12 @@ def test_active_env_is_unavailable_in_dry_run_not_faked(client):
     assert positions["data_source"] == "UNAVAILABLE" and positions["managed"] == [] and positions["unmanaged"] == []
 
 
-def test_ledger_cap_is_exactly_20pct_of_nlv(client, ctx):
+def test_ledger_cap_is_exactly_33pct_of_nlv(client, ctx):
     body = client.get("/api/ledger?env=sandbox").json()
     assert body["available"] is True
-    assert body["max_single_exposure"] == pytest.approx(body["total_nlv"] * 0.20)
+    assert body["max_single_exposure"] == pytest.approx(body["total_nlv"] * 0.33)
     bp = body["buying_power"]
-    assert bp["single_ticker_cap"] == pytest.approx(body["total_nlv"] * 0.20)
+    assert bp["single_ticker_cap"] == pytest.approx(body["total_nlv"] * 0.33)
     assert bp["max_order_notional"] <= body["max_single_exposure"]
     assert bp["sweep"]["routed"] is False and bp["sweep"]["mode"] == "ADVISORY"
 
@@ -80,7 +80,7 @@ def test_ledger_cap_is_exactly_20pct_of_nlv(client, ctx):
     ctx.ledgers["sandbox"]._settled += 2747  # type: ignore[attr-defined]
     body = client.get("/api/ledger?env=sandbox").json()
     assert body["total_nlv"] == pytest.approx(3747.0)
-    assert body["max_single_exposure"] == pytest.approx(749.4)
+    assert body["max_single_exposure"] == pytest.approx(3747.0 * 0.33)
 
 
 def test_policy_defaults_roundtrip_and_validation(client, ctx):

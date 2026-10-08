@@ -26,7 +26,7 @@ class TestSizeEntry:
         assert size_entry(1, D("100"), _bp()) == 1
 
     def test_notional_ceiling_wins_when_smaller(self):
-        assert size_entry(50, D("100"), _bp()) == 2  # max order $200
+        assert size_entry(50, D("100"), _bp()) == 3  # max order 330
 
     def test_never_negative_or_fractional(self):
         assert size_entry(5, D("0"), _bp()) == 0

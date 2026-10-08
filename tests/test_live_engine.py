@@ -130,17 +130,17 @@ def run(coro):
 def test_entry_is_capped_by_buying_power_and_arms_a_broker_stop():
     async def scenario():
         engine, _ctx, ledger, om = make_engine(asyncio.get_running_loop())
-        om.entry_status = filled(2, "100.50")
+        om.entry_status = filled(3, "100.50")
         assert await engine.handle_signal(sig(qty=50)) is True
         return ledger, om
 
     ledger, om = run(scenario())
-    # strategy asked for 50 sh ($5,000); 20% of $1,000 NLV caps the order at 2 sh @ $100
-    assert om.kinds("buy") == [("buy", "SOXL", 2, 100.0)]
+    # strategy asked for 50 sh ($5,000); 33% of $1,000 NLV caps the order at 3 sh @ $100
+    assert om.kinds("buy") == [("buy", "SOXL", 3, 100.0)]
     pos = ledger.positions["SOXL"]
-    assert pos.quantity == 2 and pos.entry_price == D("100.50") and pos.simulated is False
-    assert om.kinds("stop") == [("stop", "SOXL", 2, 96.48)]  # 100.50 * (1 - 0.04)
-    assert ledger.settled == D("799.00")
+    assert pos.quantity == 3 and pos.entry_price == D("100.50") and pos.simulated is False
+    assert om.kinds("stop") == [("stop", "SOXL", 3, 96.48)]  # 100.50 * (1 - 0.04)
+    assert ledger.settled == D("698.50")
 
 
 def test_unfilled_entry_is_cancelled_and_reservation_released():
