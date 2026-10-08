@@ -1,14 +1,20 @@
 import asyncio
 import os
-import yaml
+import sys
 from pathlib import Path
-from core.auth import SchwabAuthManager, SecurityVault
-from core.dynamic_scanner import DynamicScanner
-from data.rest_client import SchwabRestClient
+import yaml
 import logging
+from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+load_dotenv()
+
+from core.auth import SchwabAuthManager, SecurityVault
+from core.dynamic_scanner import DynamicScanner
 
 EXPANDED_UNIVERSE = {
     "SOXL": {"adv_20d_shares": 59_000_000, "median_spread_cents": 1.5},
@@ -35,52 +41,74 @@ EXPANDED_UNIVERSE = {
 
 async def calibrate_universe():
     try:
-        # Load config
-        with open('config.yaml', 'r') as f:
+        config_path = PROJECT_ROOT / "config" / "config.yaml"
+        if not config_path.exists():
+            config_path = Path("config/config.yaml")
+
+        with open(config_path, "r") as f:
             cfg = yaml.safe_load(f)
-            
-        vault = SecurityVault()
-        auth = SchwabAuthManager(cfg, vault)
-        # Ensure we are authenticated
-        await asyncio.to_thread(auth._refresh_tokens_if_needed)
-        access_token = vault.get_access_token()
+
+        client_id = os.getenv("SCHWAB_CLIENT_ID")
+        client_secret = os.getenv("SCHWAB_CLIENT_SECRET")
+        passphrase = os.getenv("VAULT_PASSPHRASE")
+
+        auth_cfg = cfg.get("auth", {}) or {}
+        vault_file = auth_cfg.get("vault_file", "schwab_tokens_vault.json")
+        vault_path = PROJECT_ROOT / vault_file
+        if not vault_path.exists():
+            vault_path = Path(vault_file)
+
+        vault = SecurityVault(
+            passphrase=passphrase,
+            iterations=int(auth_cfg.get("pbkdf2_iterations", 600000)),
+            vault_path=vault_path,
+        )
+        auth = SchwabAuthManager(client_id, client_secret, vault, cfg)
+        await asyncio.to_thread(auth.load_tokens)
+        access_token = await asyncio.to_thread(auth.get_access_token)
         if not access_token:
             logger.error("No access token available.")
             return
 
-        scanner = DynamicScanner(auth_token=access_token)
-        
+        db_path = str(PROJECT_ROOT / "data" / "historical_candles.db")
+        scanner = DynamicScanner(auth_token=access_token, db_path=db_path)
+
         symbols = list(EXPANDED_UNIVERSE.keys())
-        
         logger.info(f"Fetching quotes for {len(symbols)} symbols...")
         quotes = await scanner.fetch_batch_quotes(symbols)
-        
-        # We need prior close prices to calculate scores, but if we don't have them
-        # DynamicScanner falls back to closePrice from the quote
-        
-        # Patch the fundamental data with our expanded universe constants so scanner can use them
+
+        # Patch fundamental data with expanded universe ADV
         for sym, data in quotes.items():
             if 'fundamental' not in data:
                 data['fundamental'] = {}
-            data['fundamental']['avg10DaysVolume'] = EXPANDED_UNIVERSE[sym]['adv_20d_shares']
-            
-            # Since median spread is an input to score calculation, and dynamic_scanner.py
-            # calculates spread from quote ask-bid, we don't need to inject it.
-            
+            if sym in EXPANDED_UNIVERSE:
+                data['fundamental']['avg10DaysVolume'] = EXPANDED_UNIVERSE[sym]['adv_20d_shares']
+
         scores = scanner.calculate_selection_scores(quotes, {})
         logger.info("Scores calculated:")
         for score, sym in scores:
             logger.info(f"{sym}: {score:.4f}")
-            
-        top_3 = [sym for score, sym in scores[:3]]
+
+        top_3 = [sym for _, sym in scores[:3]]
         logger.info(f"Top 3 Universe: {top_3}")
-        
+
+        # Update config/config.yaml immediately
+        with open("config/config.yaml", "r") as f:
+            full_cfg = yaml.safe_load(f)
+
+        full_cfg["engine"]["symbols"] = top_3
+
+        with open("config/config.yaml", "w") as f:
+            yaml.safe_dump(full_cfg, f, default_flow_style=False, sort_keys=False)
+
+        print(f"[SUCCESS] Persisted engine.symbols to config/config.yaml: {top_3}")
+
         logger.info("Fetching target history for Top 3...")
         volumes = await scanner.fetch_target_history(top_3)
         logger.info("History caching complete. Engine calibration ready.")
-        
+
     except Exception as e:
-        logger.error(f"Calibration failed: {e}")
+        logger.error(f"Calibration failed: {e}", exc_info=True)
 
 if __name__ == "__main__":
     asyncio.run(calibrate_universe())
