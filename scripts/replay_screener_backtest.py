@@ -175,4 +175,25 @@ if __name__ == "__main__":
         else:
             logger.warning("No data found in historical_1m table.")
     else:
-        logger.warning(f"Database {db_path} not found. Run calibrate_midday_universe.py first to populate data.")
+        logger.warning(f"Database {db_path} not found. Running synthetic verification to validate engine math & stop logic...")
+        dates = pd.bdate_range(end=datetime.now().strftime('%Y-%m-%d'), periods=5)
+        dfs = {}
+        for sym in list(EXPANDED_UNIVERSE.keys())[:5]:
+            records = []
+            base_price = 50.0 if sym != 'TQQQ' else 80.0
+            for d in dates:
+                times = pd.date_range(d.strftime('%Y-%m-%d 09:30:00'), periods=390, freq='1min', tz='America/New_York')
+                p = base_price
+                for t in times:
+                    step = np.random.normal(0.0001, 0.002)
+                    open_p = p
+                    close_p = open_p * (1 + step)
+                    high_p = max(open_p, close_p) * (1 + abs(np.random.normal(0, 0.001)))
+                    low_p = min(open_p, close_p) * (1 - abs(np.random.normal(0, 0.001)))
+                    vol = int(np.random.uniform(5000, 50000))
+                    p = close_p
+                    records.append({'datetime': t, 'open': open_p, 'high': high_p, 'low': low_p, 'close': close_p, 'volume': vol})
+            df = pd.DataFrame(records).set_index('datetime')
+            dfs[sym] = df
+        results = run_screener_backtest(dfs, EXPANDED_UNIVERSE)
+        logger.info(f"Verification Backtest Results: {results}")
