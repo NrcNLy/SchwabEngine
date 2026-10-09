@@ -30,10 +30,14 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+try:
+    import scipy.special as sp
+except ImportError:
+    import math as sp
+
 from core.baselines_store import SQLiteBaselinesStore
 from core.ipc import write_dynamic_policy
 from execution.strategies import CandleBar, _compute_ci
-from indicators.volatility import compute_hurst_rs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,6 +47,75 @@ logger = logging.getLogger("midday_optimizer")
 
 EDT_TZ = ZoneInfo("America/New_York")
 DEFAULT_SYMBOLS = ["SOXL", "TQQQ", "TNA"]
+
+
+def anis_lloyd_expected_rs(n: int) -> float:
+    """
+    Analytical Anis-Lloyd expected R/S value for i.i.d. series of sample size n.
+    Neutralizes small-sample finite-horizon Hurst bias over 120-bar morning lookbacks.
+    """
+    if n <= 2:
+        return 1.0
+    r_vals = np.arange(1, n, dtype=float)
+    sum_term = np.sum(np.sqrt((n - r_vals) / r_vals))
+    if n <= 340:
+        c = sp.gamma((n - 1) / 2.0) / (np.sqrt(np.pi) * sp.gamma(n / 2.0))
+    else:
+        c = 1.0 / np.sqrt(0.5 * np.pi * n)
+    return float(c * sum_term)
+
+
+def compute_session_isolated_hurst(log_returns: Sequence[float] | np.ndarray) -> float:
+    """
+    Session-isolated Hurst Exponent computation across dyadic scales
+    [10, 15, 20, 24, 30, 40, 60, 120] with analytical Anis-Lloyd slope correction.
+    """
+    series = np.asarray(log_returns, dtype=float)
+    n = len(series)
+    if n < 10:
+        return 0.50
+
+    stdev = float(np.std(series))
+    if stdev < 1e-9:
+        return 0.50
+
+    dyadic_scales = [10, 15, 20, 24, 30, 40, 60, 120]
+    scales = [tau for tau in dyadic_scales if tau <= n]
+    if len(scales) < 2:
+        return 0.50
+
+    log_taus: List[float] = []
+    log_rs_emp: List[float] = []
+    log_rs_al: List[float] = []
+
+    for tau in scales:
+        k = n // tau
+        if k == 0:
+            continue
+        sub = series[: k * tau].reshape(k, tau)
+        means = np.mean(sub, axis=1, keepdims=True)
+        y = sub - means
+        z = np.cumsum(y, axis=1)
+        z_pad = np.pad(z, ((0, 0), (1, 0)), mode="constant")
+        ranges = np.ptp(z_pad, axis=1)
+        stds = np.std(sub, axis=1, ddof=1)
+        valid = stds > 1e-9
+        if np.any(valid):
+            avg_rs = float(np.mean(ranges[valid] / stds[valid]))
+            e_rs = anis_lloyd_expected_rs(tau)
+            if avg_rs > 0 and e_rs > 0:
+                log_taus.append(float(np.log(tau)))
+                log_rs_emp.append(float(np.log(avg_rs)))
+                log_rs_al.append(float(np.log(e_rs)))
+
+    if len(log_taus) < 2:
+        return 0.50
+
+    beta_raw, _ = np.polyfit(log_taus, log_rs_emp, 1)
+    beta_al, _ = np.polyfit(log_taus, log_rs_al, 1)
+
+    corrected_h = float(beta_raw - beta_al + 0.50)
+    return float(np.clip(corrected_h, 0.05, 0.95))
 
 
 class MiddayRegimeOptimizer:
@@ -55,19 +128,48 @@ class MiddayRegimeOptimizer:
         self.symbols = [s.upper() for s in (symbols or DEFAULT_SYMBOLS)]
         self.max_processes = max(1, (os.cpu_count() or 4) - 2)
 
+    def get_session_morning_bars(
+        self,
+        symbol: str,
+        session_date: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieves exactly today's 120 morning bars (09:30:00 to 11:30:00 EDT inclusive).
+        Falls back to the most recent 120 bars if executing off-hours or in test fixtures.
+        """
+        sym = symbol.upper()
+        ref_dt = session_date or datetime.now(EDT_TZ)
+        start_dt = ref_dt.replace(hour=9, minute=30, second=0, microsecond=0)
+        end_dt = ref_dt.replace(hour=11, minute=30, second=0, microsecond=0)
+        start_ts = int(start_dt.timestamp() * 1000)
+        end_ts = int(end_dt.timestamp() * 1000)
+
+        bars = self.store.get_bars(sym, start_ts=start_ts, end_ts=end_ts, limit=120)
+        if not bars:
+            latest_ts = self.store.get_latest_bar_timestamp(sym)
+            if latest_ts is not None:
+                latest_dt = datetime.fromtimestamp(latest_ts / 1000.0, tz=timezone.utc).astimezone(EDT_TZ)
+                s_dt = latest_dt.replace(hour=9, minute=30, second=0, microsecond=0)
+                e_dt = latest_dt.replace(hour=11, minute=30, second=0, microsecond=0)
+                bars = self.store.get_bars(sym, start_ts=int(s_dt.timestamp() * 1000), end_ts=int(e_dt.timestamp() * 1000), limit=120)
+                if not bars:
+                    bars = self.store.get_bars(sym, limit=120)
+            else:
+                bars = self.store.get_bars(sym, limit=120)
+        return bars
+
     def evaluate_symbol_regime(
         self,
         symbol: str,
         recent_bars: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[float, float, str]:
         """
-        Evaluates Hurst Exponent (H) and Choppiness Index (CI) over 5-day + morning window.
+        Evaluates Hurst Exponent (H) and Choppiness Index (CI) over session-isolated 120 morning bars.
         Returns: (hurst_h, ci, classification)
         """
         sym = symbol.upper()
         if recent_bars is None:
-            # Query up to 2,000 1-minute bars (~5 trading days + morning drive)
-            recent_bars = self.store.get_bars(sym, limit=2000)
+            recent_bars = self.get_session_morning_bars(sym)
 
         if len(recent_bars) < 20:
             logger.warning("Insufficient bars (%d) for %s; default to random walk.", len(recent_bars), sym)
@@ -75,7 +177,7 @@ class MiddayRegimeOptimizer:
 
         closes = np.array([float(b["close"]) for b in recent_bars], dtype=float)
         log_returns = np.diff(np.log(closes))
-        hurst_h = float(compute_hurst_rs(log_returns))
+        hurst_h = float(compute_session_isolated_hurst(log_returns))
 
         candle_bars = [
             CandleBar(
@@ -91,7 +193,7 @@ class MiddayRegimeOptimizer:
         ci_val = _compute_ci(candle_bars, period=14)
         ci = float(ci_val) if ci_val is not None else 50.0
 
-        if hurst_h <= 0.50:
+        if hurst_h <= 0.48:
             classification = "HIGH_NOISE_CHOP"
         elif hurst_h <= 0.55:
             classification = "RANDOM_WALK"
@@ -111,24 +213,24 @@ class MiddayRegimeOptimizer:
         classification: str,
     ) -> Dict[str, Any]:
         """Maps quantitative regime metrics to Power Hour dynamic policy parameters."""
-        if hurst_h <= 0.50:
+        if hurst_h <= 0.48:
             rvol_hurdle = 1.65
             size_scale = 0.35
             ratchet_permitted = False
             rationale = (
-                f"Morning tape exhibits mean-reverting chop (H={hurst_h:.3f} <= 0.50, CI={ci:.1f}). "
+                f"Morning tape exhibits mean-reverting chop (H={hurst_h:.3f} <= 0.48, CI={ci:.1f}). "
                 "Bumping Power Hour RVOL hurdle to 1.65x and scaling sizing to 0.35x."
             )
         elif hurst_h <= 0.55:
-            rvol_hurdle = 1.40
+            rvol_hurdle = 1.52
             size_scale = 0.45
             ratchet_permitted = False
             rationale = (
-                f"Morning tape exhibits random walk noise (H={hurst_h:.3f}, CI={ci:.1f}). "
-                "Moderating Power Hour RVOL hurdle to 1.40x and sizing to 0.45x."
+                f"Morning tape exhibits random walk noise (0.48 < H={hurst_h:.3f} <= 0.55, CI={ci:.1f}). "
+                "Calibrating Power Hour RVOL hurdle to 1.52x and sizing to 0.45x."
             )
         else:
-            rvol_hurdle = 1.25
+            rvol_hurdle = 1.35
             size_scale = 0.50
             ratchet_permitted = True
             rationale = (
@@ -166,7 +268,7 @@ class MiddayRegimeOptimizer:
         mean_h = float(np.mean(hurst_scores)) if hurst_scores else 0.50
         mean_ci = float(np.mean(ci_scores)) if ci_scores else 50.0
 
-        if mean_h <= 0.50:
+        if mean_h <= 0.48:
             agg_class = "HIGH_NOISE_CHOP"
         elif mean_h <= 0.55:
             agg_class = "RANDOM_WALK"

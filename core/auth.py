@@ -337,6 +337,17 @@ class SchwabAuthManager:
         with self._lock:
             self._do_refresh()
 
+    def refresh_access_token(self) -> float:
+        """
+        Synchronously refreshes the access token and returns remaining TTL in seconds.
+        """
+        self.force_refresh()
+        with self._lock:
+            if self._access_token_expiry is not None:
+                ttl = float(self._access_token_expiry - time.monotonic())
+                return max(0.0, ttl)
+            return float(self._access_ttl)
+
     # ------------------------------------------------------------------
     # Initial authorization code exchange (first-run / weekend reauth)
     # ------------------------------------------------------------------

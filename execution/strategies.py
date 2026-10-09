@@ -747,6 +747,9 @@ class StrategyEngine:
         self._orb_morning_rvol_hurdle: float = float(
             orb_cfg.get("orb_morning_rvol_hurdle", strat_cfg.get("orb_morning_rvol_hurdle", cfg.get("orb_morning_rvol_hurdle", 2.20)))
         )
+        self._orb_power_hour_rvol_hurdle: float = float(
+            orb_cfg.get("power_hour_rvol_hurdle", strat_cfg.get("power_hour_rvol_hurdle", cfg.get("power_hour_rvol_hurdle", 1.52)))
+        )
         self._orb_rr_target:  float = float(orb_cfg.get("risk_reward_target", 2.5))
         self._mr_sigma:       float = float(mr_cfg.get("vwap_band_sigma", 2.2))
         self._mr_rsi_thresh:  float = float(mr_cfg.get("rsi_oversold_threshold", 28))
@@ -1414,13 +1417,22 @@ class StrategyEngine:
             return None
 
         # Secondary confirmations
-        # Morning Drive (09:30–10:15 EDT) requires higher RVOL hurdle (2.20 vs 1.50)
+        # Morning Drive (09:30–10:15 EDT): rvol >= 2.20
+        # Power Hour (14:00–15:35 EDT): rvol >= 1.52 (or dynamic override from state/dynamic_policy.json)
         t_now = now.time()
-        rvol_hurdle = (
-            self._orb_morning_rvol_hurdle
-            if (dtime(9, 30, 0) <= t_now <= dtime(10, 15, 0))
-            else self._orb_rvol_min
-        )
+        if dtime(9, 30, 0) <= t_now <= dtime(10, 15, 0):
+            rvol_hurdle = self._orb_morning_rvol_hurdle
+        elif dtime(14, 0, 0) <= t_now <= dtime(15, 35, 0):
+            rvol_hurdle = self._orb_power_hour_rvol_hurdle
+            try:
+                from core.ipc import read_dynamic_policy
+                policy = read_dynamic_policy()
+                if policy and "overrides" in policy and "power_hour_rvol_hurdle" in policy["overrides"]:
+                    rvol_hurdle = float(policy["overrides"]["power_hour_rvol_hurdle"])
+            except Exception as exc:
+                logger.debug("StrategyEngine: failed to load dynamic policy override: %s", exc)
+        else:
+            rvol_hurdle = self._orb_rvol_min
 
         if metrics.rvol < rvol_hurdle:
             logger.debug(

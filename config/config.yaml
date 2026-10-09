@@ -145,6 +145,7 @@ strategies:
     name: "15m ORB"
     entry_rvol_min: 1.5          # Minimum RVOL for breakout confirmation
     orb_morning_rvol_hurdle: 2.20 # Morning Drive (09:30–10:15 EDT) volume hurdle override
+    power_hour_rvol_hurdle: 1.52  # Power Hour (14:00–15:35 EDT) calibrated hurdle override
     risk_reward_target: 2.5      # Target R:R ratio
 
   vwap_mean_reversion:

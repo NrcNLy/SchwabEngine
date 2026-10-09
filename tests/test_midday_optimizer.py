@@ -61,9 +61,20 @@ def test_policy_overrides_when_trending():
 
     assert policy["effective_session"] == "POWER_HOUR"
     assert policy["regime_classification"] == "TREND_EXPANSION"
-    assert policy["overrides"]["power_hour_rvol_hurdle"] == 1.25
+    assert policy["overrides"]["power_hour_rvol_hurdle"] == 1.35
     assert policy["overrides"]["power_hour_size_scale"] == 0.50
     assert policy["overrides"]["ratchet_permitted"] is True
+
+
+def test_policy_overrides_when_random_walk():
+    optimizer = MiddayRegimeOptimizer()
+    policy = optimizer.compute_policy_overrides(hurst_h=0.52, ci=45.0, classification="RANDOM_WALK")
+
+    assert policy["effective_session"] == "POWER_HOUR"
+    assert policy["regime_classification"] == "RANDOM_WALK"
+    assert policy["overrides"]["power_hour_rvol_hurdle"] == 1.52
+    assert policy["overrides"]["power_hour_size_scale"] == 0.45
+    assert policy["overrides"]["ratchet_permitted"] is False
 
 
 def test_run_optimization_writes_dynamic_policy(tmp_path, monkeypatch):
