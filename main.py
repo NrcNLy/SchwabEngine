@@ -176,9 +176,16 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
         raise StartupError(f"Missing environment variables: {', '.join(missing)}")
 
     auth_cfg = cfg.get("auth", {}) or {}
-    vault_path = PROJECT_ROOT / auth_cfg.get("vault_file", "schwab_tokens_vault.json")
-    if not vault_path.exists() or vault_path.stat().st_size == 0:
-        raise StartupError(f"Token vault not found at {vault_path}. Run manual_auth.py on this machine first.")
+    vault_file_name = auth_cfg.get("vault_file", "schwab_tokens_vault.json")
+    from core.paths import STATE_DIR
+    candidates = [
+        PROJECT_ROOT / vault_file_name,
+        STATE_DIR / vault_file_name,
+        Path(vault_file_name),
+    ]
+    vault_path = next((p for p in candidates if p.exists() and p.stat().st_size > 0), None)
+    if vault_path is None:
+        raise StartupError(f"Token vault not found at {PROJECT_ROOT / vault_file_name} or {STATE_DIR / vault_file_name}. Run manual_auth.py on this machine first.")
 
     vault = SecurityVault(passphrase=passphrase, iterations=int(auth_cfg.get("pbkdf2_iterations", 600000)),
                           vault_path=vault_path)
@@ -438,6 +445,65 @@ async def run(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_authenticate() -> int:
+    """Verifies and rehydrates Schwab tokens from the encrypted vault."""
+    from dotenv import load_dotenv
+    from core.auth import SchwabAuthManager, SecurityVault
+    from core.paths import STATE_DIR
+
+    load_dotenv()
+    client_id = os.getenv("SCHWAB_CLIENT_ID")
+    client_secret = os.getenv("SCHWAB_CLIENT_SECRET")
+    passphrase = os.getenv("VAULT_PASSPHRASE")
+
+    missing = [k for k, v in (("SCHWAB_CLIENT_ID", client_id), ("SCHWAB_CLIENT_SECRET", client_secret),
+                              ("VAULT_PASSPHRASE", passphrase)) if not v]
+    if missing:
+        logger.error("Missing environment variables: %s", ", ".join(missing))
+        return 1
+
+    cfg = load_config()
+    auth_cfg = cfg.get("auth", {}) or {}
+    vault_file_name = auth_cfg.get("vault_file", "schwab_tokens_vault.json")
+    candidates = [
+        PROJECT_ROOT / vault_file_name,
+        STATE_DIR / vault_file_name,
+        Path(vault_file_name),
+    ]
+    vault_path = next((p for p in candidates if p.exists() and p.stat().st_size > 0), None)
+    if vault_path is None:
+        logger.error("Token vault not found at any candidate path: %s", candidates)
+        return 1
+
+    logger.info("Found token vault at %s (%d bytes). Rehydrating...", vault_path, vault_path.stat().st_size)
+    vault = SecurityVault(
+        passphrase=passphrase,
+        iterations=int(auth_cfg.get("pbkdf2_iterations", 600000)),
+        vault_path=vault_path,
+    )
+    auth = SchwabAuthManager(client_id, client_secret, vault, cfg)
+    try:
+        auth.load_tokens()
+        logger.info("Successfully decrypted tokens from vault.")
+    except Exception as exc:
+        logger.error("Could not decrypt token vault: %s", exc)
+        return 1
+
+    remaining = auth.refresh_seconds_remaining()
+    if remaining is not None and remaining <= 0:
+        logger.error("Refresh token has expired (%.1fs remaining). Run manual_auth.py to re-authorize.", remaining)
+        return 2
+
+    logger.info("Tokens rehydrated. Refresh token valid for %.1f hours.", (remaining or 0) / 3600)
+    try:
+        auth.force_refresh()
+        logger.info("Successfully refreshed access token against Schwab API.")
+    except Exception as exc:
+        logger.warning("Token refresh against Schwab failed (offline or network): %s", exc)
+
+    return 0
+
+
 def run_self_test() -> int:
     from api.server import build_app
     cfg = load_config()
@@ -461,12 +527,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--host", default=None)
     p.add_argument("--port", type=int, default=None)
     p.add_argument("--test", action="store_true", help="Build the API app and exit.")
+    p.add_argument("--authenticate", action="store_true", help="Rehydrate or verify Schwab tokens from the encrypted vault.")
     return p.parse_args(argv)
 
 
 if __name__ == "__main__":
     os.chdir(PROJECT_ROOT)
     _args = parse_args()
+    if _args.authenticate:
+        sys.exit(run_authenticate())
     if _args.test:
         sys.exit(run_self_test())
     try:

@@ -44,10 +44,13 @@ import asyncio
 from contextlib import asynccontextmanager
 import json
 import logging
+import os
+from pathlib import Path
+import socket
+import sqlite3
 import time
 from datetime import date, datetime
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
@@ -66,7 +69,11 @@ except ImportError:  # pragma: no cover - dependency guard
     HTMLResponse = None
 
 from core.atomic_io import StateEncoder, read_json, update_json
-from core.paths import DOCUMENTS_DIR, MACRO_STATE_FILE
+from core.paths import (
+    ANCHOR_ACTIVE_FILE, BASELINES_DB_PATH, CONTROL_SIGNAL_FILE,
+    DOCUMENTS_DIR, MACRO_STATE_FILE, STATE_DIR,
+    TRADER_IPC_SOCKET, TRADES_DB_PATH,
+)
 from core.liquidity_policy import LiquidityPolicy, policy_to_dict, save_policy
 from core.runtime import (
     EngineContext,  # re-exported: ``from api.server import EngineContext``
@@ -83,9 +90,10 @@ __all__ = ["build_app", "EngineContext", "compute_system_state"]
 logger = logging.getLogger(__name__)
 _EDT = pytz.timezone("America/New_York")
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STRATEGY_CONFIG_FILE = Path("strategy_config.json")
 DOCUMENTS_VAULT_DIR = DOCUMENTS_DIR
-DIST_DIR = Path("dist")
+DIST_DIR = Path(os.environ.get("DIST_DIR", PROJECT_ROOT / "dist"))
 
 ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg"}
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -158,6 +166,67 @@ def _f(value: Any) -> float:
     return float(value) if value is not None else 0.0
 
 
+def _check_sqlite_connectivity(db_path: Path) -> bool:
+    """Verifies read connectivity to an SQLite WAL database."""
+    try:
+        if not db_path.exists():
+            return False
+        conn = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True, timeout=2.0)
+        conn.execute("SELECT 1;")
+        conn.close()
+        return True
+    except Exception as exc:
+        logger.debug("Database read check failed for %s: %s", db_path, exc)
+        return False
+
+
+def _check_ipc_responsiveness() -> bool:
+    """
+    Checks responsiveness of the dual-process IPC bridge:
+    1. Unix domain socket at TRADER_IPC_SOCKET
+    2. TCP loopback fallback at 127.0.0.1:8765
+    3. Fresh/acknowledged control_signal.json
+    """
+    if hasattr(socket, "AF_UNIX") and TRADER_IPC_SOCKET.exists():
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect(str(TRADER_IPC_SOCKET))
+            s.close()
+            return True
+        except Exception:
+            pass
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        s.connect(("127.0.0.1", 8765))
+        s.close()
+        return True
+    except Exception:
+        pass
+
+    if CONTROL_SIGNAL_FILE.exists():
+        try:
+            from core.ipc import read_control_signal
+            sig = read_control_signal()
+            if sig is not None:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def _check_vault_exists() -> bool:
+    candidates = [
+        PROJECT_ROOT / "schwab_tokens_vault.json",
+        STATE_DIR / "schwab_tokens_vault.json",
+        Path("schwab_tokens_vault.json"),
+    ]
+    return any(p.exists() and p.stat().st_size > 0 for p in candidates)
+
+
 def compute_system_state(ctx: EngineContext) -> Dict[str, Any]:
     """
     Single source of truth for the header status pill.
@@ -182,7 +251,8 @@ def compute_system_state(ctx: EngineContext) -> Dict[str, Any]:
     degraded: List[str] = []
     auth = ctx.auth_manager
     if auth is None or not auth.has_refresh_token():
-        down.append("Schwab authorization is missing.")
+        if not _check_vault_exists():
+            down.append("Schwab authorization is missing.")
     else:
         remaining = auth.refresh_seconds_remaining()
         if remaining is not None and remaining <= 0:
@@ -193,7 +263,8 @@ def compute_system_state(ctx: EngineContext) -> Dict[str, Any]:
     sync = ctx.broker_sync
     ledger = ctx.ledgers.get("active")
     if sync is None:
-        down.append("Broker sync is not running.")
+        if not _check_ipc_responsiveness():
+            down.append("Broker sync is not running.")
     else:
         if sync.consecutive_failures >= 3:
             down.append(f"Broker sync failing ({sync.last_error}).")
@@ -210,7 +281,7 @@ def compute_system_state(ctx: EngineContext) -> Dict[str, Any]:
 
     if lifecycle_phase(now_et(), ctx.cfg) == "CORE_SESSION":
         silent = ctx.seconds_since_tick()
-        if silent is None or silent > 30:
+        if (ctx.broker_sync is not None or not _check_ipc_responsiveness()) and (silent is None or silent > 30):
             degraded.append("No market data in the last 30 seconds.")
 
     if down:
@@ -432,7 +503,7 @@ def build_app(ctx: EngineContext):
         ledger = ctx.ledger_for(env)
         sys_state = compute_system_state(ctx)
         auth = ctx.auth_manager
-        auth_ok = bool(auth and auth.has_refresh_token())
+        auth_ok = bool(auth and auth.has_refresh_token()) or _check_vault_exists()
         remaining = auth.refresh_seconds_remaining() if auth else None
 
         if not ctx.live:
@@ -446,6 +517,12 @@ def build_app(ctx: EngineContext):
 
         realized, unrealized = _pnl(ctx, env)
         nlv = ledger.nlv if ledger is not None else None
+        if nlv is None and env == "active" and ctx.live:
+            anchor_data = read_json(ANCHOR_ACTIVE_FILE, default={})
+            if anchor_data and "closes" in anchor_data and anchor_data["closes"]:
+                nlv = Decimal(str(list(anchor_data["closes"].values())[-1]))
+            elif anchor_data and "first_seen" in anchor_data and anchor_data["first_seen"]:
+                nlv = Decimal(str(list(anchor_data["first_seen"].values())[-1]))
         net_usd = net_pct = None
         if nlv is not None:
             change, pct = ctx.anchors[env].net_change(nlv)
@@ -857,13 +934,41 @@ def build_app(ctx: EngineContext):
 
     @router.get("/health")
     async def get_health():
-        sys_state = compute_system_state(ctx)
+        if not ctx.live:
+            # Sandbox / dry-run / test mode: in-memory mock pipeline is healthy
+            trades_ok = True
+            baselines_ok = True
+            ipc_ok = True
+            reasons: List[str] = []
+            is_healthy = True
+        else:
+            trades_ok = await asyncio.to_thread(_check_sqlite_connectivity, TRADES_DB_PATH)
+            baselines_ok = await asyncio.to_thread(_check_sqlite_connectivity, BASELINES_DB_PATH)
+            ipc_ok = (ctx.broker_sync is not None) or await asyncio.to_thread(_check_ipc_responsiveness)
+
+            reasons = []
+            if not trades_ok:
+                reasons.append("trades.db read connectivity failed")
+            if not baselines_ok:
+                reasons.append("market_baselines.db read connectivity failed")
+            if not ipc_ok:
+                reasons.append("Trader IPC socket / control signal unresponsive")
+
+            is_healthy = trades_ok and baselines_ok and ipc_ok
+
+        system_state = "OK" if is_healthy and not ctx.is_halted else ("HALTED" if ctx.is_halted else "DOWN")
+
         return {
-            "status": "healthy" if sys_state["state"] in ("OK", "SIMULATED") else sys_state["state"].lower(),
-            "system_state": sys_state["state"],
-            "reasons": sys_state["reasons"],
+            "status": "healthy" if is_healthy else "down",
+            "system_state": system_state,
+            "reasons": reasons,
             "mode": ctx.mode,
             "halted": ctx.is_halted,
+            "ipc_responsive": ipc_ok,
+            "databases": {
+                "trades_db": trades_ok,
+                "market_baselines_db": baselines_ok,
+            },
             "ledgers": {k: v is not None for k, v in ctx.ledgers.items()},
         }
 
@@ -1096,20 +1201,36 @@ def build_app(ctx: EngineContext):
     app.state.broadcast = manager.broadcast
 
     # ---- built dashboard (vite build -> dist/) --------------------------------
-    index_file = DIST_DIR / "index.html"
-    if index_file.exists():
-        assets_dir = DIST_DIR / "assets"
-        if assets_dir.exists():
-            app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+    assets_dir = DIST_DIR / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
 
-        @app.get("/{full_path:path}", include_in_schema=False)
-        async def spa(full_path: str):
-            if full_path.startswith("api/"):
-                raise HTTPException(status_code=404, detail="Not found")
-            candidate = (DIST_DIR / full_path).resolve()
-            if full_path and candidate.is_file() and DIST_DIR.resolve() in candidate.parents:
-                return FileResponse(candidate)
-            return FileResponse(index_file)
+    @app.get("/", include_in_schema=False)
+    async def root_index():
+        index_file = DIST_DIR / "index.html"
+        if index_file.is_file():
+            return FileResponse(str(index_file))
+        raise HTTPException(status_code=404, detail="Dashboard UI not built yet. Run npm run build.")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa(full_path: str):
+        reserved_prefixes = (
+            "api", "health", "docs", "openapi.json", "redoc", "stream", "live",
+            "status", "positions", "orders", "ledger", "regime", "v1", "strategy",
+            "portfolio", "compression", "news", "auth", "emergency", "indicators", "events"
+        )
+        first_segment = full_path.split("/")[0]
+        if first_segment in reserved_prefixes:
+            raise HTTPException(status_code=404, detail="Not found")
+
+        candidate = (DIST_DIR / full_path).resolve()
+        if full_path and candidate.is_file() and DIST_DIR.resolve() in candidate.parents:
+            return FileResponse(str(candidate))
+
+        index_file = DIST_DIR / "index.html"
+        if index_file.is_file():
+            return FileResponse(str(index_file))
+        raise HTTPException(status_code=404, detail="Dashboard UI not built yet. Run npm run build.")
 
     return app
 
