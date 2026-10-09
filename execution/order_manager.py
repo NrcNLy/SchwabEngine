@@ -207,6 +207,11 @@ class OrderManager:
         """The whitelisted account's Schwab hashValue (None until firewall passes)."""
         return self._account_hash
 
+    @property
+    def account_number(self) -> Optional[str]:
+        """The whitelisted account's plain account number (None until firewall passes)."""
+        return self._account_number
+
     # ------------------------------------------------------------------
     # Order submission
     # ------------------------------------------------------------------

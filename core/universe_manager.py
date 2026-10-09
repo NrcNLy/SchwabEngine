@@ -1,19 +1,29 @@
 import logging
 from dataclasses import replace
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Set
 from core.dynamic_scanner import DynamicScanner
 from execution.strategies import TradeSignal
 
 logger = logging.getLogger(__name__)
 
 class UniverseManager:
-    def __init__(self, scanner: Optional[DynamicScanner] = None, divergence_engine: Optional[Any] = None):
+    def __init__(
+        self,
+        scanner: Optional[DynamicScanner] = None,
+        divergence_engine: Optional[Any] = None,
+        exclusion_mask: Optional[Any] = None,
+    ):
         self.scanner = scanner
         self.active_universe: List[str] = []
         self.ring_buffers: Dict[str, List[Dict[str, Any]]] = {}  # 390-bar buffers
         self.max_buffer_size = 390
         self.divergence_engine = divergence_engine
+        self.exclusion_mask = exclusion_mask
         self.momentum_scores: Dict[str, float] = {}
+
+    def set_exclusion_mask(self, mask: Any) -> None:
+        """Register the UniverseExclusionMask instance."""
+        self.exclusion_mask = mask
 
     def get_active_universe(self) -> List[str]:
         """Returns the current active universe symbols."""
@@ -92,17 +102,37 @@ class UniverseManager:
             return False
         return self.divergence_engine.is_trap_active(symbol, current_time=current_time)
 
+    def audit_wash_sale_holdings(
+        self,
+        positions: Any,
+        session_open: Optional[Any] = None,
+    ) -> Set[str]:
+        """
+        Audit holdings for active external swing lots to prevent IRC §1091 wash-sale contamination.
+        Does NOT query trades.db for closed losses from past sessions or past 30 days.
+        """
+        if self.exclusion_mask is not None and hasattr(self.exclusion_mask, "audit_holdings_for_wash_sale"):
+            return self.exclusion_mask.audit_holdings_for_wash_sale(positions, session_open=session_open)
+        return set()
+
     def is_entry_allowed(self, symbol: str, strategy: str = "15m_ORB", current_time: Optional[Any] = None) -> bool:
         """
-        Check if an entry is allowed for the symbol, suppressing if an active trap is detected.
-        Logs LIQUIDITY_TRAP_SUPPRESSION event to telemetry.db on suppression and keeps engine in cash.
+        Check if an entry is allowed for the symbol, suppressing if an active trap is detected
+        or if the symbol is in the exclusion mask (e.g. active external swing lot).
+        Logs LIQUIDITY_TRAP_SUPPRESSION event to telemetry.db on trap suppression and keeps engine in cash.
         """
-        if self.is_trap_active(symbol, current_time=current_time):
+        sym = symbol.upper()
+        if self.exclusion_mask is not None and hasattr(self.exclusion_mask, "is_symbol_tradeable"):
+            if not self.exclusion_mask.is_symbol_tradeable(sym):
+                logger.warning("UniverseManager: %s entry disallowed by exclusion mask (wash-sale/restricted).", sym)
+                return False
+
+        if self.is_trap_active(sym, current_time=current_time):
             logger.warning(
                 "UniverseManager: entry for %s suppressed by synthetic divergence liquidity trap (%s).",
-                symbol, strategy
+                sym, strategy
             )
-            self._log_trap_suppression(symbol, strategy)
+            self._log_trap_suppression(sym, strategy)
             return False
         return True
 
