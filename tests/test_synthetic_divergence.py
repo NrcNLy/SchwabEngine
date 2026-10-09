@@ -265,6 +265,85 @@ def test_universe_manager_entry_suppression(divergence_engine: SyntheticDivergen
     assert um.is_entry_allowed("SOXL", current_time=t0) is False
 
 
+def test_universe_manager_momentum_ranking_and_dispatch(divergence_engine: SyntheticDivergenceEngine):
+    """
+    Verifies that UniverseManager ranks candidate entry signals by Composite
+    Momentum Score (S_i) prior to checking settled cash availability, preventing
+    secondary ETFs from starving primary assets.
+    """
+    um = UniverseManager(scanner=None, divergence_engine=divergence_engine)
+    um.update_universe(["SOXL", "BOIL", "TQQQ"])
+    assert um.get_active_universe() == ["SOXL", "BOIL", "TQQQ"]
+
+    # Assign Composite Momentum Scores: SOXL (0.95), TQQQ (0.80), BOIL (0.15)
+    um.set_momentum_score("SOXL", 0.95)
+    um.set_momentum_score("TQQQ", 0.80)
+    um.set_momentum_score("BOIL", 0.15)
+
+    now = datetime(2026, 10, 8, 9, 35, 0, tzinfo=timezone.utc)
+    dummy_metrics = RegimeMetrics(
+        timestamp=now, symbol="DUMMY", ci=30.0, natr=1.0, rvol=1.5,
+        vwap_slope_deg=10.0, atr14_dollars=0.5, vwap=20.0,
+        vwap_upper_2_2=21.0, vwap_lower_2_2=19.0, rsi14=50.0,
+        regime=MarketRegime.TREND_EXPANSION
+    )
+
+    sig_boil = TradeSignal(
+        timestamp=now,
+        symbol="BOIL",
+        strategy="15m_ORB",
+        direction="LONG",
+        entry_price=Decimal("10.00"),
+        stop_price=Decimal("9.50"),
+        target_price=Decimal("11.00"),
+        quantity=300,  # $3,000 cost
+        max_risk_usd=Decimal("10.00"),
+        regime=MarketRegime.TREND_EXPANSION,
+        metrics=dummy_metrics,
+    )
+    sig_soxl = TradeSignal(
+        timestamp=now,
+        symbol="SOXL",
+        strategy="15m_ORB",
+        direction="LONG",
+        entry_price=Decimal("40.00"),
+        stop_price=Decimal("38.00"),
+        target_price=Decimal("45.00"),
+        quantity=100,  # $4,000 cost
+        max_risk_usd=Decimal("10.00"),
+        regime=MarketRegime.TREND_EXPANSION,
+        metrics=dummy_metrics,
+    )
+    sig_tqqq = TradeSignal(
+        timestamp=now,
+        symbol="TQQQ",
+        strategy="15m_ORB",
+        direction="LONG",
+        entry_price=Decimal("50.00"),
+        stop_price=Decimal("48.00"),
+        target_price=Decimal("55.00"),
+        quantity=50,   # $2,500 cost
+        max_risk_usd=Decimal("10.00"),
+        regime=MarketRegime.TREND_EXPANSION,
+        metrics=dummy_metrics,
+    )
+
+    # Greedy FIFO would process BOIL first if given [sig_boil, sig_soxl, sig_tqqq]
+    unranked = [sig_boil, sig_soxl, sig_tqqq]
+    ranked = um.rank_candidate_signals(unranked)
+    assert [s.symbol for s in ranked] == ["SOXL", "TQQQ", "BOIL"]
+
+    # Ledger with limited settled cash ($5,000 settled cash - $500 buffer = $4,500 available)
+    ledger = MockLedger(cash=5000.0, max_single=5000.0)
+    ledger.cash_buffer = Decimal("500.00")
+
+    dispatched = um.dispatch_candidate_signals(unranked, ledger)
+    # SOXL ($4,000) should be approved first because it has highest momentum score
+    assert len(dispatched) >= 1
+    assert dispatched[0].symbol == "SOXL"
+    assert dispatched[0].quantity == 100
+
+
 def test_strategy_engine_orb_suppression_and_telemetry(divergence_engine: SyntheticDivergenceEngine, tmp_path):
     """
     Verifies that StrategyEngine suppresses 15m ORB entries when LIQUIDITY_TRAP_ACTIVE,
@@ -351,3 +430,51 @@ def test_strategy_engine_orb_suppression_and_telemetry(divergence_engine: Synthe
     finally:
         tel_mod.DEFAULT_TELEMETRY_DB = orig_path
         tel_mod.TELEMETRY_DB_PATH = orig_path
+
+
+def test_synthetic_divergence_0930_anchor_latching(divergence_engine: SyntheticDivergenceEngine):
+    """
+    Verify that:
+    1. Pre-market ticks (< 09:30 EDT) do NOT latch opening anchors.
+    2. Crossing 09:30:00 EDT resets pre-market state and latches the cash open prints.
+    3. reset_opening_anchors() clears anchors across all tracked pairs.
+    4. get_tracked_symbols() reports all legs.
+    """
+    tracked = divergence_engine.get_tracked_symbols()
+    assert "SOXL" in tracked and "SOXS" in tracked
+    assert "TQQQ" in tracked and "SQQQ" in tracked
+
+    from zoneinfo import ZoneInfo
+    ny_tz = ZoneInfo("America/New_York")
+
+    # 1. Pre-market tick at 09:15:00 EDT
+    t_premarket = datetime(2026, 10, 8, 9, 15, 0, tzinfo=ny_tz)
+    divergence_engine.record_tick("SOXL", price=39.00, volume=100, timestamp=t_premarket)
+    divergence_engine.record_tick("SOXS", price=21.00, volume=100, timestamp=t_premarket)
+
+    pair = divergence_engine.get_pair("SOXL_SOXS")
+    assert pair.p_bull_0 is None
+    assert pair.p_bear_0 is None
+
+    # 2. Cash open tick at 09:30:00 EDT
+    t_open = datetime(2026, 10, 8, 9, 30, 0, tzinfo=ny_tz)
+    divergence_engine.on_tick("SOXL", price=40.00, volume=500, timestamp=t_open)
+    divergence_engine.on_tick("SOXS", price=20.00, volume=400, timestamp=t_open)
+
+    assert pair.p_bull_0 == 40.00
+    assert pair.p_bear_0 == 20.00
+
+    # Synthetic price product anchors to 40.00 and 20.00
+    s_t = divergence_engine.get_synthetic_price_product("SOXL_SOXS", t_open)
+    assert s_t == pytest.approx(1.0)
+
+    # Subsequent tick during market hours updates price but keeps anchor
+    t_1 = datetime(2026, 10, 8, 9, 31, 0, tzinfo=ny_tz)
+    divergence_engine.record_tick("SOXL", price=40.80, volume=100, timestamp=t_1)
+    assert pair.p_bull_0 == 40.00
+
+    # 3. Explicit reset_opening_anchors()
+    divergence_engine.reset_opening_anchors()
+    assert pair.p_bull_0 is None
+    assert pair.p_bear_0 is None
+

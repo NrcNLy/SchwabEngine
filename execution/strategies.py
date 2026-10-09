@@ -651,6 +651,7 @@ class StrategyEngine:
         self._mask   = mask
         self._divergence_engine = divergence_engine
         self._event_store = event_store
+        self._universe_manager: Optional[Any] = None
 
         reg_cfg   = cfg.get("regime", {})
         risk_cfg  = cfg.get("risk",   {})
@@ -698,6 +699,21 @@ class StrategyEngine:
         """Register the SyntheticDivergenceEngine for false liquidity trap suppression."""
         self._divergence_engine = engine
         logger.info("StrategyEngine: synthetic divergence engine registered.")
+
+    def set_universe_manager(self, manager: Any) -> None:
+        """Register the UniverseManager for momentum ranking and active universe management."""
+        self._universe_manager = manager
+        logger.info("StrategyEngine: universe manager registered.")
+
+    def rank_candidate_signals(self, signals: List[TradeSignal]) -> List[TradeSignal]:
+        """
+        Sort candidate trade signals by Composite Momentum Score (S_i) descending
+        prior to checking settled cash availability, preventing secondary ETFs
+        from starving primary assets.
+        """
+        if self._universe_manager is not None and hasattr(self._universe_manager, "rank_candidate_signals"):
+            return self._universe_manager.rank_candidate_signals(signals)
+        return signals
 
     def set_event_store(self, store: Any) -> None:
         """Register the SQLiteWALEventStore instance for event telemetry."""

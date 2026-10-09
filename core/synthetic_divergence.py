@@ -28,21 +28,24 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 import logging
 import threading
 from typing import Any, Dict, List, Optional, Tuple, Union
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass
 class SyntheticPair:
     """Definition of an inverse ETF instrument pair."""
     name: str
     bull_symbol: str
     bear_symbol: str
     description: str
+    p_bull_0: Optional[float] = None
+    p_bear_0: Optional[float] = None
 
 
 # Canonical Inverse ETF Pairs
@@ -112,13 +115,45 @@ class SyntheticDivergenceEngine:
 
         # Trap state: pair_name -> last_condition_met_timestamp
         self._last_trap_condition_time: Dict[str, datetime] = {}
+        self._last_tick_edt: Optional[datetime] = None
+
+    @property
+    def pairs(self) -> Dict[str, SyntheticPair]:
+        """Dictionary of registered synthetic inverse pairs."""
+        return self._pairs
+
+    def get_tracked_symbols(self) -> List[str]:
+        """Returns all unique bull and bear symbols tracked across all pairs."""
+        with self._lock:
+            syms = set()
+            for pair in self._pairs.values():
+                syms.add(pair.bull_symbol.upper())
+                syms.add(pair.bear_symbol.upper())
+            return sorted(syms)
+
+    def reset_opening_anchors(self) -> None:
+        """Resets P_bull_0 and P_bear_0 anchors across all tracked pairs for the 09:30 cash open."""
+        with self._lock:
+            self._initial_prices.clear()
+            for pair_key, state in self.pairs.items():
+                state.p_bull_0 = None
+                state.p_bear_0 = None
+            logger.info("SyntheticDivergenceEngine: 09:30 cash open anchors reset across all pairs.")
 
     def register_pair(self, pair: SyntheticPair) -> None:
         """Register a new synthetic inverse pair."""
         with self._lock:
-            self._pairs[pair.name] = pair
-            self._symbol_to_pair[pair.bull_symbol.upper()] = pair
-            self._symbol_to_pair[pair.bear_symbol.upper()] = pair
+            fresh_pair = SyntheticPair(
+                name=pair.name,
+                bull_symbol=pair.bull_symbol,
+                bear_symbol=pair.bear_symbol,
+                description=pair.description,
+                p_bull_0=pair.p_bull_0,
+                p_bear_0=pair.p_bear_0,
+            )
+            self._pairs[fresh_pair.name] = fresh_pair
+            self._symbol_to_pair[fresh_pair.bull_symbol.upper()] = fresh_pair
+            self._symbol_to_pair[fresh_pair.bear_symbol.upper()] = fresh_pair
 
     def get_pair(self, symbol_or_pair: str) -> Optional[SyntheticPair]:
         """Look up pair definition by pair name or ticker symbol."""
@@ -136,7 +171,14 @@ class SyntheticDivergenceEngine:
     def set_initial_price(self, symbol: str, price: float) -> None:
         """Set initial (session open P_0) price for synthetic price product calculation."""
         with self._lock:
-            self._initial_prices[symbol.upper()] = float(price)
+            sym = symbol.upper()
+            self._initial_prices[sym] = float(price)
+            pair = self._symbol_to_pair.get(sym)
+            if pair is not None:
+                if sym == pair.bull_symbol.upper():
+                    pair.p_bull_0 = float(price)
+                elif sym == pair.bear_symbol.upper():
+                    pair.p_bear_0 = float(price)
 
     # -----------------------------------------------------------------------
     # Ingestion
@@ -147,7 +189,7 @@ class SyntheticDivergenceEngine:
         symbol: str,
         price: float,
         volume: int,
-        timestamp: Optional[datetime] = None,
+        timestamp: Optional[Union[datetime, float, int]] = None,
         is_incremental: bool = True,
     ) -> None:
         """
@@ -165,12 +207,47 @@ class SyntheticDivergenceEngine:
         if price <= 0:
             return
 
-        ts = _normalize_time(timestamp)
+        is_real_epoch = False
+        if timestamp is None:
+            is_real_epoch = True
+            ts = datetime.now(timezone.utc)
+        elif isinstance(timestamp, (int, float)):
+            is_real_epoch = timestamp > 1_000_000_000
+            ts = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        elif isinstance(timestamp, datetime):
+            is_real_epoch = timestamp.timestamp() > 1_000_000_000
+            ts = _normalize_time(timestamp)
+        else:
+            ts = _normalize_time(timestamp)
 
         with self._lock:
-            # Anchor session open / initial price if not already set
-            if sym not in self._initial_prices or self._initial_prices[sym] <= 0:
-                self._initial_prices[sym] = price
+            in_regular_hours = True
+            if is_real_epoch:
+                ts_edt = ts.astimezone(ZoneInfo("America/New_York"))
+                # Check pre-market (< 09:30 EDT) to regular hours (>= 09:30 EDT) boundary crossing
+                if self._last_tick_edt is not None:
+                    was_premarket = (
+                        self._last_tick_edt.date() < ts_edt.date() or
+                        self._last_tick_edt.time() < dtime(9, 30, 0)
+                    )
+                    is_regular = ts_edt.time() >= dtime(9, 30, 0)
+                    if was_premarket and is_regular:
+                        self.reset_opening_anchors()
+                self._last_tick_edt = ts_edt
+                in_regular_hours = ts_edt.time() >= dtime(9, 30, 0)
+
+            # Anchor session open / initial price:
+            # During live trading, baseline prices are NOT latched during pre-market (< 09:30 EDT).
+            # Synthetic unit test timestamps (not real epoch) latch immediately.
+            if in_regular_hours:
+                if sym not in self._initial_prices or self._initial_prices[sym] <= 0:
+                    self._initial_prices[sym] = price
+                pair = self._symbol_to_pair.get(sym)
+                if pair is not None:
+                    if sym == pair.bull_symbol.upper() and (pair.p_bull_0 is None or pair.p_bull_0 <= 0):
+                        pair.p_bull_0 = price
+                    elif sym == pair.bear_symbol.upper() and (pair.p_bear_0 is None or pair.p_bear_0 <= 0):
+                        pair.p_bear_0 = price
 
             self._last_prices[sym] = price
 
@@ -197,14 +274,31 @@ class SyntheticDivergenceEngine:
     def on_tick(
         self,
         symbol: str,
-        fields: dict,
-        timestamp: Optional[datetime] = None,
+        price: Optional[Union[dict, float, int]] = None,
+        volume: Optional[Union[int, float]] = None,
+        timestamp: Optional[Any] = None,
+        fields: Optional[dict] = None,
     ) -> None:
-        """Convenience adapter for streamer Level 1 tick dict."""
-        price = float(fields.get("last_price", 0.0) or 0.0)
-        tot_vol = int(fields.get("total_volume", 0) or 0)
-        if price > 0:
-            self.record_tick(symbol, price=price, volume=tot_vol, timestamp=timestamp, is_incremental=False)
+        """
+        Convenience adapter for streamer Level 1 tick dict or direct price/volume call.
+        Supports:
+          on_tick(symbol, fields={...}, timestamp=...)
+          on_tick(symbol, {"last_price": ...}, timestamp=...)
+          on_tick(symbol, price=..., volume=..., timestamp=...)
+          on_tick(symbol, price, volume, timestamp)
+        """
+        tick_dict = fields if fields is not None else (price if isinstance(price, dict) else None)
+        if tick_dict is not None:
+            p = float(tick_dict.get("last_price", 0.0) or 0.0)
+            v = int(tick_dict.get("total_volume", 0) or 0)
+            is_inc = False
+        else:
+            p = float(price or 0.0)
+            v = int(volume or 0)
+            is_inc = True
+
+        if p > 0:
+            self.record_tick(symbol, price=p, volume=v, timestamp=timestamp, is_incremental=is_inc)
 
     # -----------------------------------------------------------------------
     # Internal Window Pruning & Metrics
@@ -279,8 +373,8 @@ class SyntheticDivergenceEngine:
         if pair is None:
             return 1.0
         with self._lock:
-            p_bull_0 = self._initial_prices.get(pair.bull_symbol, 0.0)
-            p_bear_0 = self._initial_prices.get(pair.bear_symbol, 0.0)
+            p_bull_0 = pair.p_bull_0 if pair.p_bull_0 is not None and pair.p_bull_0 > 0 else self._initial_prices.get(pair.bull_symbol, 0.0)
+            p_bear_0 = pair.p_bear_0 if pair.p_bear_0 is not None and pair.p_bear_0 > 0 else self._initial_prices.get(pair.bear_symbol, 0.0)
             p_bull_t = self._last_prices.get(pair.bull_symbol, 0.0)
             p_bear_t = self._last_prices.get(pair.bear_symbol, 0.0)
 

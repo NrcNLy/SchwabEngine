@@ -13,7 +13,7 @@ import json
 import logging
 import datetime
 import random
-from typing import Any
+from typing import Any, List, Optional
 
 try:
     import websockets
@@ -25,14 +25,42 @@ from core.models import MarketEvent
 logger = logging.getLogger("streamer")
 
 class SchwabStreamer:
-    def __init__(self, bus, auth_manager=None):
+    def __init__(
+        self,
+        bus,
+        auth_manager=None,
+        universe_manager: Optional[Any] = None,
+        divergence_engine: Optional[Any] = None,
+    ):
         self.bus = bus
         self.auth_manager = auth_manager
+        self.universe_manager = universe_manager
+        self.divergence_engine = divergence_engine
         
         # In a real environment, these are fetched via a REST call to Schwab UserPreferences
         self.streamer_url = "wss://streamer-api.schwabapi.com/ws"
         self.streamer_id = "MOCK_STREAMER_ID_123"
-        self.symbols = ["SOXL", "TQQQ", "TNA"]
+        self.symbols = [
+            # Core Trio
+            "SOXL", "TQQQ", "TNA",
+            # Inverses
+            "SOXS", "SQQQ", "TZA", "SCO", "SPXU", "KOLD",
+            # Wash-Sale / Leveraged
+            "FNGU", "CONL", "DPST", "UPRO", "NVDL", "TECL", "USD", "FAS", "BOIL", "UCO", "NUGT", "LABU",
+            # Benchmarks
+            "SOX", "NDX", "RUT", "USO",
+        ]
+
+    def get_subscription_symbols(self) -> List[str]:
+        """Dynamically collect active symbols from UniverseManager and SyntheticDivergenceEngine."""
+        syms = set(s.upper() for s in self.symbols)
+        if self.universe_manager is not None and hasattr(self.universe_manager, "get_active_universe"):
+            for s in self.universe_manager.get_active_universe():
+                syms.add(s.upper())
+        if self.divergence_engine is not None and hasattr(self.divergence_engine, "get_tracked_symbols"):
+            for s in self.divergence_engine.get_tracked_symbols():
+                syms.add(s.upper())
+        return sorted(syms)
         
     async def _fetch_streamer_credentials(self):
         """
@@ -69,7 +97,7 @@ class SchwabStreamer:
             "command": "SUBS",
             "requestid": 2,
             "parameters": {
-                "keys": ",".join(self.symbols),
+                "keys": ",".join(self.get_subscription_symbols()),
                 # 0=Symbol, 1=Bid, 2=Ask, 3=Last Price, 8=Volume, etc.
                 "fields": "0,1,2,3,8" 
             }
