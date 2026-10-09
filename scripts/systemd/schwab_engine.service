@@ -1,0 +1,20 @@
+[Unit]
+Description=Schwab Trading Engine & Dashboard Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=schwab
+WorkingDirectory=/home/schwab/schwab_engine
+EnvironmentFile=/home/schwab/schwab_engine/.env
+Environment=ENGINE_STATE_DIR=/home/schwab/schwab_state
+ExecStart=/home/schwab/schwab_engine/.venv/bin/python main.py --live
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

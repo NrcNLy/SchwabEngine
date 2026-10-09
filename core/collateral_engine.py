@@ -84,6 +84,7 @@ class CollateralEngine:
         self,
         settled_cash: Decimal,
         unsettled_cash: Decimal,
+        open_positions_market_value: Decimal = Decimal("0.00"),
         as_of: Optional[date] = None,
     ) -> CollateralInvariantState:
         """
@@ -95,6 +96,7 @@ class CollateralEngine:
             settled_cash=settled_cash,
             unsettled_cash=unsettled_cash,
             active_promotional_debt=total_promo_debt,
+            open_positions_market_value=open_positions_market_value,
             external_liquid_backstop=self.external_liquid_backstop,
             as_of=as_of,
         )

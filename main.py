@@ -279,7 +279,42 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
 # Orchestration
 # ---------------------------------------------------------------------------
 
+def _handle_unhandled_exception(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    msg = context.get("message", "Unhandled exception in event loop")
+    exc = context.get("exception")
+    if exc is not None:
+        logger.error("Asyncio unhandled exception: %s (%s)", msg, exc, exc_info=exc)
+    else:
+        logger.error("Asyncio unhandled exception: %s", msg)
+
+
+async def _control_signal_poller(ctx: EngineContext, engine: Any, stop: asyncio.Event) -> None:
+    from core.ipc import read_control_signal, acknowledge_control_signal
+    while not stop.is_set():
+        try:
+            sig = await asyncio.to_thread(read_control_signal)
+            if sig and not sig.get("acknowledged_by_trader"):
+                action = str(sig.get("action", "")).upper()
+                if action == "HALT":
+                    ctx.is_halted = True
+                    logger.warning("IPC CONTROL SIGNAL: Master Kill Switch ENGAGED.")
+                elif action == "RESUME":
+                    ctx.is_halted = False
+                    logger.info("IPC CONTROL SIGNAL: Trading Engine RESUMED.")
+                elif action == "LIQUIDATE_ALL":
+                    ctx.is_halted = True
+                    logger.warning("IPC CONTROL SIGNAL: Emergency LIQUIDATE_ALL requested.")
+                    if engine is not None:
+                        asyncio.create_task(engine.flatten_all("IPC_EMERGENCY_LIQUIDATE"))
+                await asyncio.to_thread(acknowledge_control_signal)
+        except Exception as exc:
+            logger.debug("control_signal_poller error: %s", exc)
+        await asyncio.sleep(0.25)
+
+
 async def run(args: argparse.Namespace) -> int:
+    if getattr(args, "headless_trader", False):
+        args.no_api = True
     cfg = load_config()
     live = resolve_live(args, cfg)
     if live and args.ignore_session:
@@ -291,6 +326,7 @@ async def run(args: argparse.Namespace) -> int:
     await asyncio.to_thread(ctx.load_persisted_policy)
 
     loop = asyncio.get_running_loop()
+    loop.set_exception_handler(_handle_unhandled_exception)
     stop = asyncio.Event()
     tasks: List[asyncio.Task] = []
     handles = LiveHandles()
@@ -333,6 +369,33 @@ async def run(args: argparse.Namespace) -> int:
     except Exception:
         pass
 
+    from core.ipc import TraderIPCServer
+    ipc_server = TraderIPCServer()
+    try:
+        await ipc_server.start()
+    except Exception as exc:
+        logger.warning("TraderIPCServer could not start: %s", exc)
+        ipc_server = None
+
+    if engine is not None:
+        tasks.append(asyncio.create_task(_control_signal_poller(ctx, engine, stop), name="control-signal-poller"))
+        if ipc_server is not None and handles.streamer is not None:
+            orig_on_tick = engine.on_tick
+            import time
+
+            def broadcast_on_tick(sym: str, f: dict) -> None:
+                orig_on_tick(sym, f)
+                ipc_server.broadcast({
+                    "type": "TICK",
+                    "symbol": sym,
+                    "last": f.get("last_price", 0.0),
+                    "bid": f.get("bid_price", 0.0),
+                    "ask": f.get("ask_price", 0.0),
+                    "vol": f.get("total_volume", 0),
+                    "ts": int(time.time() * 1000),
+                })
+            handles.streamer.on_tick = broadcast_on_tick
+
     governor = make_governor() if (live or args.governor) else None
     if engine is not None:
         tasks.append(asyncio.create_task(engine.run_schedulers(stop, governor), name="schedulers"))
@@ -358,6 +421,8 @@ async def run(args: argparse.Namespace) -> int:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if ipc_server is not None:
+            await ipc_server.stop()
         if handles.streamer is not None:
             await asyncio.to_thread(handles.streamer.stop)
         if ctx.microstructure is not None:
@@ -389,6 +454,7 @@ def run_self_test() -> int:
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="SchwabEngine")
     p.add_argument("--live", action="store_true", help="Route real orders to Schwab (default: dry-run).")
+    p.add_argument("--headless-trader", action="store_true", help="Run high-priority headless execution daemon without API server.")
     p.add_argument("--ignore-session", action="store_true", help="Dry-run only: allow entries outside market hours.")
     p.add_argument("--governor", action="store_true", help="Dry-run: also run the Vertex AI governor schedule.")
     p.add_argument("--no-api", action="store_true", help="Do not start the HTTP API.")

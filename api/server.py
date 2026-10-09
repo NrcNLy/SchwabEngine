@@ -41,6 +41,7 @@ Endpoints (each also available under /api):
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import logging
 import time
@@ -325,7 +326,9 @@ def _collateral_view(ctx: EngineContext, doc: Dict[str, Any]):
         engine.add_or_update_promotional_debt(PromotionalDebt(**raw))
     engine.external_liquid_backstop = Decimal(str(doc.get("external_liquid_backstop", 0) or 0))
     settled, unsettled = _primary_cash(ctx)
-    return engine, engine.evaluate_invariant(settled, unsettled)
+    ledger = ctx.ledger
+    pos_val = ledger.positions_value if ledger is not None else Decimal("0")
+    return engine, engine.evaluate_invariant(settled, unsettled, open_positions_market_value=pos_val)
 
 
 # -----------------------------------------------------------------
@@ -345,22 +348,6 @@ def build_app(ctx: EngineContext):
     if FastAPI is None:
         logger.error("api/server.py: FastAPI/uvicorn not installed. Run: pip install fastapi uvicorn")
         return None
-
-    app = FastAPI(
-        title="Schwab Engine API",
-        description="Trading engine internal state API for the SchwabEngine dashboard.",
-        version="2.0.0",
-    )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=CORS_ORIGINS,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    router = APIRouter()
-    doc_jobs: Dict[str, Dict[str, Any]] = {}
 
     # ---- WebSocket connection manager --------------------------------
 
@@ -384,6 +371,52 @@ def build_app(ctx: EngineContext):
                     self.disconnect(ws)
 
     manager = _ConnectionManager()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        logger.info("FastAPI lifespan: Engine API online.")
+        stop_ipc = asyncio.Event()
+
+        async def _run_ipc_relay():
+            from core.ipc import TraderIPCClient
+            client = TraderIPCClient()
+            while not stop_ipc.is_set():
+                connected = await client.connect(timeout=1.0)
+                if connected:
+                    logger.info("FastAPI: Connected to local Trader IPC broadcast.")
+                    try:
+                        async for msg in client.listen():
+                            if stop_ipc.is_set():
+                                break
+                            await manager.broadcast(msg)
+                    except Exception as e:
+                        logger.debug("IPC relay loop error: %s", e)
+                await asyncio.sleep(2.0)
+
+        relay_task = asyncio.create_task(_run_ipc_relay())
+        try:
+            yield
+        finally:
+            stop_ipc.set()
+            relay_task.cancel()
+            logger.info("FastAPI lifespan: Engine API shutting down.")
+
+    app = FastAPI(
+        title="Schwab Engine API",
+        description="Trading engine internal state API for the SchwabEngine dashboard.",
+        version="2.0.0",
+        lifespan=lifespan,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    router = APIRouter()
+    doc_jobs: Dict[str, Dict[str, Any]] = {}
 
     # ---- live monitoring dashboard ----------------------------------
 
@@ -514,25 +547,102 @@ def build_app(ctx: EngineContext):
             "unmanaged": _unmanaged_rows(ctx, env),
         }
 
-    @router.get("/orders")
-    async def get_orders(env: Optional[str] = None):
+    def _read_trades_from_db(target_env: str = "active", today_only: bool = False) -> List[Dict[str, Any]]:
+        from core.paths import TRADES_DB_PATH
+        import sqlite3
+        if not TRADES_DB_PATH.exists():
+            return []
+        try:
+            uri = Path(TRADES_DB_PATH).resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA busy_timeout=5000;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            query = "SELECT * FROM trades WHERE env = ?"
+            params: List[Any] = [target_env]
+            if today_only:
+                today_edt = datetime.now(_EDT).strftime("%Y-%m-%d")
+                query += " AND DATE(timestamp) = ?"
+                params.append(today_edt)
+            query += " ORDER BY id ASC"
+            cursor = conn.execute(query, params)
+            rows = [
+                {
+                    "trade_id": r["trade_id"],
+                    "symbol": r["symbol"],
+                    "side": r["side"],
+                    "quantity": r["quantity"],
+                    "price": float(r["price"]),
+                    "cost": float(r["cost_basis"]),
+                    "realized_pnl": float(r["realized_pnl"]),
+                    "disallowed_loss": float(r["disallowed_loss"]),
+                    "timestamp": r["timestamp"],
+                    "status": "FILLED",
+                    "regime": r["regime"],
+                    "simulated": bool(r["simulated"]),
+                }
+                for r in cursor.fetchall()
+            ]
+            conn.close()
+            return rows
+        except Exception as exc:
+            logger.debug("Read-only trades.db query failed: %s", exc)
+            return []
+
+    @router.get("/orders/today")
+    async def get_orders_today(env: Optional[str] = None):
         env = _resolve_env(ctx, env)
         ledger = ctx.ledger_for(env)
-        if ledger is None:
-            return []
+        today = now_et().date()
+        trades = [t for t in ledger.get_trade_log() if t.timestamp.astimezone(_EDT).date() == today] if ledger else []
+        if not trades:
+            db_trades = await asyncio.to_thread(_read_trades_from_db, env, True)
+            if db_trades:
+                return db_trades
         return [
             {
+                "trade_id": getattr(t, "trade_id", None),
                 "symbol": t.symbol,
                 "side": t.side,
                 "quantity": t.quantity,
                 "price": _f(t.price),
                 "cost": _f(t.cost_basis),
+                "realized_pnl": _f(t.realized_pnl),
+                "disallowed_loss": _f(getattr(t, "disallowed_loss", 0.0)),
                 "timestamp": t.timestamp.isoformat(),
                 "status": "FILLED",
                 "regime": t.regime,
                 "simulated": t.simulated,
             }
-            for t in ledger.get_trade_log()
+            for t in trades
+        ]
+
+    @router.get("/orders")
+    async def get_orders(env: Optional[str] = None):
+        env = _resolve_env(ctx, env)
+        ledger = ctx.ledger_for(env)
+        trades = ledger.get_trade_log() if ledger else []
+        if not trades:
+            db_trades = await asyncio.to_thread(_read_trades_from_db, env, False)
+            if db_trades:
+                return db_trades
+        return [
+            {
+                "trade_id": getattr(t, "trade_id", None),
+                "symbol": t.symbol,
+                "side": t.side,
+                "quantity": t.quantity,
+                "price": _f(t.price),
+                "cost": _f(t.cost_basis),
+                "realized_pnl": _f(t.realized_pnl),
+                "disallowed_loss": _f(getattr(t, "disallowed_loss", 0.0)),
+                "timestamp": t.timestamp.isoformat(),
+                "status": "FILLED",
+                "regime": t.regime,
+                "simulated": t.simulated,
+            }
+            for t in trades
         ]
 
     @router.get("/ledger")
@@ -760,6 +870,12 @@ def build_app(ctx: EngineContext):
     @router.post("/emergency/halt")
     async def emergency_halt(req: HaltRequest):
         ctx.is_halted = req.halted
+        try:
+            from core.ipc import write_control_signal
+            action = "HALT" if req.halted else "RESUME"
+            await asyncio.to_thread(write_control_signal, action=action, reason="API_EMERGENCY_HALT")
+        except Exception as exc:
+            logger.warning("Failed to write control signal: %s", exc)
         await manager.broadcast({"event": "HALT_CHANGED", "halted": req.halted})
         return {
             "success": True,
@@ -772,6 +888,11 @@ def build_app(ctx: EngineContext):
     async def emergency_liquidate():
         """Halts new entries, then asks the engine to flatten. Reports what actually happened."""
         ctx.is_halted = True
+        try:
+            from core.ipc import write_control_signal
+            await asyncio.to_thread(write_control_signal, action="LIQUIDATE_ALL", reason="API_EMERGENCY_LIQUIDATE")
+        except Exception as exc:
+            logger.warning("Failed to write control signal: %s", exc)
         if ctx.flatten_cb is None:
             return {"success": False, "liquidated_count": 0,
                     "message": "Entries halted, but no flatten routine is registered with the engine."}
@@ -895,7 +1016,9 @@ def build_app(ctx: EngineContext):
             engine, _ = _collateral_view(ctx, curr)
             engine.add_or_update_promotional_debt(new_debt)
             settled, unsettled = _primary_cash(ctx)
-            new_state = engine.evaluate_invariant(settled, unsettled)
+            ledger = ctx.ledger
+            pos_val = ledger.positions_value if ledger is not None else Decimal("0")
+            new_state = engine.evaluate_invariant(settled, unsettled, open_positions_market_value=pos_val)
             curr.update({
                 "_updated_at": datetime.utcnow().isoformat() + "Z",
                 "collateral_state": new_state.model_dump(),
@@ -989,3 +1112,17 @@ def build_app(ctx: EngineContext):
             return FileResponse(index_file)
 
     return app
+
+
+def get_default_app() -> Optional[FastAPI]:
+    try:
+        from core.runtime import load_config
+        cfg = load_config()
+        ctx = EngineContext(cfg, live=True)
+        return build_app(ctx)
+    except Exception as exc:
+        logger.warning("Could not instantiate default app for api.server: %s", exc)
+        return None
+
+
+app = get_default_app()

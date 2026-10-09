@@ -1,0 +1,34 @@
+[Unit]
+Description=Schwab Trading Web & API Gateway (Core 1)
+After=network.target schwab-trader.service
+Wants=schwab-trader.service
+
+[Service]
+Type=simple
+User=schwab
+Group=schwab
+WorkingDirectory=/home/schwab/schwab_engine
+EnvironmentFile=/home/schwab/schwab_engine/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=ENGINE_STATE_DIR=/home/schwab/schwab_state
+Environment=TRADER_IPC_SOCKET=/tmp/schwab_trader.sock
+
+# Native Systemd Directives: CPU Core 1 Pinning + Standard Priority
+CPUAffinity=1
+Nice=0
+LimitNOFILE=65536
+
+# Execution (No taskset/nice wrapper)
+ExecStart=/home/schwab/schwab_engine/.venv/bin/python -m uvicorn api.server:app --host 0.0.0.0 --port 8080 --workers 1 --log-level info
+
+Restart=always
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=schwab-web
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,23 @@
+[Unit]
+Description=Schwab Midday Regime Walk-Forward Optimizer
+After=network.target
+
+[Service]
+Type=oneshot
+User=schwab
+Group=schwab
+WorkingDirectory=/home/schwab/schwab_engine
+EnvironmentFile=/home/schwab/schwab_engine/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=ENGINE_STATE_DIR=/home/schwab/schwab_state
+
+# Native Systemd Directives: Core 2-3 Background Priority
+CPUAffinity=2-3
+Nice=19
+IOSchedulingClass=idle
+
+ExecStart=/home/schwab/schwab_engine/.venv/bin/python workers/midday_optimizer.py
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=schwab-midday

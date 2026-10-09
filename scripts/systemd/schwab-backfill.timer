@@ -1,0 +1,9 @@
+[Unit]
+Description=Timer for Schwab Off-Hours Bar Archival (17:15 EDT Weekdays)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 17:15:00 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target

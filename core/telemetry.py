@@ -27,8 +27,8 @@ from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_TELEMETRY_DB = REPO_ROOT / "data" / "schwab_telemetry.db"
+from core.paths import TELEMETRY_DB_PATH
+DEFAULT_TELEMETRY_DB = TELEMETRY_DB_PATH
 
 
 class TelemetryEvent(BaseModel):
@@ -63,8 +63,8 @@ class SQLiteWALEventStore:
     Supports concurrent readers alongside single-writer loops with 5000ms busy timeout.
     """
 
-    def __init__(self, db_path: Union[str, Path] = DEFAULT_TELEMETRY_DB):
-        self.db_path = str(db_path)
+    def __init__(self, db_path: Optional[Union[str, Path]] = None):
+        self.db_path = str(db_path if db_path is not None else DEFAULT_TELEMETRY_DB)
         self._is_memory = self.db_path == ":memory:"
         if not self._is_memory:
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)

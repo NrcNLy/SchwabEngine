@@ -121,9 +121,14 @@ def test_sweep_is_advisory_and_never_routed():
         for settled, swvxx in (("1000", "0"), ("100", "800"), ("40", "0")):
             out = bp(policy=pol, settled_cash=D(settled), swvxx_settled=D(swvxx))
             assert out.sweep.routed is False
-    out = bp(settled_cash=D("1000"))
+    # Sub-$25,000 account preserves 100% operational float (no sweep)
+    out_sub25 = bp(settled_cash=D("1000"))
+    assert out_sub25.sweep.action == "NONE"
+
+    # Qualified account (>$25k equity, >$3,500 settled float) evaluates sweep
+    out = bp(nlv=D("50000"), settled_cash=D("35000"))
     assert out.sweep.action == "SWEEP_IN" and out.sweep.settles_on == date(2026, 10, 6)
-    redeem = bp(settled_cash=D("100"), swvxx_settled=D("800"))
+    redeem = bp(nlv=D("50000"), settled_cash=D("10000"), swvxx_settled=D("15000"))
     assert redeem.sweep.action == "REDEEM_FOR_NEXT_SESSION"
     assert redeem.sweep.place_by == MONDAY and redeem.sweep.settles_on == date(2026, 10, 6)
 

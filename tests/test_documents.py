@@ -148,8 +148,8 @@ def test_manual_promo_debt_backstop_and_targets_survive_ingestion_and_merge(tmp_
     assert saved["liquidity_targets"][0]["target_id"] == "tax"
 
     state = saved["collateral_state"]
-    assert state["total_liquid_backstop"] == 720 + 240 + 5000
-    assert state["net_collateral_buffer"] == (720 + 240 + 5000) - 1800
+    assert state["total_liquid_backstop"] == 720 + 5000
+    assert state["net_collateral_buffer"] == (720 + 5000) - 1800
     assert state["is_solvent"] is True
 
 
@@ -158,8 +158,8 @@ def test_net_collateral_buffer_formula_includes_external_backstop():
         settled_cash=D("100"), unsettled_cash=D("50"), active_promotional_debt=D("400"),
         external_liquid_backstop=D("200"),
     )
-    assert s.total_liquid_backstop == D("350")
-    assert s.net_collateral_buffer == D("-50")
+    assert s.total_liquid_backstop == D("300")
+    assert s.net_collateral_buffer == D("-100")
     assert s.is_solvent is False
     default_backstop = CollateralInvariantState.calculate(D("10"), D("0"), D("5"))
     assert default_backstop.external_liquid_backstop == D("0.00") and default_backstop.is_solvent is True

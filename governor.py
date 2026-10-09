@@ -24,8 +24,8 @@ try:
     from google import genai
     from google.genai import types
 except ImportError:
-    print("google-genai SDK not found. Install via: pip install google-genai")
-    sys.exit(1)
+    genai = None
+    types = None
 
 from core.models import GovernorConfig
 
@@ -38,8 +38,14 @@ LOCATION = "us-central1"
 # Firewall safeguard against Partner models
 ALLOWED_MODELS = {"gemini-2.5-flash", "gemini-2.5-pro"}
 
+class GovernorConnectionError(RuntimeError):
+    """Raised when Vertex AI connection or authentication fails."""
+
+
 class GovernorDaemon:
     def __init__(self):
+        if genai is None:
+            raise RuntimeError("google-genai SDK not found. Install via: pip install google-genai")
         self.client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
         self.config_path = Path("strategy_config.json")
         
@@ -143,7 +149,7 @@ class GovernorDaemon:
             logger.info(f"Smoke test successful. Vertex AI Response: {res.text.strip()}")
         except Exception as exc:
             logger.error(f"Smoke test failed! Connection or authentication error: {exc}")
-            sys.exit(1)
+            raise GovernorConnectionError(f"Smoke test failed: {exc}") from exc
 
     async def parse_document(self, doc_path: Path):
         """Dispatches financial document parsing to DocumentParser."""

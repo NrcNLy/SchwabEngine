@@ -119,6 +119,8 @@ class SweepPolicy(BaseModel):
     min_idle_usd: Decimal = Field(default=Decimal("250.00"), ge=0)
     trading_float_pct_nlv: Decimal = Field(default=Decimal("0.40"), ge=0, le=1)
     redemption_lead_business_days: int = Field(default=1, ge=1, le=3)
+    min_account_equity_usd: Decimal = Field(default=Decimal("25000.00"), ge=0)
+    operational_float_floor_usd: Decimal = Field(default=Decimal("3500.00"), ge=0)
 
 
 class RiskGatePolicy(BaseModel):
@@ -325,7 +327,30 @@ def _advise_sweep(
     if sw.mode == "OFF":
         return SweepAdvisory(mode=sw.mode, rationale="Sweep advisory disabled.")
 
-    keep = q(max(nlv * sw.trading_float_pct_nlv, ZERO)) + target_eff
+    # Guard 1: Sub-$25,000 cash account equity firewall
+    if nlv < sw.min_account_equity_usd:
+        return SweepAdvisory(
+            action="NONE",
+            mode=sw.mode,
+            rationale=(
+                f"Account equity (${nlv:.2f}) is below the ${sw.min_account_equity_usd:.2f} threshold. "
+                "Preserving 100% operational float; overnight money market sweep disabled."
+            ),
+        )
+
+    # Guard 2: Enforce liquid operational float floor ($3,500+)
+    if settled < sw.operational_float_floor_usd:
+        return SweepAdvisory(
+            action="NONE",
+            mode=sw.mode,
+            rationale=(
+                f"Settled cash (${settled:.2f}) is below the ${sw.operational_float_floor_usd:.2f} operational float floor. "
+                "Sweep disabled to preserve morning trade sizing."
+            ),
+        )
+
+    float_floor = max(nlv * sw.trading_float_pct_nlv, sw.operational_float_floor_usd)
+    keep = q(float_floor) + target_eff
     idle = q(settled - keep)
 
     if idle >= sw.min_idle_usd:
@@ -334,7 +359,7 @@ def _advise_sweep(
             action="SWEEP_IN", amount=amount, mode=sw.mode,
             place_by=today, settles_on=next_business_day(today),
             rationale=(
-                f"${amount} of settled cash exceeds the trading float plus soft reserve. "
+                f"${amount} of settled cash exceeds the operational float (${float_floor:.2f}) plus soft reserve. "
                 f"Move to {sw.symbol} after the 15:50 flat; it is redeemable only after T+1."
             ),
         )
@@ -348,7 +373,7 @@ def _advise_sweep(
             action="REDEEM_FOR_NEXT_SESSION", amount=amount, mode=sw.mode,
             place_by=place_by, settles_on=settles,
             rationale=(
-                f"Settled cash is ${need} below the trading float. Redeeming ${amount} of "
+                f"Settled cash is ${need} below the operational float. Redeeming ${amount} of "
                 f"{sw.symbol} on {place_by.isoformat()} settles {settles.isoformat()}; "
                 f"it can never fund same-day trades (GFV)."
             ),

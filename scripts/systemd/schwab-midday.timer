@@ -1,0 +1,9 @@
+[Unit]
+Description=Timer for Schwab Midday Regime Optimizer (11:35 EDT Weekdays)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 11:35:00 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target

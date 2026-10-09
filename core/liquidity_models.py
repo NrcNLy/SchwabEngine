@@ -111,6 +111,7 @@ class CollateralInvariantState(BaseModel):
     timestamp: date
     settled_cash: Decimal
     unsettled_cash: Decimal
+    open_positions_market_value: Decimal = Decimal("0.00")
     external_liquid_backstop: Decimal = Decimal("0.00")
     total_liquid_backstop: Decimal
     active_promotional_debt: Decimal
@@ -123,17 +124,20 @@ class CollateralInvariantState(BaseModel):
         settled_cash: Decimal,
         unsettled_cash: Decimal,
         active_promotional_debt: Decimal,
+        open_positions_market_value: Decimal = Decimal("0.00"),
         external_liquid_backstop: Decimal = Decimal("0.00"),
         as_of: Optional[date] = None,
     ) -> "CollateralInvariantState":
         """
         Calculates the passive Net Collateral Invariant.
         Formula:
-          Total Liquid Backstop = settled_cash + unsettled_cash + external_liquid_backstop
+          true_equity = settled_cash + open_positions_market_value
+          Total Liquid Backstop = true_equity + external_liquid_backstop
           Net Collateral Buffer = Total Liquid Backstop - active_promotional_debt
         """
         ts = as_of or date.today()
-        total_backstop = settled_cash + unsettled_cash + external_liquid_backstop
+        true_equity = settled_cash + open_positions_market_value
+        total_backstop = true_equity + external_liquid_backstop
         buffer = total_backstop - active_promotional_debt
         is_solvent = buffer >= Decimal("0.00")
 
@@ -141,6 +145,7 @@ class CollateralInvariantState(BaseModel):
             timestamp=ts,
             settled_cash=settled_cash,
             unsettled_cash=unsettled_cash,
+            open_positions_market_value=open_positions_market_value,
             external_liquid_backstop=external_liquid_backstop,
             total_liquid_backstop=total_backstop,
             active_promotional_debt=active_promotional_debt,

@@ -480,6 +480,15 @@ class LiveEngine(_EngineBase):
             if not self.ignore_session:
                 t_phase = get_session_phase(now_et(), self.cfg)
                 _, phase_mult, _ = is_entry_permitted(t_phase, self.cfg)
+                if t_phase == TradingPhase.POWER_HOUR:
+                    try:
+                        from core.ipc import read_dynamic_policy
+                        dyn = read_dynamic_policy()
+                        if dyn and "overrides" in dyn and "power_hour_size_scale" in dyn["overrides"]:
+                            dyn_scale = float(dyn["overrides"]["power_hour_size_scale"])
+                            phase_mult = min(phase_mult, dyn_scale)
+                    except Exception:
+                        pass
                 if phase_mult < 1.0:
                     scaled_qty = math.floor(qty * phase_mult)
                     logger.info("[%s] Temporal gate (%s) scaled sizing: %d -> %d shares", sym, t_phase.value, qty, scaled_qty)

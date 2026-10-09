@@ -87,12 +87,19 @@ def lifecycle_phase(now: Optional[datetime] = None, cfg: Optional[Dict[str, Any]
     return "OFFLINE"
 
 
-def build_ledger(cfg: Dict[str, Any], *, live: bool) -> SettlementLedger:
+def build_ledger(cfg: Dict[str, Any], *, live: bool, trade_store: Optional[Any] = None) -> SettlementLedger:
     """
     Builds a ledger from config ratios. The sandbox ledger starts with the
     configured baseline; the live ledger starts empty and is adopted from the broker.
     """
     risk = cfg.get("risk", {})
+    env = "active" if live else "sandbox"
+    if trade_store is None:
+        try:
+            from core.trade_store import SQLiteTradeStore
+            trade_store = SQLiteTradeStore()
+        except Exception:
+            trade_store = None
     return SettlementLedger(
         baseline_settled=0 if live else risk.get("sandbox_baseline", 1000.00),
         single_ticker_cap_pct=risk.get("single_ticker_cap_pct", 0.20),
@@ -100,6 +107,8 @@ def build_ledger(cfg: Dict[str, Any], *, live: bool) -> SettlementLedger:
         daily_drawdown_pct=risk.get("daily_drawdown_pct", 0.03),
         cash_buffer=risk.get("cash_buffer", 10.00),
         data_source="LIVE_SCHWAB" if live else "SANDBOX_SIM",
+        env=env,
+        trade_store=trade_store,
     )
 
 

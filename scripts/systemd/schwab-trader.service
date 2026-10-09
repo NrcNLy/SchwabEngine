@@ -1,0 +1,36 @@
+[Unit]
+Description=Schwab Trading Engine Daemon (Core 0 Execution)
+After=network.target time-sync.target
+Wants=time-sync.target
+
+[Service]
+Type=simple
+User=schwab
+Group=schwab
+WorkingDirectory=/home/schwab/schwab_engine
+EnvironmentFile=/home/schwab/schwab_engine/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=ENGINE_STATE_DIR=/home/schwab/schwab_state
+Environment=TRADER_IPC_SOCKET=/tmp/schwab_trader.sock
+
+# Native Systemd Directives: CPU Core 0 Pinning + Elevated Priority
+CPUAffinity=0
+Nice=-10
+LimitMEMLOCK=infinity
+LimitNOFILE=65536
+
+# Execution (No taskset/nice wrapper)
+ExecStart=/home/schwab/schwab_engine/.venv/bin/python main.py --headless-trader --live
+
+Restart=always
+RestartSec=3s
+KillSignal=SIGTERM
+TimeoutStopSec=25
+FinalKillSignal=SIGKILL
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=schwab-trader
+
+[Install]
+WantedBy=multi-user.target

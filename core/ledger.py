@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -142,7 +143,9 @@ class TradeRecord:
     timestamp: datetime
     simulated: bool
     realized_pnl: Decimal = ZERO
+    disallowed_loss: Decimal = ZERO
     regime: str = ""
+    trade_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
 @dataclass
@@ -165,13 +168,17 @@ class SettlementLedger:
         daily_drawdown_pct: Decimal | float = "0.05",
         cash_buffer: Decimal | float = "10.00",
         data_source: str = "SANDBOX_SIM",
+        env: str = "active",
+        trade_store: Optional[Any] = None,
     ):
         self._lock = threading.RLock()
         self.data_source = data_source
+        self.env = env
         self.cap_pct = _d(single_ticker_cap_pct)
         self.risk_pct = _d(risk_per_trade_pct)
         self.dd_pct = _d(daily_drawdown_pct)
         self.cash_buffer = _d(cash_buffer)
+        self.trade_store = trade_store
 
         self._settled: Decimal = q(_d(baseline_settled))
         self._lots: List[UnsettledLot] = []
@@ -181,6 +188,8 @@ class SettlementLedger:
 
         self.positions: Dict[str, ManagedPosition] = {}
         self._trades: List[TradeRecord] = []
+        if self.trade_store is not None:
+            self._rehydrate_trades()
 
         # Broker-authoritative figures (live mode)
         self._broker_nlv: Optional[Decimal] = None
@@ -191,6 +200,37 @@ class SettlementLedger:
         self.synced_at: Optional[datetime] = None
         self.drift: Decimal = ZERO
         self._ceiling_provider: Optional[Callable[[], Optional[Decimal]]] = None
+
+    def _rehydrate_trades(self, target_date: Optional[date] = None) -> None:
+        with self._lock:
+            if self.trade_store is None:
+                return
+            records = self.trade_store.fetch_trades_today(env=self.env, target_date=target_date)
+            loaded = []
+            for r in records:
+                try:
+                    ts = datetime.fromisoformat(r["timestamp"])
+                    if ts.tzinfo is None:
+                        ts = _EDT.localize(ts)
+                except Exception:
+                    ts = datetime.now(_EDT)
+                loaded.append(
+                    TradeRecord(
+                        symbol=r["symbol"],
+                        side=r["side"],
+                        quantity=int(r["quantity"]),
+                        price=Decimal(str(r["price"])),
+                        cost_basis=Decimal(str(r["cost_basis"])),
+                        timestamp=ts,
+                        simulated=bool(r["simulated"]),
+                        realized_pnl=Decimal(str(r.get("realized_pnl", 0.0))),
+                        disallowed_loss=Decimal(str(r.get("disallowed_loss", 0.0))),
+                        regime=r.get("regime", ""),
+                        trade_id=r.get("trade_id", str(uuid.uuid4())),
+                    )
+                )
+            self._trades = loaded
+            logger.info("Hydrated %d trade(s) from SQLite for env '%s'.", len(loaded), self.env)
 
     # ------------------------------------------------------------------
     # Read-only views
@@ -481,10 +521,20 @@ class SettlementLedger:
                     settle_date=eff_settle_date if not is_settled else None,
                 )
                 self.positions[symbol] = pos
-            self._trades.append(TradeRecord(
+            rec = TradeRecord(
                 symbol=symbol, side="BUY", quantity=quantity, price=px, cost_basis=cost,
                 timestamp=trade_dt, simulated=simulated, regime=regime,
-            ))
+            )
+            self._trades.append(rec)
+            if self.trade_store is not None:
+                try:
+                    self.trade_store.record_trade(
+                        symbol=symbol, side="BUY", quantity=quantity, price=px, cost_basis=cost,
+                        timestamp=trade_dt, simulated=simulated, realized_pnl=ZERO,
+                        disallowed_loss=ZERO, regime=regime, trade_id=rec.trade_id, env=self.env,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to persist BUY trade to SQLite: %s", exc)
             return pos
 
     def adopt_position(
@@ -583,11 +633,21 @@ class SettlementLedger:
                 pos.last_price = px
                 if pos.quantity <= 0:
                     del self.positions[symbol]
-            self._trades.append(TradeRecord(
+            rec = TradeRecord(
                 symbol=symbol, side="SELL", quantity=qty, price=px, cost_basis=proceeds,
                 timestamp=trade_dt, simulated=simulated, realized_pnl=realized,
                 regime=pos.regime if pos else "",
-            ))
+            )
+            self._trades.append(rec)
+            if self.trade_store is not None:
+                try:
+                    self.trade_store.record_trade(
+                        symbol=symbol, side="SELL", quantity=qty, price=px, cost_basis=proceeds,
+                        timestamp=trade_dt, simulated=simulated, realized_pnl=realized,
+                        disallowed_loss=ZERO, regime=pos.regime if pos else "", trade_id=rec.trade_id, env=self.env,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to persist SELL trade to SQLite: %s", exc)
             logger.info("SELL %s x%d @ %s -> $%s UNSETTLED until %s", symbol, qty, px, proceeds,
                         self._lots[-1].settle_date)
             return proceeds

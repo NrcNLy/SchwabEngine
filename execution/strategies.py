@@ -635,16 +635,22 @@ class StrategyEngine:
         cfg: dict,
         ledger,
         mask,
+        divergence_engine: Optional[Any] = None,
+        event_store: Optional[Any] = None,
     ) -> None:
         """
         Args:
             cfg:    Top-level config dict.
             ledger: ComplianceLedger (for max order value check).
             mask:   UniverseExclusionMask (for symbol tradeability check).
+            divergence_engine: Optional SyntheticDivergenceEngine for false liquidity trap guard.
+            event_store: Optional SQLiteWALEventStore instance for event telemetry.
         """
         self._cfg    = cfg
         self._ledger = ledger
         self._mask   = mask
+        self._divergence_engine = divergence_engine
+        self._event_store = event_store
 
         reg_cfg   = cfg.get("regime", {})
         risk_cfg  = cfg.get("risk",   {})
@@ -688,6 +694,35 @@ class StrategyEngine:
     # Configuration
     # ------------------------------------------------------------------
 
+    def set_divergence_engine(self, engine: Any) -> None:
+        """Register the SyntheticDivergenceEngine for false liquidity trap suppression."""
+        self._divergence_engine = engine
+        logger.info("StrategyEngine: synthetic divergence engine registered.")
+
+    def set_event_store(self, store: Any) -> None:
+        """Register the SQLiteWALEventStore instance for event telemetry."""
+        self._event_store = store
+
+    def _record_trap_suppression(self, symbol: str, strategy: str) -> None:
+        """Log a LIQUIDITY_TRAP_SUPPRESSION event to telemetry.db."""
+        try:
+            if self._event_store is not None:
+                store = self._event_store
+            else:
+                from core.telemetry import SQLiteWALEventStore
+                store = SQLiteWALEventStore()
+            store.record_event(
+                aggregate_id=symbol.upper(),
+                event_type="LIQUIDITY_TRAP_SUPPRESSION",
+                payload={
+                    "symbol": symbol.upper(),
+                    "strategy": strategy,
+                    "reason": "LIQUIDITY_TRAP_ACTIVE",
+                }
+            )
+        except Exception as exc:
+            logger.warning("StrategyEngine: failed to log trap suppression event: %s", exc)
+
     def set_signal_callback(self, fn: Callable[[TradeSignal], None]) -> None:
         """Register the callback that receives generated TradeSignal objects."""
         self._signal_cb = fn
@@ -728,6 +763,24 @@ class StrategyEngine:
         state, lock = self._states[sym]
 
         try:
+            from core.baselines_store import SQLiteBaselinesStore
+            bstore = SQLiteBaselinesStore()
+            cached_adv = bstore.get_adv_profile(sym)
+            if cached_adv:
+                with lock:
+                    state.historical_minute_volumes = cached_adv
+                logger.info(
+                    "StrategyEngine: %s RVOL baseline loaded from SQLiteBaselinesStore — %d distinct minutes.",
+                    sym, len(cached_adv),
+                )
+                return
+        except Exception as exc:
+            logger.debug("SQLite baseline check skipped for %s: %s", sym, exc)
+
+        try:
+            if rest_client is None:
+                logger.warning("StrategyEngine: no rest_client or cached baselines for %s.", sym)
+                return
             logger.info(
                 "StrategyEngine: preloading 10-day 1m history for %s…", sym
             )
@@ -809,6 +862,13 @@ class StrategyEngine:
             return
 
         now = datetime.now(_EDT)
+
+        # Feed tick into synthetic divergence engine if present
+        if self._divergence_engine is not None:
+            try:
+                self._divergence_engine.on_tick(sym, fields, now)
+            except Exception as exc:
+                logger.debug("StrategyEngine: divergence engine on_tick failed: %s", exc)
 
         # Only process during regular session hours
         session_open  = now.replace(hour=9,  minute=30, second=0,  microsecond=0)
@@ -1124,6 +1184,15 @@ class StrategyEngine:
             signal = self._check_vwap_mr_signal(state, now)
 
         if signal is not None and signal.quantity >= _MIN_SIGNAL_QUANTITY:
+            # Check Synthetic Divergence False Liquidity Trap Guard prior to confirming entry
+            if self._divergence_engine and self._divergence_engine.is_trap_active(signal.symbol, now):
+                logger.warning(
+                    "StrategyEngine: %s %s signal suppressed — LIQUIDITY_TRAP_ACTIVE on synthetic pair.",
+                    signal.symbol, signal.strategy
+                )
+                self._record_trap_suppression(signal.symbol, signal.strategy)
+                return
+
             # Clamp position size against ledger's max single-ticker cap and available buying power
             max_shares_by_cap = int(float(self._ledger.max_single_exposure) // float(signal.entry_price))
             max_shares_by_cash = int((float(self._ledger.settled_cash) - float(self._ledger.cash_buffer)) // float(signal.entry_price))
@@ -1282,6 +1351,15 @@ class StrategyEngine:
             )
             return None
 
+        # Check Synthetic Divergence False Liquidity Trap Guard prior to confirming ORB entry
+        if self._divergence_engine and self._divergence_engine.is_trap_active(state.symbol, now):
+            logger.warning(
+                "StrategyEngine: %s 15m_ORB entry suppressed — LIQUIDITY_TRAP_ACTIVE on synthetic pair.",
+                state.symbol
+            )
+            self._record_trap_suppression(state.symbol, "15m_ORB")
+            return None
+
         # Pre-signal gate check (e.g. microstructure veto before burning ORB or starting cooldown)
         if self._pre_filter and not self._pre_filter(state.symbol, "15m_ORB"):
             return None
@@ -1437,7 +1515,7 @@ class StrategyEngine:
 # Factory
 # ===========================================================================
 
-def build_from_config(cfg: dict, ledger, mask) -> StrategyEngine:
+def build_from_config(cfg: dict, ledger, mask, divergence_engine=None) -> StrategyEngine:
     """
     Construct a StrategyEngine from the loaded config.yaml dict.
 
@@ -1445,9 +1523,10 @@ def build_from_config(cfg: dict, ledger, mask) -> StrategyEngine:
         cfg:    Top-level config dict.
         ledger: ComplianceLedger instance.
         mask:   UniverseExclusionMask instance.
+        divergence_engine: Optional SyntheticDivergenceEngine instance.
 
     Returns:
         Configured StrategyEngine (symbols not yet registered — call
         register_symbol() or preload_historical() per symbol before starting).
     """
-    return StrategyEngine(cfg=cfg, ledger=ledger, mask=mask)
+    return StrategyEngine(cfg=cfg, ledger=ledger, mask=mask, divergence_engine=divergence_engine)
