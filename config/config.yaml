@@ -76,7 +76,7 @@ risk:
     rolling_window: 30
     default_k_stop: 2.0
     dt_annualization_days: 1.0
-    intraday_fraction: 0.002564102564102564  # 1.0 / 390.0 (1-minute bars)
+    intraday_fraction: 0.038461538461538464  # 15.0 / 390.0 (15-minute horizon scalar)
     min_stop_distance_pct: 0.005             # 0.5% buffer floor
     ticker_multipliers:
       TQQQ: 1.8
@@ -144,6 +144,7 @@ strategies:
     # Opening Range Breakout — 15-minute
     name: "15m ORB"
     entry_rvol_min: 1.5          # Minimum RVOL for breakout confirmation
+    orb_morning_rvol_hurdle: 2.20 # Morning Drive (09:30–10:15 EDT) volume hurdle override
     risk_reward_target: 2.5      # Target R:R ratio
 
   vwap_mean_reversion:

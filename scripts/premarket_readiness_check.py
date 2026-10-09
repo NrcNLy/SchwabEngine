@@ -340,16 +340,21 @@ class PreMarketDiagnostics:
                 f"Pre-market print prematurely latched p_bull_0 = {soxl_pair.p_bull_0}"
             )
 
-        # Test 09:30 cash open latching
+        # Test 09:30 cash open latching (5-second 09:30 VWMP anchor buffer)
         t_open = datetime(2026, 10, 9, 9, 30, 0, tzinfo=ny_tz)
         engine.on_tick("SOXL", price=40.00, volume=500, timestamp=t_open)
         engine.on_tick("SOXS", price=20.00, volume=500, timestamp=t_open)
-        s_t = engine.get_synthetic_price_product("SOXL_SOXS", t_open)
+
+        # Latch VWMP at t >= 09:30:05 EDT
+        t_latch = datetime(2026, 10, 9, 9, 30, 5, tzinfo=ny_tz)
+        engine.on_tick("SOXL", price=40.00, volume=100, timestamp=t_latch)
+        engine.on_tick("SOXS", price=20.00, volume=100, timestamp=t_latch)
+        s_t = engine.get_synthetic_price_product("SOXL_SOXS", t_latch)
 
         if soxl_pair.p_bull_0 == 40.00 and soxl_pair.p_bear_0 == 20.00 and abs(s_t - 1.0) < 1e-4:
             self.report.pass_gate(
                 "Divergence: 09:30 Cash Open Latching",
-                f"Anchors successfully latched at 09:30:00 EDT (P_bull_0=40.0, P_bear_0=20.0, S_t=1.0)"
+                f"Anchors successfully latched at 09:30:05 EDT via VWMP (P_bull_0=40.0, P_bear_0=20.0, S_t=1.0)"
             )
         else:
             self.report.fail_gate(

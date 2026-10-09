@@ -62,10 +62,10 @@ import statistics
 import threading
 from collections import deque
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 from decimal import ROUND_DOWN, Decimal
 from enum import Enum
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 import pytz
 
@@ -545,6 +545,84 @@ def quarter_kelly_size(
     return math.floor(max_risk / risk_per_share)
 
 
+def _compute_ema(values: Sequence[float], period: int = 5) -> Optional[float]:
+    """
+    Computes exponential moving average over sequence of price values.
+    Returns None if fewer values than period.
+    """
+    if len(values) < period:
+        return None
+    k = 2.0 / (period + 1.0)
+    ema = float(values[0])
+    for v in values[1:]:
+        ema = float(v) * k + ema * (1.0 - k)
+    return ema
+
+
+def update_trailing_stop(
+    position: Any,
+    current_price: float,
+    stop_distance: float,
+    hurst_exponent: Optional[float] = None,
+) -> tuple[float, bool]:
+    """
+    Updates the position's high-water-mark and ratchets stop_price upward monotonically.
+    Monotonic upward ratchets of the stop price must NEVER be blocked by hurst <= 0.50.
+
+    Returns (new_stop_price: float, adjusted: bool).
+    """
+    px = float(current_price)
+    dist = float(stop_distance)
+    hwm = float(getattr(position, "high_water_mark", getattr(position, "entry_price", px)))
+    hwm = max(hwm, px)
+    if hasattr(position, "high_water_mark"):
+        position.high_water_mark = Decimal(str(round(hwm, 4)))
+
+    candidate = round(hwm - dist, 2)
+    cur_stop = float(position.stop_price) if getattr(position, "stop_price", None) is not None else None
+
+    # Monotonic upward ratchets of the stop price must NEVER be blocked by hurst <= 0.50
+    if cur_stop is None or candidate > cur_stop:
+        if hasattr(position, "stop_price"):
+            position.stop_price = Decimal(str(candidate))
+        if hasattr(position, "ratchet_permitted"):
+            position.ratchet_permitted = True
+        return candidate, True
+
+    return (cur_stop if cur_stop is not None else candidate), False
+
+
+def check_defensive_exit(
+    bars: Sequence[CandleBar],
+    hurst: Optional[float],
+    ema_period: int = 5,
+) -> bool:
+    """
+    Emergency defensive exit:
+    If hurst < 0.45 (mean-reverting chop) and the 1-minute close crosses below
+    the 5-period EMA, flag an early exit signal to lock in gains or cut exposure
+    before full stop-out.
+    """
+    if hurst is None or float(hurst) >= 0.45:
+        return False
+    if len(bars) < ema_period:
+        return False
+
+    closes = [float(b.close) for b in bars]
+    ema = _compute_ema(closes, ema_period)
+    if ema is None:
+        return False
+
+    latest_close = closes[-1]
+    if len(closes) >= ema_period + 1:
+        prev_closes = closes[:-1]
+        prev_ema = _compute_ema(prev_closes, ema_period)
+        if prev_ema is not None and prev_closes[-1] >= prev_ema and latest_close < ema:
+            return True
+
+    return latest_close < ema
+
+
 # ===========================================================================
 # Regime Classifier
 # ===========================================================================
@@ -666,6 +744,9 @@ class StrategyEngine:
 
         # Strategy parameters
         self._orb_rvol_min:   float = float(orb_cfg.get("entry_rvol_min",   1.5))
+        self._orb_morning_rvol_hurdle: float = float(
+            orb_cfg.get("orb_morning_rvol_hurdle", strat_cfg.get("orb_morning_rvol_hurdle", cfg.get("orb_morning_rvol_hurdle", 2.20)))
+        )
         self._orb_rr_target:  float = float(orb_cfg.get("risk_reward_target", 2.5))
         self._mr_sigma:       float = float(mr_cfg.get("vwap_band_sigma", 2.2))
         self._mr_rsi_thresh:  float = float(mr_cfg.get("rsi_oversold_threshold", 28))
@@ -1333,10 +1414,18 @@ class StrategyEngine:
             return None
 
         # Secondary confirmations
-        if metrics.rvol < self._orb_rvol_min:
+        # Morning Drive (09:30–10:15 EDT) requires higher RVOL hurdle (2.20 vs 1.50)
+        t_now = now.time()
+        rvol_hurdle = (
+            self._orb_morning_rvol_hurdle
+            if (dtime(9, 30, 0) <= t_now <= dtime(10, 15, 0))
+            else self._orb_rvol_min
+        )
+
+        if metrics.rvol < rvol_hurdle:
             logger.debug(
                 "StrategyEngine: %s ORB entry suppressed — RVOL=%.2f < %.2f",
-                state.symbol, metrics.rvol, self._orb_rvol_min,
+                state.symbol, metrics.rvol, rvol_hurdle,
             )
             return None
 
@@ -1525,6 +1614,38 @@ class StrategyEngine:
         state, lock = self._states[sym]
         with lock:
             return state.last_metrics
+
+    def update_trailing_stop(
+        self,
+        position: Any,
+        current_price: float,
+        stop_distance: float,
+        hurst_exponent: Optional[float] = None,
+    ) -> tuple[float, bool]:
+        """
+        Updates the position's high-water-mark and ratchets stop_price upward monotonically.
+        Monotonic upward ratchets of the stop price must NEVER be blocked by hurst <= 0.50.
+        """
+        return update_trailing_stop(position, current_price, stop_distance, hurst_exponent)
+
+    def check_defensive_exit(
+        self,
+        symbol: str,
+        hurst: Optional[float],
+        bars: Optional[Sequence[CandleBar]] = None,
+        ema_period: int = 5,
+    ) -> bool:
+        """
+        Emergency defensive exit: If hurst < 0.45 and 1-minute close crosses below 5-period EMA.
+        """
+        if bars is None:
+            sym = symbol.upper()
+            if sym not in self._states:
+                return False
+            state, lock = self._states[sym]
+            with lock:
+                bars = list(state.bars)
+        return check_defensive_exit(bars, hurst, ema_period=ema_period)
 
 
 # ===========================================================================

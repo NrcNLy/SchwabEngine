@@ -395,7 +395,7 @@ def test_strategy_engine_orb_suppression_and_telemetry(divergence_engine: Synthe
             symbol=sym,
             ci=30.0,
             natr=1.5,
-            rvol=2.0,
+            rvol=2.5,
             vwap_slope_deg=25.0,
             atr14_dollars=0.50,
             vwap=40.00,
@@ -456,16 +456,25 @@ def test_synthetic_divergence_0930_anchor_latching(divergence_engine: SyntheticD
     assert pair.p_bull_0 is None
     assert pair.p_bear_0 is None
 
-    # 2. Cash open tick at 09:30:00 EDT
+    # 2. Cash open tick at 09:30:00 EDT (buffered during 09:30:00 <= t < 09:30:05)
     t_open = datetime(2026, 10, 8, 9, 30, 0, tzinfo=ny_tz)
     divergence_engine.on_tick("SOXL", price=40.00, volume=500, timestamp=t_open)
     divergence_engine.on_tick("SOXS", price=20.00, volume=400, timestamp=t_open)
+
+    # During 09:30:00-09:30:05 EDT, ticks are held in opening buffer
+    assert pair.p_bull_0 is None
+    assert pair.p_bear_0 is None
+
+    # At t >= 09:30:05 EDT, VWMP is calculated from buffered ticks and assigned
+    t_latch = datetime(2026, 10, 8, 9, 30, 5, tzinfo=ny_tz)
+    divergence_engine.on_tick("SOXL", price=40.00, volume=100, timestamp=t_latch)
+    divergence_engine.on_tick("SOXS", price=20.00, volume=100, timestamp=t_latch)
 
     assert pair.p_bull_0 == 40.00
     assert pair.p_bear_0 == 20.00
 
     # Synthetic price product anchors to 40.00 and 20.00
-    s_t = divergence_engine.get_synthetic_price_product("SOXL_SOXS", t_open)
+    s_t = divergence_engine.get_synthetic_price_product("SOXL_SOXS", t_latch)
     assert s_t == pytest.approx(1.0)
 
     # Subsequent tick during market hours updates price but keeps anchor

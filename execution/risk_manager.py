@@ -157,7 +157,7 @@ class RiskEngine:
         yz_vol: float,
         k_stop: float = 2.0,
         dt_days: Optional[float] = None,
-        intraday_fraction: float = 1.0 / 390.0,
+        intraday_fraction: float = 15.0 / 390.0,
         min_stop_distance_pct: float = 0.005,
     ) -> float:
         """
@@ -177,11 +177,13 @@ class RiskEngine:
             # Safe floor fallback (2% distance)
             return high_water_mark * 0.02
 
-        # Scale daily volatility to intraday resolution using the true intraday bar fraction:
-        # time_factor = math.sqrt(intraday_fraction / 252.0), where intraday_fraction = 1.0 / 390.0 for 1-minute bars.
+        # Scale volatility to intraday resolution using 15-minute horizon scalar:
+        # scalar = math.sqrt((15.0 / 390.0) / 252.0) (~0.01235).
+        # Daily volatility (< 0.20) is annualized so effective_stop_dist yields ~1.2% to 2.2% for TQQQ, TNA, SOXL.
+        vol = effective_vol * math.sqrt(252.0) if effective_vol < 0.20 else effective_vol
         fraction = float(dt_days) if dt_days is not None else float(intraday_fraction)
         time_factor = math.sqrt(max(fraction, 1e-8) / 252.0)
-        distance = high_water_mark * (float(k_stop) * effective_vol * time_factor)
+        distance = high_water_mark * (float(k_stop) * vol * time_factor)
         floor_distance = high_water_mark * float(min_stop_distance_pct)
         return max(distance, floor_distance, 0.01)  # minimum 0.5% buffer, bounded at 1 tick ($0.01)
 
@@ -192,7 +194,7 @@ class RiskEngine:
         yz_vol: float,
         k_stop: float = 2.0,
         dt_days: Optional[float] = None,
-        intraday_fraction: float = 1.0 / 390.0,
+        intraday_fraction: float = 15.0 / 390.0,
         hurst_exponent: Optional[float] = None,
         min_stop_distance_pct: float = 0.005,
     ) -> tuple[float, bool]:

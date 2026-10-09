@@ -112,6 +112,17 @@ class SyntheticDivergenceEngine:
         self._last_prices: Dict[str, float] = {}
         self._last_total_volume: Dict[str, int] = {}
         self._baseline_volumes: Dict[str, float] = {}
+        self._opening_buffer: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self._baseline_spreads: Dict[str, float] = {
+            "SOXL": 0.02,
+            "SOXS": 0.015,
+            "TQQQ": 0.01,
+            "SQQQ": 0.01,
+            "TNA":  0.02,
+            "TZA":  0.02,
+            "FNGU": 0.02,
+            "TECL": 0.02,
+        }
 
         # Trap state: pair_name -> last_condition_met_timestamp
         self._last_trap_condition_time: Dict[str, datetime] = {}
@@ -135,10 +146,56 @@ class SyntheticDivergenceEngine:
         """Resets P_bull_0 and P_bear_0 anchors across all tracked pairs for the 09:30 cash open."""
         with self._lock:
             self._initial_prices.clear()
+            self._opening_buffer.clear()
             for pair_key, state in self.pairs.items():
                 state.p_bull_0 = None
                 state.p_bear_0 = None
             logger.info("SyntheticDivergenceEngine: 09:30 cash open anchors reset across all pairs.")
+
+    def set_baseline_spread(self, symbol: str, spread_dollars: float) -> None:
+        """Set baseline spread in dollars for 09:30 VWMP spread filtering."""
+        with self._lock:
+            self._baseline_spreads[symbol.upper()] = float(spread_dollars)
+
+    def _calculate_vwmp(self, symbol: str) -> Optional[float]:
+        """
+        Calculate volume-weighted median price (VWMP) of buffered opening ticks,
+        filtering out ticks whose spread exceeds 2x the baseline spread.
+        """
+        ticks = self._opening_buffer.get(symbol.upper(), [])
+        if not ticks:
+            return None
+
+        baseline_spread = self._baseline_spreads.get(symbol.upper(), 0.02)
+        max_allowed_spread = 2.0 * baseline_spread
+
+        valid_ticks = []
+        for t in ticks:
+            sp = t.get("spread")
+            if sp is not None and sp > 0 and max_allowed_spread > 0:
+                if sp > max_allowed_spread:
+                    logger.debug(
+                        "SyntheticDivergenceEngine: filtered opening tick for %s (spread=%.4f > 2x baseline %.4f)",
+                        symbol, sp, baseline_spread,
+                    )
+                    continue
+            valid_ticks.append(t)
+
+        if not valid_ticks:
+            valid_ticks = ticks
+
+        # Sort ascending by price
+        valid_ticks.sort(key=lambda t: t["price"])
+        total_vol = sum(max(1, t["volume"]) for t in valid_ticks)
+        half_vol = total_vol / 2.0
+
+        cum_vol = 0
+        for t in valid_ticks:
+            cum_vol += max(1, t["volume"])
+            if cum_vol >= half_vol:
+                return round(float(t["price"]), 4)
+
+        return round(float(valid_ticks[-1]["price"]), 4)
 
     def register_pair(self, pair: SyntheticPair) -> None:
         """Register a new synthetic inverse pair."""
@@ -191,6 +248,7 @@ class SyntheticDivergenceEngine:
         volume: int,
         timestamp: Optional[Union[datetime, float, int]] = None,
         is_incremental: bool = True,
+        spread: Optional[float] = None,
     ) -> None:
         """
         Record a tick into the symbol's rolling 15-second circular buffer.
@@ -202,6 +260,7 @@ class SyntheticDivergenceEngine:
             timestamp: Tick timestamp (defaults to UTC now).
             is_incremental: If True, volume is treated as this tick's trade size.
                             If False, volume is treated as cumulative total_volume.
+            spread: Current bid-ask spread in dollars (optional, used for 09:30 VWMP filtering).
         """
         sym = symbol.upper()
         if price <= 0:
@@ -221,7 +280,6 @@ class SyntheticDivergenceEngine:
             ts = _normalize_time(timestamp)
 
         with self._lock:
-            in_regular_hours = True
             if is_real_epoch:
                 ts_edt = ts.astimezone(ZoneInfo("America/New_York"))
                 # Check pre-market (< 09:30 EDT) to regular hours (>= 09:30 EDT) boundary crossing
@@ -234,22 +292,6 @@ class SyntheticDivergenceEngine:
                     if was_premarket and is_regular:
                         self.reset_opening_anchors()
                 self._last_tick_edt = ts_edt
-                in_regular_hours = ts_edt.time() >= dtime(9, 30, 0)
-
-            # Anchor session open / initial price:
-            # During live trading, baseline prices are NOT latched during pre-market (< 09:30 EDT).
-            # Synthetic unit test timestamps (not real epoch) latch immediately.
-            if in_regular_hours:
-                if sym not in self._initial_prices or self._initial_prices[sym] <= 0:
-                    self._initial_prices[sym] = price
-                pair = self._symbol_to_pair.get(sym)
-                if pair is not None:
-                    if sym == pair.bull_symbol.upper() and (pair.p_bull_0 is None or pair.p_bull_0 <= 0):
-                        pair.p_bull_0 = price
-                    elif sym == pair.bear_symbol.upper() and (pair.p_bear_0 is None or pair.p_bear_0 <= 0):
-                        pair.p_bear_0 = price
-
-            self._last_prices[sym] = price
 
             # Compute incremental volume
             if is_incremental:
@@ -262,6 +304,60 @@ class SyntheticDivergenceEngine:
                 else:
                     inc_vol = max(0, tot_vol - prev_tot)
                 self._last_total_volume[sym] = tot_vol
+
+            # Anchor session open / initial price:
+            if not is_real_epoch:
+                # Unit tests with synthetic timestamps (< 1_000_000_000): preserve immediate single-tick latching
+                if sym not in self._initial_prices or self._initial_prices[sym] <= 0:
+                    self._initial_prices[sym] = price
+                pair = self._symbol_to_pair.get(sym)
+                if pair is not None:
+                    if sym == pair.bull_symbol.upper() and (pair.p_bull_0 is None or pair.p_bull_0 <= 0):
+                        pair.p_bull_0 = price
+                    elif sym == pair.bear_symbol.upper() and (pair.p_bear_0 is None or pair.p_bear_0 <= 0):
+                        pair.p_bear_0 = price
+            else:
+                ts_edt = ts.astimezone(ZoneInfo("America/New_York"))
+                t_time = ts_edt.time()
+
+                if dtime(9, 30, 0) <= t_time < dtime(9, 30, 5):
+                    # 5-second 09:30:00 <= t < 09:30:05 EDT anchor buffer
+                    self._opening_buffer[sym].append({
+                        "price": float(price),
+                        "volume": int(inc_vol),
+                        "spread": float(spread) if spread is not None else None,
+                        "timestamp": ts,
+                    })
+
+                elif t_time >= dtime(9, 30, 5):
+                    # At t >= 09:30:05 EDT, calculate VWMP of buffered ticks
+                    for s, b_ticks in list(self._opening_buffer.items()):
+                        if s not in self._initial_prices or self._initial_prices[s] <= 0:
+                            vwmp = self._calculate_vwmp(s)
+                            if vwmp is not None and vwmp > 0:
+                                self._initial_prices[s] = vwmp
+                                p_entry = self._symbol_to_pair.get(s)
+                                if p_entry is not None:
+                                    if s == p_entry.bull_symbol.upper() and (p_entry.p_bull_0 is None or p_entry.p_bull_0 <= 0):
+                                        p_entry.p_bull_0 = vwmp
+                                    elif s == p_entry.bear_symbol.upper() and (p_entry.p_bear_0 is None or p_entry.p_bear_0 <= 0):
+                                        p_entry.p_bear_0 = vwmp
+                                    logger.info(
+                                        "SyntheticDivergenceEngine: %s VWMP anchor latched at %.4f from %d buffered ticks",
+                                        s, vwmp, len(b_ticks)
+                                    )
+
+                    # If current symbol is still not latched
+                    if sym not in self._initial_prices or self._initial_prices[sym] <= 0:
+                        self._initial_prices[sym] = price
+                        pair = self._symbol_to_pair.get(sym)
+                        if pair is not None:
+                            if sym == pair.bull_symbol.upper() and (pair.p_bull_0 is None or pair.p_bull_0 <= 0):
+                                pair.p_bull_0 = price
+                            elif sym == pair.bear_symbol.upper() and (pair.p_bear_0 is None or pair.p_bear_0 <= 0):
+                                pair.p_bear_0 = price
+
+            self._last_prices[sym] = price
 
             buf = self._tick_buffers[sym]
             buf.append(TickRecord(timestamp=ts, price=price, volume=inc_vol))
@@ -288,17 +384,30 @@ class SyntheticDivergenceEngine:
           on_tick(symbol, price, volume, timestamp)
         """
         tick_dict = fields if fields is not None else (price if isinstance(price, dict) else None)
+        spread = None
         if tick_dict is not None:
             p = float(tick_dict.get("last_price", 0.0) or 0.0)
             v = int(tick_dict.get("total_volume", 0) or 0)
             is_inc = False
+            if "spread" in tick_dict and tick_dict["spread"] is not None:
+                spread = float(tick_dict["spread"] or 0.0)
+            elif "bid_price" in tick_dict and "ask_price" in tick_dict:
+                bid = float(tick_dict.get("bid_price", 0.0) or 0.0)
+                ask = float(tick_dict.get("ask_price", 0.0) or 0.0)
+                if ask > bid > 0:
+                    spread = ask - bid
+            elif "bid" in tick_dict and "ask" in tick_dict:
+                bid = float(tick_dict.get("bid", 0.0) or 0.0)
+                ask = float(tick_dict.get("ask", 0.0) or 0.0)
+                if ask > bid > 0:
+                    spread = ask - bid
         else:
             p = float(price or 0.0)
             v = int(volume or 0)
             is_inc = True
 
         if p > 0:
-            self.record_tick(symbol, price=p, volume=v, timestamp=timestamp, is_incremental=is_inc)
+            self.record_tick(symbol, price=p, volume=v, timestamp=timestamp, is_incremental=is_inc, spread=spread)
 
     # -----------------------------------------------------------------------
     # Internal Window Pruning & Metrics

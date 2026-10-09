@@ -326,7 +326,7 @@ class LiveEngine(_EngineBase):
         self._yz_multipliers = yz_cfg.get("ticker_multipliers", {"TQQQ": 1.8, "SOXL": 2.0, "TNA": 2.2})
         self._yz_default_k = float(yz_cfg.get("default_k_stop", 2.0))
         self._yz_dt_days = float(yz_cfg.get("dt_annualization_days", 1.0))
-        self._yz_intraday_fraction = float(yz_cfg.get("intraday_fraction", 1.0 / 390.0))
+        self._yz_intraday_fraction = float(yz_cfg.get("intraday_fraction", 15.0 / 390.0))
         self._yz_min_stop_pct = float(yz_cfg.get("min_stop_distance_pct", 0.005))
         self._yz_estimators: Dict[str, YangZhangEstimator] = {}
         strategy.set_signal_callback(self._on_signal)

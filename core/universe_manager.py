@@ -6,6 +6,35 @@ from execution.strategies import TradeSignal
 
 logger = logging.getLogger(__name__)
 
+HIGH_CORRELATION_PAIRS: Set[str] = {"SOXL", "TQQQ", "TECL", "FNGU"}
+HIGH_CORRELATION_SET: Set[str] = HIGH_CORRELATION_PAIRS
+PORTFOLIO_BETA_CEILING: float = 6.00
+
+TICKER_BETAS: Dict[str, float] = {
+    "SOXL": 3.0,
+    "TQQQ": 3.0,
+    "TECL": 3.0,
+    "FNGU": 3.0,
+    "TNA":  3.0,
+    "UPRO": 3.0,
+    "FAS":  3.0,
+    "LABU": 3.0,
+    "DPST": 3.0,
+    "SOXS": 3.0,
+    "SQQQ": 3.0,
+    "TZA":  3.0,
+    "SPXU": 3.0,
+    "NVDL": 2.0,
+    "CONL": 2.0,
+    "USD":  2.0,
+    "UCO":  2.0,
+    "SCO":  2.0,
+    "BOIL": 2.0,
+    "KOLD": 2.0,
+}
+DEFAULT_TICKER_BETA: float = 3.0
+
+
 class UniverseManager:
     def __init__(
         self,
@@ -59,15 +88,72 @@ class UniverseManager:
         Ranks candidate signals by Composite Momentum Score (S_i) before checking
         settled cash and position sizing limits, ensuring higher-momentum primary
         assets are allocated buying power first.
+
+        Enforces:
+        - High-correlation pairs clamp: {"SOXL", "TQQQ", "TECL", "FNGU"}. Subsequent
+          signals clamped to half-slot (avail_cash * 0.165 or ~$622.50) or rejected if
+          2 slots already active.
+        - Aggregate portfolio beta ceiling: reject signals if total deployed beta > 6.00.
         """
         ranked = self.rank_candidate_signals(signals)
         approved: List[TradeSignal] = []
 
+        # Track active slots in high-correlation set and deployed portfolio beta
+        active_high_corr: Set[str] = set()
+        deployed_beta: float = 0.0
+
+        if hasattr(ledger, "positions") and ledger.positions:
+            for p_sym, pos in ledger.positions.items():
+                p_sym_upper = p_sym.upper()
+                qty = getattr(pos, "quantity", 0)
+                if qty > 0:
+                    deployed_beta += TICKER_BETAS.get(p_sym_upper, DEFAULT_TICKER_BETA)
+                    if p_sym_upper in HIGH_CORRELATION_SET:
+                        active_high_corr.add(p_sym_upper)
+
+        active_high_corr_count = len(active_high_corr)
+
         for sig in ranked:
-            if not self.is_entry_allowed(sig.symbol, sig.strategy):
+            sym = sig.symbol.upper()
+            if not self.is_entry_allowed(sym, sig.strategy):
                 continue
 
-            # Check settled cash availability
+            # 1. High-correlation set clamp / rejection guard
+            if sym in HIGH_CORRELATION_SET:
+                if active_high_corr_count >= 2:
+                    logger.warning(
+                        "UniverseManager: %s signal rejected — correlation guard: 2 slots already active in tech set (%s)",
+                        sym, active_high_corr
+                    )
+                    continue
+
+                if active_high_corr_count >= 1:
+                    # Subsequent signal in high-correlation set: clamp to half-slot
+                    avail_cash_for_clamp = (
+                        float(ledger.settled_cash) - float(ledger.cash_buffer)
+                        if (hasattr(ledger, "settled_cash") and hasattr(ledger, "cash_buffer"))
+                        else 3773.04
+                    )
+                    half_slot_notional = max(0.0, avail_cash_for_clamp * 0.165)
+                    max_shares_by_half_slot = int(half_slot_notional // float(sig.entry_price))
+                    if max_shares_by_half_slot <= 0:
+                        logger.warning(
+                            "UniverseManager: %s signal starved by half-slot cap ($%.2f max notional)",
+                            sym, half_slot_notional
+                        )
+                        continue
+                    sig = self.clamp_signal_size(sig, max_shares_by_half_slot)
+
+            # 2. Portfolio beta ceiling guard
+            candidate_beta = TICKER_BETAS.get(sym, DEFAULT_TICKER_BETA)
+            if deployed_beta + candidate_beta > PORTFOLIO_BETA_CEILING + 1e-6:
+                logger.warning(
+                    "UniverseManager: %s signal rejected — portfolio beta ceiling exceeded (deployed=%.2f + candidate=%.2f > %.2f)",
+                    sym, deployed_beta, candidate_beta, PORTFOLIO_BETA_CEILING
+                )
+                continue
+
+            # 3. Check settled cash availability
             if hasattr(ledger, "settled_cash") and hasattr(ledger, "cash_buffer"):
                 avail_cash = float(ledger.settled_cash) - float(ledger.cash_buffer)
                 if avail_cash <= 0 or (sig.entry_price * sig.quantity) > avail_cash:
@@ -80,6 +166,7 @@ class UniverseManager:
                         continue
                     sig = self.clamp_signal_size(sig, max_by_cash)
 
+            # 4. Check ledger order approval
             if hasattr(ledger, "check_order_allowed"):
                 allowed, reason = ledger.check_order_allowed(float(sig.entry_price * sig.quantity))
                 if not allowed:
@@ -87,6 +174,11 @@ class UniverseManager:
                     continue
 
             approved.append(sig)
+            deployed_beta += candidate_beta
+            if sym in HIGH_CORRELATION_SET:
+                active_high_corr.add(sym)
+                active_high_corr_count += 1
+
             if execute_callback:
                 execute_callback(sig)
 
