@@ -1,6 +1,21 @@
 {
+  "macro_regime": "REGIME_A",
+  "confidence_score": 0.9,
+  "macro_risk_multiplier": 1.25,
+  "sector_multipliers": {
+    "tech_beta": 1.4,
+    "small_cap_credit": 1.0,
+    "energy_beta": 0.9
+  },
+  "yang_zhang_multiplier_adjustment": 1.0,
+  "trap_volume_tightening": 0.0,
+  "emergency_flatten": false,
+  "hard_lockout_active": false,
+  "rationale": "Stable yields (+0.29%) and strong NQ futures (+0.62%) indicate a risk-on tech-led rebound. Lack of negative macro catalysts supports a trend expansion regime. Market is showing clear bullish accumulation pre-open.",
+  "market_bias": "BULLISH",
   "target_regime": "A",
   "macro_bias": "Bullish",
-  "volatility_multiplier": 1.5,
-  "_updated_at": "2026-10-03T06:59:59.754185Z"
+  "volatility_multiplier": 1.0,
+  "_updated_at": "2026-10-09T12:55:03.261580+00:00",
+  "_source": "enhanced_preassessment"
 }
