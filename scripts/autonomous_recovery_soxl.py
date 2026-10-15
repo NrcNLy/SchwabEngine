@@ -56,6 +56,24 @@ logger = logging.getLogger("autonomous_recovery")
 _EDT = pytz.timezone("America/New_York")
 
 
+def load_dotenv_if_present() -> None:
+    env_file = PROJECT_ROOT / ".env"
+    if env_file.exists():
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(env_file)
+        except Exception:
+            pass
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip("'\""))
+
+
+load_dotenv_if_present()
+
+
 def load_yaml_config() -> Dict[str, Any]:
     import yaml
     cfg_path = PROJECT_ROOT / "config" / "config.yaml"
