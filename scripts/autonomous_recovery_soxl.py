@@ -120,6 +120,7 @@ def run_preflight(args: argparse.Namespace) -> int:
             iterations = int(auth_cfg.get("pbkdf2_iterations", 600_000))
             if passphrase:
                 vault = SecurityVault(passphrase=passphrase, iterations=iterations, vault_path=vault_path)
+                tokens = vault.load()
                 issued = tokens.get("refresh_token_issued_at") or tokens.get("obtained_at") or 0
                 refresh_ttl = int(auth_cfg.get("refresh_token_ttl_sec", 604800))
                 refresh_exp = float(tokens.get("refresh_token_expires_at") or (float(issued) + refresh_ttl if issued else 0))
