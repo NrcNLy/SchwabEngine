@@ -1,28 +1,78 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
   body {
-    @apply bg-[#090d16] text-gray-100 min-h-screen selection:bg-emerald-500 selection:text-white font-sans;
+    @apply bg-surface-container-lowest text-on-surface min-h-screen selection:bg-primary/30 selection:text-primary font-sans antialiased;
+  }
+
+  /* Strict dual typographic contract: Proportional Sans for chrome, tabular Monospace for data */
+  .font-mono,
+  .tabular-nums {
+    font-feature-settings: 'tnum' 1, 'zero' 1;
   }
 }
 
-/* Custom scrollbars */
+/* Material 3 Dark Theme Custom Scrollbars */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #090d16;
+  background: #080c14; /* surface-container-lowest */
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1f2937;
-  border-radius: 3px;
+  background: #202a3e; /* surface-container-high */
+  border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #374151;
+  background: #343a4a; /* surface-bright */
+}
+
+/* uPlot M3 HUD Legend Overlay */
+.uplot {
+  position: relative;
+  font-family: inherit;
+}
+
+.uplot .u-legend {
+  position: absolute !important;
+  top: 10px;
+  right: 14px;
+  background: rgba(24, 32, 48, 0.85) !important; /* surface-container 85% */
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-radius: 12px;
+  padding: 4px 10px !important;
+  border: 1px solid rgba(92, 102, 122, 0.25);
+  z-index: 20;
+  pointer-events: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  display: flex !important;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.uplot .u-legend .u-series th {
+  padding: 2px 4px !important;
+  font-family: 'Inter', system-ui, sans-serif !important;
+  font-size: 11px !important;
+  color: #98a2b5 !important; /* on-surface-variant */
+  font-weight: 500 !important;
+}
+
+.uplot .u-legend .u-series td {
+  padding: 2px 4px !important;
+  font-family: 'JetBrains Mono', monospace !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  color: #e2e7f2 !important; /* on-surface */
+  font-feature-settings: 'tnum' 1, 'zero' 1 !important;
 }

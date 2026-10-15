@@ -1,14 +1,11 @@
 import React from 'react';
-import { Activity, Layers, RefreshCw, ShieldCheck, SlidersHorizontal, TrendingUp } from 'lucide-react';
 import { EngineStatus, EnvName } from '../types';
-import { VmTelemetryStrip } from './VmTelemetryStrip';
-import { StatusPill } from './StatusPill';
-import { NetChangePanel } from './NetChangePanel';
-import { EnvToggle } from './EnvToggle';
+import { NavigationRail } from './NavigationRail';
+import { TopAppBar } from './TopAppBar';
 
 export type DashboardTab = 'overview' | 'positions' | 'ave' | 'ledger' | 'controls';
 
-interface DashboardLayoutProps {
+export interface DashboardLayoutProps {
   status: EngineStatus | null;
   engineError: string | null;
   env: EnvName;
@@ -18,15 +15,19 @@ interface DashboardLayoutProps {
   activeTab: DashboardTab;
   setActiveTab: (tab: DashboardTab) => void;
   children: React.ReactNode;
+  activeSymbol?: string;
+  onSelectSymbol?: (symbol: string) => void;
+  availableSymbols?: string[];
+  metrics?: {
+    price?: number;
+    upper?: number;
+    lower?: number;
+    supremum?: number;
+    lambdaFactor?: number;
+    isStale?: boolean;
+  };
+  topBarActions?: React.ReactNode;
 }
-
-const TABS: Array<{ id: DashboardTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { id: 'overview', label: 'Overview', icon: TrendingUp },
-  { id: 'positions', label: 'Risk Guard', icon: ShieldCheck },
-  { id: 'ave', label: 'AVE Squeeze', icon: Activity },
-  { id: 'ledger', label: 'Liquidity', icon: Layers },
-  { id: 'controls', label: 'Controls', icon: SlidersHorizontal },
-];
 
 export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
   status,
@@ -38,74 +39,67 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
   activeTab,
   setActiveTab,
   children,
+  activeSymbol,
+  onSelectSymbol,
+  availableSymbols,
+  metrics,
+  topBarActions,
 }) => {
   return (
-    <div className="min-h-screen bg-[#070b12] text-gray-100 flex flex-col font-sans selection:bg-cyan-500/30 selection:text-cyan-200">
+    <div className="min-h-screen h-screen w-screen overflow-hidden bg-surface-container-lowest text-on-surface flex flex-row font-sans selection:bg-primary/30 selection:text-primary">
+      {/* Sandbox Watermark */}
       {env === 'sandbox' && (
         <div
           aria-hidden="true"
           className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center overflow-hidden"
         >
-          <span className="-rotate-[24deg] select-none font-mono font-black tracking-[0.4em] text-amber-300/[0.06] text-6xl sm:text-8xl">
+          <span className="-rotate-[24deg] select-none font-mono font-black tracking-[0.4em] text-finance-warning/[0.04] text-6xl sm:text-8xl">
             SANDBOX
           </span>
         </div>
       )}
 
-      <VmTelemetryStrip status={status} />
+      {/* M3 Navigation Rail on Left Edge */}
+      <NavigationRail
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+        env={env}
+        onEnvChange={onEnvChange}
+        status={status}
+        engineError={engineError}
+      />
 
-      <header className="border-b border-gray-800/80 bg-[#0d1322]/95 backdrop-blur sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-14 gap-3">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-8 h-8 shrink-0 rounded-lg bg-gradient-to-tr from-cyan-600 via-blue-600 to-emerald-500 flex items-center justify-center border border-cyan-400/20">
-                <Activity className="w-4 h-4 text-white" />
-              </div>
-              <h1 className="font-bold text-base tracking-tight text-white font-mono truncate">SchwabEngine</h1>
-              <StatusPill status={status} engineError={engineError} />
-            </div>
-            <NetChangePanel status={status} />
+      {/* Main App Container with Top App Bar and Edge-to-Edge Viewport */}
+      <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
+        <TopAppBar
+          status={status}
+          engineError={engineError}
+          activeTab={activeTab}
+          onRefresh={onRefresh}
+          isRefreshing={isRefreshing}
+          activeSymbol={activeSymbol}
+          onSelectSymbol={onSelectSymbol}
+          availableSymbols={availableSymbols}
+          metrics={metrics}
+          actions={topBarActions}
+        />
+
+        {/* Global Engine Error Banner */}
+        {engineError && (
+          <div className="bg-error-container/80 text-on-error-container px-4 py-2 text-xs font-mono text-center shrink-0 border-b border-error/30">
+            {engineError} Figures below are not live.
           </div>
+        )}
 
-          <div className="flex items-center gap-2 pb-2 -mx-1 px-1 overflow-x-auto">
-            <EnvToggle env={env} onChange={onEnvChange} />
-            <nav className="flex items-center gap-1 flex-1 min-w-0" aria-label="Sections">
-              {TABS.map(({ id, label, icon: Icon }) => {
-                const isActive = id === activeTab;
-                return (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => setActiveTab(id)}
-                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-mono whitespace-nowrap transition-colors ${
-                      isActive ? 'bg-cyan-950/70 text-cyan-300 border border-cyan-800/60' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/60 border border-transparent'
-                    }`}
-                  >
-                    <Icon className="w-3.5 h-3.5" />
-                    {label}
-                  </button>
-                );
-              })}
-            </nav>
-            <button
-              type="button"
-              onClick={onRefresh}
-              aria-label="Refresh data"
-              className="shrink-0 p-1.5 rounded-lg text-gray-400 hover:text-gray-100 hover:bg-gray-800/60 transition-colors"
-            >
-              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin text-cyan-400' : ''}`} />
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {engineError && (
-        <div className="bg-rose-950/60 border-b border-rose-900/60 px-4 py-2 text-xs font-mono text-rose-200 text-center">
-          {engineError} Figures below are not live.
-        </div>
-      )}
-
-      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 py-5">{children}</main>
+        {/* Dynamic Content Viewport: Full bleed for AVE tab, padded for standard views */}
+        <main
+          className={`flex-1 overflow-y-auto ${
+            activeTab === 'ave' ? 'w-full p-0' : 'w-full p-4 sm:p-6 max-w-7xl mx-auto'
+          }`}
+        >
+          {children}
+        </main>
+      </div>
     </div>
   );
 };

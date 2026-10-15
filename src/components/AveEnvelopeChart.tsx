@@ -3,12 +3,11 @@
  * ===================================
  * High-performance canvas chart for Adaptive Volatility Envelope using uPlot.
  *
- * Design Invariants:
- * 1. Zero React re-renders on incoming ticks: consumes from Float64Array ring buffer.
- * 2. requestAnimationFrame loop polls dirtyRef. If true, calls uPlot.setData() with typed arrays.
- * 3. Five series: [0] Time (x-axis), [1] Price, [2] Upper Bound, [3] Lower Bound, [4] Supremum.
- * 4. Band fill: Shaded semi-transparent probability cone between Upper Bound and Lower Bound traces.
- * 5. Tab visibility guard: pauses rAF loop when document.hidden is true.
+ * M3 Viewport Redesign:
+ * 1. Full-bleed edge-to-edge container filling 100% width and responsive flex height.
+ * 2. Series legend docked as semi-transparent HUD overlay in top-right corner.
+ * 3. M3 Dark Theme tonal color palette (Upper=Bull, Lower=Bear, Supremum=Sky, Band=Cone fill).
+ * 4. Zero React re-renders on incoming ticks: consumes from Float64Array ring buffer via rAF.
  */
 
 import React, { useEffect, useRef } from 'react';
@@ -23,7 +22,7 @@ interface AveEnvelopeChartProps {
   height?: number;
 }
 
-export const AveEnvelopeChart: React.FC<AveEnvelopeChartProps> = ({ symbol, wsUrl, height = 450 }) => {
+export const AveEnvelopeChart: React.FC<AveEnvelopeChartProps> = ({ symbol, wsUrl, height }) => {
   const chartRef = useRef<HTMLDivElement>(null);
   const uplotInstanceRef = useRef<uPlot | null>(null);
   const rafIdRef = useRef<number | null>(null);
@@ -34,11 +33,11 @@ export const AveEnvelopeChart: React.FC<AveEnvelopeChartProps> = ({ symbol, wsUr
     if (!chartRef.current) return;
 
     const containerWidth = chartRef.current.clientWidth || 800;
+    const containerHeight = chartRef.current.clientHeight || height || 450;
 
     const opts: uPlot.Options = {
       width: containerWidth,
-      height: height,
-      title: `${symbol.toUpperCase()} Adaptive Volatility Envelope (Live)`,
+      height: containerHeight,
       mode: 1,
       pxAlign: 0,
       cursor: {
@@ -60,15 +59,15 @@ export const AveEnvelopeChart: React.FC<AveEnvelopeChartProps> = ({ symbol, wsUr
       axes: [
         {
           scale: 'x',
-          stroke: '#94a3b8',
-          grid: { stroke: '#1e293b', width: 1 },
-          ticks: { stroke: '#334155', width: 1 },
+          stroke: '#98a2b5', // on-surface-variant
+          grid: { stroke: '#202a3e', width: 1 }, // surface-container-high
+          ticks: { stroke: '#5c667a', width: 1 }, // outline
         },
         {
           scale: 'y',
-          stroke: '#94a3b8',
-          grid: { stroke: '#1e293b', width: 1 },
-          ticks: { stroke: '#334155', width: 1 },
+          stroke: '#98a2b5',
+          grid: { stroke: '#202a3e', width: 1 },
+          ticks: { stroke: '#5c667a', width: 1 },
           values: (_u, vals) => vals.map((v) => `$${v.toFixed(2)}`),
         },
       ],
@@ -83,22 +82,22 @@ export const AveEnvelopeChart: React.FC<AveEnvelopeChartProps> = ({ symbol, wsUr
           points: { show: false },
         },
         {
-          label: 'Upper Bound U(t)',
-          stroke: 'rgba(52, 211, 153, 0.9)', // Emerald
+          label: 'Upper U(t)',
+          stroke: '#6dd58c', // finance.bull
           width: 1.5,
           dash: [6, 4],
           points: { show: false },
         },
         {
-          label: 'Lower Bound L(t)',
-          stroke: 'rgba(239, 68, 68, 0.9)', // Red
+          label: 'Lower L(t)',
+          stroke: '#ff897d', // finance.bear
           width: 1.5,
           dash: [6, 4],
           points: { show: false },
         },
         {
           label: 'Supremum M(t)',
-          stroke: 'rgba(56, 189, 248, 0.7)', // Cyan
+          stroke: '#7dd3fc', // finance.supremum
           width: 1,
           dash: [3, 3],
           points: { show: false },
@@ -108,7 +107,7 @@ export const AveEnvelopeChart: React.FC<AveEnvelopeChartProps> = ({ symbol, wsUr
         {
           // Shaded probability cone between series 2 (Upper) and series 3 (Lower)
           series: [2, 3],
-          fill: 'rgba(14, 165, 233, 0.12)', // Subtle cyan/blue shaded cone
+          fill: 'rgba(103, 214, 237, 0.08)', // M3 cone fill
         },
       ],
     };
@@ -118,13 +117,14 @@ export const AveEnvelopeChart: React.FC<AveEnvelopeChartProps> = ({ symbol, wsUr
     const u = new uPlot(opts, initialData as any, chartRef.current);
     uplotInstanceRef.current = u;
 
-    // Handle container resize
+    // Responsive ResizeObserver updating width and height dynamically
     const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        if (entry.contentRect.width > 0) {
+        const { width: w, height: h } = entry.contentRect;
+        if (w > 0 && h > 0) {
           u.setSize({
-            width: entry.contentRect.width,
-            height: height,
+            width: w,
+            height: h,
           });
         }
       }
@@ -150,7 +150,7 @@ export const AveEnvelopeChart: React.FC<AveEnvelopeChartProps> = ({ symbol, wsUr
 
     rafIdRef.current = requestAnimationFrame(renderLoop);
 
-    // Pause / resume loop on tab visibility changes
+    // Tab visibility listener
     function onVisibilityChange() {
       if (document.hidden) {
         if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
@@ -174,10 +174,13 @@ export const AveEnvelopeChart: React.FC<AveEnvelopeChartProps> = ({ symbol, wsUr
   }, [symbol, height]);
 
   return (
-    <div className="flex flex-col gap-3 w-full bg-slate-950/80 p-4 rounded-xl border border-slate-800 shadow-2xl backdrop-blur-sm">
+    <div className="flex flex-col w-full h-full flex-1 gap-2.5 p-3 select-none overflow-hidden">
+      {/* M3 Status Header with Asymmetric Safety Toggle & Tabular Metrics */}
       <AveStatusBadge metrics={statusMetrics} />
-      <div className="w-full relative overflow-hidden rounded-lg bg-slate-900/60 p-2 border border-slate-800/80">
-        <div ref={chartRef} className="w-full h-full flex items-center justify-center" />
+
+      {/* Full-Bleed Canvas Viewport with Top-Right HUD Legend */}
+      <div className="w-full flex-1 relative min-h-[420px] rounded-2xl bg-surface-container-low shadow-m3-2 overflow-hidden">
+        <div ref={chartRef} className="w-full h-full absolute inset-0" />
       </div>
     </div>
   );

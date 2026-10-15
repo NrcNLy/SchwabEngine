@@ -1,5 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { CheckCircle2, Clock, Layers, ShieldAlert, TrendingDown, TrendingUp, Wallet } from 'lucide-react';
+import {
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Clock,
+  Layers,
+  ShieldAlert,
+  TrendingDown,
+  TrendingUp,
+  Wallet,
+} from 'lucide-react';
 import {
   EngineStatus,
   EnvName,
@@ -28,7 +38,6 @@ import { LlmInsightConsole } from './components/LlmInsightConsole';
 import { MacroLiquidityCard } from './components/MacroLiquidityCard';
 import { AveEnvelopeChart } from './components/AveEnvelopeChart';
 import { pnlTone, signedPct, signedUsd, usd } from './utils/format';
-import { Zap } from 'lucide-react';
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -38,20 +47,21 @@ const MetricCard: React.FC<{
   valueTone?: string;
   hint?: string;
   icon: React.ReactNode;
-}> = ({ label, value, valueTone = 'text-gray-100', hint, icon }) => (
-  <div className="bg-[#0e1422] border border-gray-800 rounded-xl p-3 shadow-lg">
-    <div className="flex items-center justify-between text-gray-400 text-[11px] mb-1">
-      <span className="font-mono">{label}</span>
+}> = ({ label, value, valueTone = 'text-on-surface', hint, icon }) => (
+  <div className="bg-surface-container rounded-2xl p-3.5 shadow-m3-1 flex flex-col justify-between">
+    <div className="flex items-center justify-between text-on-surface-variant text-[11px] mb-1">
+      <span className="font-sans font-medium uppercase tracking-wider">{label}</span>
       {icon}
     </div>
-    <div className={`text-xl font-bold font-mono ${valueTone}`}>{value}</div>
-    {hint && <span className="text-[10px] text-gray-500 font-mono block mt-0.5">{hint}</span>}
+    <div className={`text-xl font-bold font-mono tabular-nums ${valueTone}`}>{value}</div>
+    {hint && <span className="text-[10px] text-on-surface-variant font-sans block mt-0.5">{hint}</span>}
   </div>
 );
 
 export function App() {
   const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [hudCollapsed, setHudCollapsed] = useState(false);
 
   /** Operator's explicit choice. Null means "use the engine's default environment". */
   const [userEnv, setUserEnv] = useState<EnvName | null>(null);
@@ -156,6 +166,16 @@ export function App() {
   const unavailable = status?.data_source === 'UNAVAILABLE';
   const capHint = ledger && ledger.available ? `${usd(ledger.max_single_exposure)} cap per ticker` : undefined;
 
+  const aveSymbols = Array.from(
+    new Set([
+      ...(positions?.managed.map((p) => p.symbol) ?? []),
+      'SOXL',
+      'TQQQ',
+      'TNA',
+      'SPY',
+    ])
+  );
+
   return (
     <DashboardLayout
       status={status}
@@ -166,245 +186,280 @@ export function App() {
       isRefreshing={isRefreshing}
       activeTab={activeTab}
       setActiveTab={setActiveTab}
+      activeSymbol={selectedAveSymbol}
+      onSelectSymbol={setSelectedAveSymbol}
+      availableSymbols={aveSymbols}
     >
-      <div className="space-y-5">
-        {unavailable && !engineError && (
-          <div className="text-xs font-mono text-amber-200 bg-amber-950/40 border border-amber-900/60 rounded-lg px-4 py-2.5">
-            Active (Schwab) data is unavailable because the engine is running in simulation. Switch to Sandbox to see the simulated pipeline.
-          </div>
-        )}
-        {partialErrors.length > 0 && !engineError && (
-          <div className="text-xs font-mono text-rose-200 bg-rose-950/40 border border-rose-900/60 rounded-lg px-4 py-2.5">
-            Could not load: {partialErrors.join(', ')}.
-          </div>
-        )}
-
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          <MetricCard
-            label="Today P&L"
-            value={signedUsd(todayPnl)}
-            valueTone={pnlTone(todayPnl)}
-            hint={
-              todayPct !== null
-                ? `${signedPct(todayPct)} · floor ${usd(status?.circuit_breaker_limit)}`
-                : status
-                  ? `Floor ${usd(status.circuit_breaker_limit)}`
-                  : undefined
-            }
-            icon={
-              <div className={`p-1 rounded-md ${(todayPnl ?? 0) >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
-                {(todayPnl ?? 0) >= 0 ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
+      {/* AVE SQUEEZE: Full Bleed Layout with Compact 32px Collapsible HUD */}
+      {activeTab === 'ave' ? (
+        <div className="flex flex-col w-full h-full min-h-0 select-none">
+          {/* Compact 32px Collapsible HUD Strip */}
+          <div className="shrink-0 bg-surface-container/80 backdrop-blur-md border-b border-outline-variant/15 px-3 py-1 flex items-center justify-between text-xs select-none z-10">
+            <div className="flex items-center gap-3 sm:gap-6 overflow-x-auto py-0.5">
+              {/* P&L */}
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span className="font-sans text-[10px] uppercase tracking-wider text-on-surface-variant">P&L:</span>
+                <span className={`font-mono tabular-nums font-bold ${pnlTone(todayPnl)}`}>
+                  {signedUsd(todayPnl)}
+                </span>
+                {todayPct !== null && (
+                  <span className={`font-mono tabular-nums text-[10px] ${pnlTone(todayPct)}`}>
+                    ({signedPct(todayPct)})
+                  </span>
+                )}
               </div>
-            }
-          />
-          <MetricCard
-            label="Engine positions"
-            value={positions ? String(positions.managed.length) : '—'}
-            valueTone="text-cyan-300"
-            hint={capHint}
-            icon={
-              <div className="p-1 rounded-md bg-cyan-500/10 text-cyan-400">
-                <Layers className="w-3.5 h-3.5" />
+
+              {/* Positions */}
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span className="font-sans text-[10px] uppercase tracking-wider text-on-surface-variant">Positions:</span>
+                <span className="font-mono tabular-nums font-bold text-primary">
+                  {positions ? String(positions.managed.length) : '—'}
+                </span>
               </div>
-            }
-          />
-          <MetricCard
-            label="External holdings"
-            value={positions ? String(positions.unmanaged.length) : '—'}
-            valueTone="text-amber-300"
-            hint={positions && positions.unmanaged.length > 0 ? positions.unmanaged.map((p) => p.symbol).join(', ') : 'None detected'}
-            icon={
-              <div className="p-1 rounded-md bg-amber-500/10 text-amber-400">
-                <ShieldAlert className="w-3.5 h-3.5" />
+
+              {/* External */}
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span className="font-sans text-[10px] uppercase tracking-wider text-on-surface-variant">External:</span>
+                <span className="font-mono tabular-nums font-bold text-tertiary">
+                  {positions ? String(positions.unmanaged.length) : '—'}
+                </span>
               </div>
-            }
-          />
-          <MetricCard
-            label="Settled buying power"
-            value={ledger && ledger.available ? usd(ledger.bucket1_settled) : '—'}
-            valueTone="text-emerald-300"
-            hint={ledger && ledger.available ? `Max order ${usd(ledger.buying_power?.max_order_notional)}` : undefined}
-            icon={
-              <div className="p-1 rounded-md bg-emerald-500/10 text-emerald-400">
-                <Wallet className="w-3.5 h-3.5" />
-              </div>
-            }
-          />
-        </div>
 
-        {activeTab === 'overview' && (
-          <div className="space-y-5">
-            <LifecycleTracker status={status} />
-            <LlmInsightConsole summary={regime} unavailable={regimeFailed} />
-
-            <section className="bg-[#0e1422] border border-gray-800 rounded-xl p-4 sm:p-5 shadow-2xl">
-              <div className="flex items-center justify-between pb-3 border-b border-gray-800 mb-3">
-                <h3 className="text-sm font-semibold text-gray-100 flex items-center font-mono uppercase tracking-wider">
-                  <Clock className="w-4 h-4 mr-2 text-cyan-400" />
-                  Today's orders
-                </h3>
-                <span className="text-xs text-gray-400 font-mono">{orders ? `${orders.length} recorded` : '—'}</span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs text-left">
-                  <thead className="bg-[#080d17] text-gray-400 uppercase tracking-wider font-mono text-[10px]">
-                    <tr>
-                      <th className="py-2 px-3">Time</th>
-                      <th className="py-2 px-3">Symbol</th>
-                      <th className="py-2 px-3">Side</th>
-                      <th className="py-2 px-3">Regime</th>
-                      <th className="py-2 px-3 text-right">Shares</th>
-                      <th className="py-2 px-3 text-right">Price</th>
-                      <th className="py-2 px-3 text-right">Notional</th>
-                      <th className="py-2 px-3 text-center">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-800 font-mono">
-                    {orders === null ? (
-                      <tr>
-                        <td colSpan={8} className="py-6 text-center text-gray-500">
-                          Loading orders…
-                        </td>
-                      </tr>
-                    ) : orders.length === 0 ? (
-                      <tr>
-                        <td colSpan={8} className="py-6 text-center text-gray-500">
-                          No orders recorded today.
-                        </td>
-                      </tr>
-                    ) : (
-                      orders.map((o, idx) => (
-                        <tr key={`${o.timestamp}-${o.symbol}-${idx}`} className="hover:bg-gray-800/30">
-                          <td className="py-2 px-3 text-gray-400">{new Date(o.timestamp).toLocaleTimeString()}</td>
-                          <td className="py-2 px-3 font-bold text-gray-100">{o.symbol}</td>
-                          <td className="py-2 px-3">
-                            <span
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                                o.side === 'BUY'
-                                  ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
-                                  : 'bg-rose-950 text-rose-300 border-rose-800'
-                              }`}
-                            >
-                              {o.side}
-                            </span>
-                          </td>
-                          <td className="py-2 px-3 text-gray-300 text-[11px]">{o.regime || '—'}</td>
-                          <td className="py-2 px-3 text-right text-gray-200">{o.quantity}</td>
-                          <td className="py-2 px-3 text-right">{usd(o.price)}</td>
-                          <td className="py-2 px-3 text-right font-semibold text-cyan-300">{usd(o.cost)}</td>
-                          <td className="py-2 px-3 text-center">
-                            <span className="inline-flex items-center text-[10px] text-emerald-400">
-                              <CheckCircle2 className="w-3 h-3 mr-1" />
-                              {o.status}
-                            </span>
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          </div>
-        )}
-
-        {activeTab === 'positions' && (
-          <EtfPositionTracker
-            env={env}
-            onEnvChange={handleEnvChange}
-            positions={positions}
-            ledger={ledger}
-            onInspectAve={(sym) => {
-              setSelectedAveSymbol(sym);
-              setActiveTab('ave');
-            }}
-          />
-        )}
-
-        {activeTab === 'ave' && (
-          <div className="space-y-4">
-            <div className="bg-[#0e1422] border border-gray-800 rounded-xl p-4 shadow-xl">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-                    <Zap className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-semibold font-mono uppercase tracking-wider text-gray-100">
-                      Adaptive Volatility Envelope
-                    </h3>
-                    <p className="text-[11px] text-gray-500 font-mono">
-                      Decoupled rAF canvas charting · Continuous session squeeze clock · Virtual Bracket FSM
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <div className="flex items-center gap-1.5 bg-[#080d17] p-1 rounded-lg border border-gray-800">
-                    {Array.from(
-                      new Set([
-                        ...(positions?.managed.map((p) => p.symbol) ?? []),
-                        'SOXL',
-                        'TQQQ',
-                        'TNA',
-                        'SPY',
-                      ])
-                    ).map((sym) => (
-                      <button
-                        key={sym}
-                        onClick={() => setSelectedAveSymbol(sym)}
-                        className={`px-2.5 py-1 rounded text-xs font-mono font-bold transition-colors cursor-pointer ${
-                          selectedAveSymbol === sym
-                            ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                            : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/40'
-                        }`}
-                      >
-                        {sym}
-                      </button>
-                    ))}
-                  </div>
-
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      if (customSymbol.trim()) {
-                        setSelectedAveSymbol(customSymbol.trim().toUpperCase());
-                        setCustomSymbol('');
-                      }
-                    }}
-                    className="flex items-center gap-1.5"
-                  >
-                    <input
-                      type="text"
-                      placeholder="CUSTOM..."
-                      value={customSymbol}
-                      onChange={(e) => setCustomSymbol(e.target.value)}
-                      className="w-24 px-2.5 py-1 bg-[#080d17] border border-gray-800 rounded text-xs font-mono text-gray-200 uppercase focus:outline-none focus:border-cyan-500/50"
-                    />
-                    <button
-                      type="submit"
-                      className="px-2.5 py-1 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded text-xs font-mono font-semibold cursor-pointer"
-                    >
-                      Go
-                    </button>
-                  </form>
-                </div>
+              {/* Settled Buying Power */}
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span className="font-sans text-[10px] uppercase tracking-wider text-on-surface-variant">Buying Power:</span>
+                <span className="font-mono tabular-nums font-bold text-finance-bull">
+                  {ledger && ledger.available ? usd(ledger.bucket1_settled) : '—'}
+                </span>
               </div>
             </div>
 
-            <AveEnvelopeChart symbol={selectedAveSymbol} height={460} />
-          </div>
-        )}
+            {/* Right: Symbol Quick Selector Chips + Custom Input */}
+            <div className="flex items-center gap-2 shrink-0">
+              <div className="hidden md:flex items-center gap-1 bg-surface-container-high/60 p-0.5 rounded-lg">
+                {aveSymbols.map((sym) => (
+                  <button
+                    key={sym}
+                    onClick={() => setSelectedAveSymbol(sym)}
+                    className={`px-2 py-0.5 rounded-md text-[11px] font-mono font-bold transition-colors cursor-pointer ${
+                      selectedAveSymbol === sym
+                        ? 'bg-primary/20 text-primary font-bold'
+                        : 'text-on-surface-variant hover:text-on-surface'
+                    }`}
+                  >
+                    {sym}
+                  </button>
+                ))}
+              </div>
 
-        {activeTab === 'ledger' && (
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-            <LedgerCard ledger={ledger} policy={policy} onPolicySaved={(saved) => { setPolicy(saved); void loadData(); }} />
-            <MacroLiquidityCard macroState={macroState} onUploadComplete={() => void loadData()} />
-          </div>
-        )}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (customSymbol.trim()) {
+                    setSelectedAveSymbol(customSymbol.trim().toUpperCase());
+                    setCustomSymbol('');
+                  }
+                }}
+                className="flex items-center gap-1"
+              >
+                <input
+                  type="text"
+                  placeholder="CUSTOM..."
+                  value={customSymbol}
+                  onChange={(e) => setCustomSymbol(e.target.value)}
+                  className="w-20 px-2 py-0.5 bg-surface-container-high rounded text-[11px] font-mono text-on-surface uppercase focus:outline-none focus:ring-1 focus:ring-primary/50"
+                />
+                <button
+                  type="submit"
+                  className="px-2 py-0.5 bg-surface-container-highest hover:bg-surface-bright text-on-surface rounded text-[11px] font-sans font-medium cursor-pointer"
+                >
+                  Go
+                </button>
+              </form>
 
-        {activeTab === 'controls' && <SchwabControls status={status} onRefresh={() => void loadData()} />}
-      </div>
+              <button
+                type="button"
+                onClick={() => setHudCollapsed((prev) => !prev)}
+                title={hudCollapsed ? 'Expand HUD details' : 'Collapse HUD'}
+                className="p-1 rounded-md text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-colors"
+              >
+                {hudCollapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+          </div>
+
+          {/* Full-Bleed uPlot Chart Container */}
+          <div className="flex-1 w-full min-h-0 overflow-hidden flex flex-col">
+            <AveEnvelopeChart symbol={selectedAveSymbol} />
+          </div>
+        </div>
+      ) : (
+        /* STANDARD VIEWS: Padded Grid with 4 Global Metric Cards */
+        <div className="space-y-5">
+          {unavailable && !engineError && (
+            <div className="text-xs font-mono text-amber-200 bg-amber-950/40 border border-amber-900/60 rounded-xl px-4 py-2.5">
+              Active (Schwab) data is unavailable because the engine is running in simulation. Switch to Sandbox to see the simulated pipeline.
+            </div>
+          )}
+          {partialErrors.length > 0 && !engineError && (
+            <div className="text-xs font-mono text-rose-200 bg-rose-950/40 border border-rose-900/60 rounded-xl px-4 py-2.5">
+              Could not load: {partialErrors.join(', ')}.
+            </div>
+          )}
+
+          {/* 4 Standard Global KPI Cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <MetricCard
+              label="Today P&L"
+              value={signedUsd(todayPnl)}
+              valueTone={pnlTone(todayPnl)}
+              hint={
+                todayPct !== null
+                  ? `${signedPct(todayPct)} · floor ${usd(status?.circuit_breaker_limit)}`
+                  : status
+                  ? `Floor ${usd(status.circuit_breaker_limit)}`
+                  : undefined
+              }
+              icon={
+                <div className={`p-1 rounded-lg ${(todayPnl ?? 0) >= 0 ? 'bg-finance-bull-container text-finance-bull' : 'bg-error-container text-error'}`}>
+                  {(todayPnl ?? 0) >= 0 ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
+                </div>
+              }
+            />
+            <MetricCard
+              label="Engine positions"
+              value={positions ? String(positions.managed.length) : '—'}
+              valueTone="text-primary"
+              hint={capHint}
+              icon={
+                <div className="p-1 rounded-lg bg-primary-container text-primary">
+                  <Layers className="w-3.5 h-3.5" />
+                </div>
+              }
+            />
+            <MetricCard
+              label="External holdings"
+              value={positions ? String(positions.unmanaged.length) : '—'}
+              valueTone="text-tertiary"
+              hint={positions && positions.unmanaged.length > 0 ? positions.unmanaged.map((p) => p.symbol).join(', ') : 'None detected'}
+              icon={
+                <div className="p-1 rounded-lg bg-tertiary-container text-tertiary">
+                  <ShieldAlert className="w-3.5 h-3.5" />
+                </div>
+              }
+            />
+            <MetricCard
+              label="Settled buying power"
+              value={ledger && ledger.available ? usd(ledger.bucket1_settled) : '—'}
+              valueTone="text-finance-bull"
+              hint={ledger && ledger.available ? `Max order ${usd(ledger.buying_power?.max_order_notional)}` : undefined}
+              icon={
+                <div className="p-1 rounded-lg bg-finance-bull-container text-finance-bull">
+                  <Wallet className="w-3.5 h-3.5" />
+                </div>
+              }
+            />
+          </div>
+
+          {activeTab === 'overview' && (
+            <div className="space-y-5">
+              <LifecycleTracker status={status} />
+              <LlmInsightConsole summary={regime} unavailable={regimeFailed} />
+
+              <section className="bg-surface-container rounded-2xl p-4 sm:p-5 shadow-m3-2">
+                <div className="flex items-center justify-between pb-3 border-b border-outline-variant/20 mb-3">
+                  <h3 className="text-sm font-semibold text-on-surface flex items-center font-sans uppercase tracking-wider">
+                    <Clock className="w-4 h-4 mr-2 text-primary" />
+                    Today's orders
+                  </h3>
+                  <span className="text-xs text-on-surface-variant font-mono">{orders ? `${orders.length} recorded` : '—'}</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs text-left">
+                    <thead className="bg-surface-container-low text-on-surface-variant uppercase tracking-wider font-sans text-[10px]">
+                      <tr>
+                        <th className="py-2.5 px-3">Time</th>
+                        <th className="py-2.5 px-3">Symbol</th>
+                        <th className="py-2.5 px-3">Side</th>
+                        <th className="py-2.5 px-3">Regime</th>
+                        <th className="py-2.5 px-3 text-right">Shares</th>
+                        <th className="py-2.5 px-3 text-right">Price</th>
+                        <th className="py-2.5 px-3 text-right">Notional</th>
+                        <th className="py-2.5 px-3 text-center">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-outline-variant/15 font-mono">
+                      {orders === null ? (
+                        <tr>
+                          <td colSpan={8} className="py-6 text-center text-on-surface-variant font-sans">
+                            Loading orders…
+                          </td>
+                        </tr>
+                      ) : orders.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="py-6 text-center text-on-surface-variant font-sans">
+                            No orders recorded today.
+                          </td>
+                        </tr>
+                      ) : (
+                        orders.map((o, idx) => (
+                          <tr key={`${o.timestamp}-${o.symbol}-${idx}`} className="hover:bg-surface-container-high/40">
+                            <td className="py-2 px-3 text-on-surface-variant">{new Date(o.timestamp).toLocaleTimeString()}</td>
+                            <td className="py-2 px-3 font-bold text-on-surface">{o.symbol}</td>
+                            <td className="py-2 px-3">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  o.side === 'BUY'
+                                    ? 'bg-finance-bull-container text-finance-bull'
+                                    : 'bg-error-container text-error'
+                                }`}
+                              >
+                                {o.side}
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-on-surface-variant font-sans text-[11px]">{o.regime || '—'}</td>
+                            <td className="py-2 px-3 text-right tabular-nums text-on-surface">{o.quantity}</td>
+                            <td className="py-2 px-3 text-right tabular-nums">{usd(o.price)}</td>
+                            <td className="py-2 px-3 text-right tabular-nums font-semibold text-primary">{usd(o.cost)}</td>
+                            <td className="py-2 px-3 text-center">
+                              <span className="inline-flex items-center text-[10px] text-finance-bull font-sans">
+                                <CheckCircle2 className="w-3 h-3 mr-1" />
+                                {o.status}
+                              </span>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {activeTab === 'positions' && (
+            <EtfPositionTracker
+              env={env}
+              onEnvChange={handleEnvChange}
+              positions={positions}
+              ledger={ledger}
+              onInspectAve={(sym) => {
+                setSelectedAveSymbol(sym);
+                setActiveTab('ave');
+              }}
+            />
+          )}
+
+          {activeTab === 'ledger' && (
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+              <LedgerCard ledger={ledger} policy={policy} onPolicySaved={(saved) => { setPolicy(saved); void loadData(); }} />
+              <MacroLiquidityCard macroState={macroState} onUploadComplete={() => void loadData()} />
+            </div>
+          )}
+
+          {activeTab === 'controls' && <SchwabControls status={status} onRefresh={() => void loadData()} />}
+        </div>
+      )}
     </DashboardLayout>
   );
 }
