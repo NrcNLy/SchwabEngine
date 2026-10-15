@@ -6,7 +6,7 @@ import { StatusPill } from './StatusPill';
 import { NetChangePanel } from './NetChangePanel';
 import { EnvToggle } from './EnvToggle';
 
-export type DashboardTab = 'overview' | 'positions' | 'ledger' | 'controls';
+export type DashboardTab = 'overview' | 'positions' | 'ave' | 'ledger' | 'controls';
 
 interface DashboardLayoutProps {
   status: EngineStatus | null;
@@ -23,6 +23,7 @@ interface DashboardLayoutProps {
 const TABS: Array<{ id: DashboardTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { id: 'overview', label: 'Overview', icon: TrendingUp },
   { id: 'positions', label: 'Risk Guard', icon: ShieldCheck },
+  { id: 'ave', label: 'AVE Squeeze', icon: Activity },
   { id: 'ledger', label: 'Liquidity', icon: Layers },
   { id: 'controls', label: 'Controls', icon: SlidersHorizontal },
 ];

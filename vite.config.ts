@@ -6,8 +6,9 @@ import react from '@vitejs/plugin-react';
 const engineUrl = process.env.ENGINE_URL ?? 'http://127.0.0.1:8080';
 
 const proxy = {
-  '/api': { target: engineUrl, changeOrigin: true },
+  '/api': { target: engineUrl, changeOrigin: true, ws: true },
   '/stream': { target: engineUrl.replace(/^http/, 'ws'), ws: true, changeOrigin: true },
+  '/ws': { target: engineUrl.replace(/^http/, 'ws'), ws: true, changeOrigin: true },
 };
 
 // https://vitejs.dev/config/

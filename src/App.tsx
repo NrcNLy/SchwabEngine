@@ -26,7 +26,9 @@ import { LedgerCard } from './components/LedgerCard';
 import { LifecycleTracker } from './components/LifecycleTracker';
 import { LlmInsightConsole } from './components/LlmInsightConsole';
 import { MacroLiquidityCard } from './components/MacroLiquidityCard';
+import { AveEnvelopeChart } from './components/AveEnvelopeChart';
 import { pnlTone, signedPct, signedUsd, usd } from './utils/format';
+import { Zap } from 'lucide-react';
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -64,6 +66,8 @@ export function App() {
   const [policy, setPolicy] = useState<LiquidityPolicy | null>(null);
   const [regime, setRegime] = useState<RegimeSummary | null>(null);
   const [regimeFailed, setRegimeFailed] = useState(false);
+  const [selectedAveSymbol, setSelectedAveSymbol] = useState<string>('SOXL');
+  const [customSymbol, setCustomSymbol] = useState<string>('');
 
   const env: EnvName = userEnv ?? status?.env ?? 'active';
   const requestSeq = useRef(0);
@@ -305,7 +309,91 @@ export function App() {
         )}
 
         {activeTab === 'positions' && (
-          <EtfPositionTracker env={env} onEnvChange={handleEnvChange} positions={positions} ledger={ledger} />
+          <EtfPositionTracker
+            env={env}
+            onEnvChange={handleEnvChange}
+            positions={positions}
+            ledger={ledger}
+            onInspectAve={(sym) => {
+              setSelectedAveSymbol(sym);
+              setActiveTab('ave');
+            }}
+          />
+        )}
+
+        {activeTab === 'ave' && (
+          <div className="space-y-4">
+            <div className="bg-[#0e1422] border border-gray-800 rounded-xl p-4 shadow-xl">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+                    <Zap className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold font-mono uppercase tracking-wider text-gray-100">
+                      Adaptive Volatility Envelope
+                    </h3>
+                    <p className="text-[11px] text-gray-500 font-mono">
+                      Decoupled rAF canvas charting · Continuous session squeeze clock · Virtual Bracket FSM
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5 bg-[#080d17] p-1 rounded-lg border border-gray-800">
+                    {Array.from(
+                      new Set([
+                        ...(positions?.managed.map((p) => p.symbol) ?? []),
+                        'SOXL',
+                        'TQQQ',
+                        'TNA',
+                        'SPY',
+                      ])
+                    ).map((sym) => (
+                      <button
+                        key={sym}
+                        onClick={() => setSelectedAveSymbol(sym)}
+                        className={`px-2.5 py-1 rounded text-xs font-mono font-bold transition-colors cursor-pointer ${
+                          selectedAveSymbol === sym
+                            ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
+                            : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/40'
+                        }`}
+                      >
+                        {sym}
+                      </button>
+                    ))}
+                  </div>
+
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (customSymbol.trim()) {
+                        setSelectedAveSymbol(customSymbol.trim().toUpperCase());
+                        setCustomSymbol('');
+                      }
+                    }}
+                    className="flex items-center gap-1.5"
+                  >
+                    <input
+                      type="text"
+                      placeholder="CUSTOM..."
+                      value={customSymbol}
+                      onChange={(e) => setCustomSymbol(e.target.value)}
+                      className="w-24 px-2.5 py-1 bg-[#080d17] border border-gray-800 rounded text-xs font-mono text-gray-200 uppercase focus:outline-none focus:border-cyan-500/50"
+                    />
+                    <button
+                      type="submit"
+                      className="px-2.5 py-1 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded text-xs font-mono font-semibold cursor-pointer"
+                    >
+                      Go
+                    </button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            <AveEnvelopeChart symbol={selectedAveSymbol} height={460} />
+          </div>
         )}
 
         {activeTab === 'ledger' && (

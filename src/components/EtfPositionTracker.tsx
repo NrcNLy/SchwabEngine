@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldCheck } from 'lucide-react';
+import { Activity, ShieldCheck } from 'lucide-react';
 import { EnvName, LedgerSnapshot, Position, PositionsResponse } from '../types';
 import { EnvToggle } from './EnvToggle';
 import { pnlTone, signedUsd, usd } from '../utils/format';
@@ -9,6 +9,7 @@ interface EtfPositionTrackerProps {
   onEnvChange: (env: EnvName) => void;
   positions: PositionsResponse | null;
   ledger: LedgerSnapshot | null;
+  onInspectAve?: (symbol: string) => void;
 }
 
 const REGIME_LABEL: Record<string, string> = {
@@ -18,7 +19,11 @@ const REGIME_LABEL: Record<string, string> = {
   UNKNOWN: 'Unclassified',
 };
 
-const PositionCard: React.FC<{ pos: Position; cap: number | null }> = ({ pos, cap }) => {
+const PositionCard: React.FC<{ pos: Position; cap: number | null; onInspectAve?: (symbol: string) => void }> = ({
+  pos,
+  cap,
+  onInspectAve,
+}) => {
   const usage = cap && cap > 0 ? Math.min(100, (pos.notional_value / cap) * 100) : null;
   const overCap = cap !== null && cap > 0 && pos.notional_value > cap + 0.005;
   const stop = pos.hard_stop_price ?? pos.stop_price ?? null;
@@ -64,22 +69,39 @@ const PositionCard: React.FC<{ pos: Position; cap: number | null }> = ({ pos, ca
       </div>
 
       {pos.managed && (
-        <div className="mt-3 grid grid-cols-2 gap-2 text-[10px]">
-          <div className="bg-gray-900/60 rounded-lg px-2 py-1.5">
-            <div className="text-gray-500">Stop</div>
-            <div className="text-rose-300 font-semibold">{stop === null ? '—' : usd(stop)}</div>
+        <div className="mt-3 space-y-2">
+          <div className="grid grid-cols-2 gap-2 text-[10px]">
+            <div className="bg-gray-900/60 rounded-lg px-2 py-1.5">
+              <div className="text-gray-500">Stop</div>
+              <div className="text-rose-300 font-semibold">{stop === null ? '—' : usd(stop)}</div>
+            </div>
+            <div className="bg-gray-900/60 rounded-lg px-2 py-1.5">
+              <div className="text-gray-500">Target</div>
+              <div className="text-emerald-300 font-semibold">{pos.target_price ? usd(pos.target_price) : '—'}</div>
+            </div>
           </div>
-          <div className="bg-gray-900/60 rounded-lg px-2 py-1.5">
-            <div className="text-gray-500">Target</div>
-            <div className="text-emerald-300 font-semibold">{pos.target_price ? usd(pos.target_price) : '—'}</div>
-          </div>
+          {onInspectAve && (
+            <button
+              onClick={() => onInspectAve(pos.symbol)}
+              className="w-full py-1 px-2 rounded bg-cyan-950/60 hover:bg-cyan-900/70 border border-cyan-800/50 text-cyan-300 text-[10px] font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Activity className="w-3 h-3 text-cyan-400" />
+              Inspect AVE Squeeze
+            </button>
+          )}
         </div>
       )}
     </div>
   );
 };
 
-export const EtfPositionTracker: React.FC<EtfPositionTrackerProps> = ({ env, onEnvChange, positions, ledger }) => {
+export const EtfPositionTracker: React.FC<EtfPositionTrackerProps> = ({
+  env,
+  onEnvChange,
+  positions,
+  ledger,
+  onInspectAve,
+}) => {
   const cap = ledger && ledger.available ? ledger.max_single_exposure : null;
   const capPct = ledger && ledger.available && ledger.total_nlv > 0 ? (ledger.max_single_exposure / ledger.total_nlv) * 100 : null;
   const rows: Position[] = positions ? [...positions.managed, ...positions.unmanaged] : [];
@@ -131,7 +153,12 @@ export const EtfPositionTracker: React.FC<EtfPositionTrackerProps> = ({ env, onE
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
             {rows.map((p) => (
-              <PositionCard key={`${p.symbol}-${p.managed ? 'm' : 'u'}`} pos={p} cap={cap} />
+              <PositionCard
+                key={`${p.symbol}-${p.managed ? 'm' : 'u'}`}
+                pos={p}
+                cap={cap}
+                onInspectAve={onInspectAve}
+              />
             ))}
           </div>
         )}

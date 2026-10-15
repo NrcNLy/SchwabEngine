@@ -329,6 +329,22 @@ class LiveEngine(_EngineBase):
         self._yz_intraday_fraction = float(yz_cfg.get("intraday_fraction", 15.0 / 390.0))
         self._yz_min_stop_pct = float(yz_cfg.get("min_stop_distance_pct", 0.005))
         self._yz_estimators: Dict[str, YangZhangEstimator] = {}
+
+        # Adaptive Volatility Envelope (AVE) integration
+        from execution.virtual_bracket import VirtualBracketFSM
+        ave_cfg = cfg.get("ave", {}) or {}
+        if not ave_cfg:
+            try:
+                import json
+                sc_path = Path("strategy_config.json")
+                if sc_path.exists():
+                    ave_cfg = (json.loads(sc_path.read_text(encoding="utf-8")) or {}).get("ave", {})
+            except Exception:
+                ave_cfg = {}
+        self.ave_mode = str(ave_cfg.get("mode", "shadow")).lower()
+        self.ave_upper_mode = str(ave_cfg.get("upper_breach_mode", "tighten")).lower()
+        self.ave_brackets: Dict[str, VirtualBracketFSM] = {}
+
         strategy.set_signal_callback(self._on_signal)
         if self.micro is not None:
             strategy.set_pre_signal_filter(self.micro.pre_signal_filter)
@@ -367,7 +383,16 @@ class LiveEngine(_EngineBase):
                 est = YangZhangEstimator(window_size=self._yz_window)
                 self._yz_estimators[sym] = est
             yz_vol = est.add_bar(open_p, high_p, low_p, close_p)
-            hurst_h = est.current_hurst()
+            # Adaptive Volatility Envelope (AVE) feed
+            if self.ave_mode != "off":
+                bracket = self.ave_brackets.get(sym)
+                if bracket is not None and pos is not None:
+                    bracket.on_tick_conflated(
+                        tick_time=datetime.now(timezone.utc),
+                        price=float(px),
+                        sigma_t=float(yz_vol),
+                        bid_price=float(fields.get("bid_price", px)),
+                    )
 
             pos = self.ledger.positions.get(sym)
             if pos is not None:
@@ -576,6 +601,31 @@ class LiveEngine(_EngineBase):
             self._open_order_ids[sid] = sym
         except Exception as exc:
             logger.critical("[%s] BROKER CATASTROPHE STOP FAILED (%s). Position is protected only by Tier 1.", sym, exc)
+
+        # Arm and start AVE Virtual Bracket
+        if self.ave_mode != "off":
+            try:
+                from execution.virtual_bracket import VirtualBracketFSM
+                async def _ave_exit_handler(s: str, r: str) -> bool:
+                    return await self.exit_position(s, r)
+
+                bracket = VirtualBracketFSM(
+                    symbol=sym,
+                    mode=self.ave_mode,
+                    upper_breach_mode=self.ave_upper_mode,
+                    exit_callback=_ave_exit_handler,
+                )
+                bracket.arm(planned_qty=filled)
+                bracket.notify_entry_fill(
+                    fill_price=float(price),
+                    fill_qty=filled,
+                    fill_time=datetime.now(timezone.utc),
+                )
+                bracket.start_actor(self.loop)
+                self.ave_brackets[sym] = bracket
+            except Exception as exc:
+                logger.warning("[%s] Could not initialize AVE bracket: %s", sym, exc)
+
         return True
 
     # -- exits -------------------------------------------------------------
@@ -635,6 +685,10 @@ class LiveEngine(_EngineBase):
                 )
             except Exception:
                 pass
+            if filled >= qty and sym in self.ave_brackets:
+                b = self.ave_brackets.pop(sym, None)
+                if b is not None:
+                    b.stop_actor()
             return filled >= qty
         finally:
             self._exiting.discard(sym)

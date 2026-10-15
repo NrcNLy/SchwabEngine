@@ -47,7 +47,7 @@ class TokenBucket:
     Each API call must acquire one token via `acquire()` before proceeding.
     """
 
-    def __init__(self, capacity: float, refill_rate: float) -> None:
+    def __init__(self, capacity: float, refill_rate: float, reserve: float = 8.0, max_debt: float = 5.0) -> None:
         if capacity <= 0:
             raise ValueError(f"capacity must be > 0, got {capacity}")
         if refill_rate <= 0:
@@ -55,14 +55,16 @@ class TokenBucket:
 
         self._capacity: float = capacity
         self._refill_rate: float = refill_rate
+        self._reserve: float = reserve
+        self._max_debt: float = max_debt
         self._tokens: float = capacity          # Start full
         self._last_refill: float = time.monotonic()
         self._lock: threading.Lock = threading.Lock()
 
         logger.info(
             "TokenBucket initialised: capacity=%.1f tokens, "
-            "refill_rate=%.2f tokens/sec (≈%.0f RPM ceiling)",
-            capacity, refill_rate, refill_rate * 60,
+            "refill_rate=%.2f tokens/sec (≈%.0f RPM ceiling), reserve=%.1f, max_debt=%.1f",
+            capacity, refill_rate, refill_rate * 60, reserve, max_debt,
         )
 
     def _refill(self) -> None:
@@ -73,9 +75,17 @@ class TokenBucket:
         self._tokens = min(self._capacity, self._tokens + credited)
         self._last_refill = now
 
-    def acquire(self, tokens: float = 1.0, timeout: Optional[float] = None) -> bool:
+    def acquire(
+        self,
+        tokens: float = 1.0,
+        timeout: Optional[float] = None,
+        is_essential: bool = False,
+    ) -> bool:
         """
         Block until `tokens` tokens are available and consume them.
+
+        Non-essential requests cannot consume into the `reserve` (default 8 tokens).
+        Essential requests can consume into the reserve and even go into bounded debt (down to -max_debt).
 
         Returns:
             True  — tokens acquired, caller may proceed.
@@ -87,23 +97,24 @@ class TokenBucket:
             )
 
         deadline = None if timeout is None else time.monotonic() + timeout
+        min_allowed = -self._max_debt if is_essential else self._reserve
 
         while True:
             with self._lock:
                 self._refill()
-                if self._tokens >= tokens:
+                if (self._tokens - tokens) >= min_allowed:
                     self._tokens -= tokens
                     return True
 
-                deficit = tokens - self._tokens
+                deficit = (min_allowed + tokens) - self._tokens
                 wait_needed = deficit / self._refill_rate
 
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     logger.warning(
-                        "TokenBucket: acquire timed out after %.2fs (requested %.1f tokens)",
-                        timeout, tokens,
+                        "TokenBucket: acquire timed out after %.2fs (requested %.1f tokens, essential=%s)",
+                        timeout, tokens, is_essential,
                     )
                     return False
                 sleep_duration = min(wait_needed, remaining)
@@ -347,8 +358,8 @@ class SchwabRateLimiter:
                     )
                     self._has_warned = True
 
-        # Acquire token from the per-minute bucket
-        acquired = self._bucket.acquire(tokens=tokens, timeout=timeout)
+        # Acquire token from the per-minute bucket with reserve & debt rules
+        acquired = self._bucket.acquire(tokens=tokens, timeout=timeout, is_essential=essential)
         if not acquired:
             return False
 
@@ -359,6 +370,23 @@ class SchwabRateLimiter:
             self._save_quota()
 
         return True
+
+    async def async_acquire(
+        self,
+        tokens: float = 1.0,
+        timeout: Optional[float] = None,
+        is_essential: bool = False,
+        action: str = "NORMAL",
+    ) -> bool:
+        """Asynchronous wrapper around acquire() to prevent blocking the event loop."""
+        import asyncio
+        return await asyncio.to_thread(
+            self.acquire,
+            tokens=tokens,
+            timeout=timeout,
+            is_essential=is_essential,
+            action=action,
+        )
 
     def available(self) -> float:
         """Return available tokens in the bucket."""

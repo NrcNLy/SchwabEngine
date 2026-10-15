@@ -211,3 +211,16 @@ def test_live_monitoring_endpoint(client, prefix):
     assert "Live Event Stream" in text
 
 
+@pytest.mark.parametrize("prefix", ["", "/api"])
+def test_macro_export_endpoint(client, prefix):
+    r = client.get(f"{prefix}/research/macro-export")
+    assert r.status_code == 200
+    assert "text/csv" in r.headers["content-type"]
+    assert "attachment; filename=\"macro_index_history.csv\"" in r.headers.get("content-disposition", "")
+    lines = r.text.strip().splitlines()
+    assert len(lines) > 1
+    assert "soxx_close" in lines[0]
+    assert "ses" in lines[0]
+    assert "regime" in lines[0]
+
+

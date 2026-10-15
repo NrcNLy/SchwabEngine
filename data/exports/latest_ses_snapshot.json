@@ -1,0 +1,31 @@
+{
+  "timestamp": "2026-10-14 15:30:00-04:00",
+  "ses": -0.2598,
+  "regime": "CHOP",
+  "raw_prices": {
+    "soxx_close": 519.41,
+    "soxl_close": 110.54,
+    "qqq_close": 728.89,
+    "tnx_close": 5.19,
+    "vxn_close": 20.64,
+    "uup_close": 29.12
+  },
+  "indicators": {
+    "rs_ratio": 0.7126,
+    "rs_sma20": 0.7235,
+    "rs_spread": -0.0151,
+    "tnx_delta_5": -0.063,
+    "vxn_rank_60": 0.2167,
+    "soxx_trend_zscore": -1.6931
+  },
+  "component_scores": {
+    "score_trend": -0.6893,
+    "score_rs": -0.6382,
+    "score_vxn": 0.5667,
+    "score_tnx": 0.3969
+  },
+  "regime_thresholds": {
+    "favorable_threshold": 0.35,
+    "defensive_threshold": -0.35
+  }
+}

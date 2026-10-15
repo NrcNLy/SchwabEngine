@@ -450,7 +450,9 @@ def build_app(ctx: EngineContext):
 
         async def _run_ipc_relay():
             from core.ipc import TraderIPCClient
+            from api.ave_telemetry import AveTelemetryHub
             client = TraderIPCClient()
+            ave_hub = AveTelemetryHub.get_instance()
             while not stop_ipc.is_set():
                 connected = await client.connect(timeout=1.0)
                 if connected:
@@ -459,6 +461,29 @@ def build_app(ctx: EngineContext):
                         async for msg in client.listen():
                             if stop_ipc.is_set():
                                 break
+                            # Route AVE telemetry frames/events to ave_hub if present
+                            msg_type = msg.get("type") or msg.get("event")
+                            if msg_type == "AVE_FRAME":
+                                f = msg.get("frame", [])
+                                if len(f) >= 8:
+                                    ave_hub.ingest_tick_frame(
+                                        symbol=msg.get("symbol", ""),
+                                        epoch_ms=f[1],
+                                        price=f[2],
+                                        upper=f[3],
+                                        lower=f[4],
+                                        lambda_factor=f[5],
+                                        supremum=f[6],
+                                        state_code=f[7],
+                                    )
+                            elif msg_type == "AVE_FSM_EVENT":
+                                ave_hub.broadcast_fsm_event(
+                                    symbol=msg.get("symbol", ""),
+                                    state=msg.get("state", ""),
+                                    prev_state=msg.get("prev_state"),
+                                    reason=msg.get("reason"),
+                                    details=msg.get("details"),
+                                )
                             await manager.broadcast(msg)
                     except Exception as e:
                         logger.debug("IPC relay loop error: %s", e)
@@ -885,6 +910,31 @@ def build_app(ctx: EngineContext):
         recs = await asyncio.to_thread(ctx.portfolio_manager.run_morning_scan)
         return {"recommendations_generated": len(recs)}
 
+    # ---- research / macro exports -------------------------------------
+
+    @router.get("/research/macro-export")
+    async def get_macro_export():
+        """
+        Download endpoint for the Semiconductor Environment Score (SES) and macro
+        index historical time-series dataset (CSV).
+        """
+        candidates = [
+            PROJECT_ROOT / "data" / "exports" / "macro_index_history.csv",
+            Path("/home/nicho/schwab_engine/data/exports/macro_index_history.csv"),
+            Path("data/exports/macro_index_history.csv"),
+        ]
+        target = next((p for p in candidates if p.is_file()), None)
+        if target is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Macro index history export not found. Run scripts/build_macro_index.py to generate it.",
+            )
+        return FileResponse(
+            path=str(target),
+            media_type="text/csv",
+            filename="macro_index_history.csv",
+        )
+
     # ---- auth ----------------------------------------------------------
 
     @router.post("/auth/exchange")
@@ -1194,6 +1244,67 @@ def build_app(ctx: EngineContext):
         finally:
             manager.disconnect(ws)
 
+    @router.websocket("/ws/ave/{symbol}")
+    async def ave_symbol_stream(ws: WebSocket, symbol: str):
+        """
+        High-frequency AVE telemetry stream for a specific ticker symbol.
+        Streams binary orjson frames and reliable FSM transition events.
+        """
+        from api.ave_telemetry import AveTelemetryHub
+        hub = AveTelemetryHub.get_instance()
+        sym = symbol.upper()
+        conn = await hub.register_client(ws, initial_symbols=[sym])
+        try:
+            while True:
+                # Accept client commands: {"action": "subscribe"|"unsubscribe", "symbol": "..."}
+                data = await ws.receive_text()
+                if data:
+                    try:
+                        cmd = json.loads(data)
+                        action = str(cmd.get("action", "")).lower()
+                        target_sym = str(cmd.get("symbol", "")).upper()
+                        if action == "subscribe" and target_sym:
+                            await hub.subscribe(conn, target_sym)
+                        elif action == "unsubscribe" and target_sym:
+                            await hub.unsubscribe(conn, target_sym)
+                    except Exception:
+                        pass
+        except WebSocketDisconnect:
+            pass
+        except Exception as exc:
+            logger.debug("AVE WebSocket closed for %s: %s", sym, exc)
+        finally:
+            await hub.disconnect(conn)
+
+    @router.websocket("/ws/ave")
+    async def ave_multi_stream(ws: WebSocket):
+        """
+        General AVE telemetry stream supporting dynamic multi-symbol subscriptions.
+        """
+        from api.ave_telemetry import AveTelemetryHub
+        hub = AveTelemetryHub.get_instance()
+        conn = await hub.register_client(ws, initial_symbols=[])
+        try:
+            while True:
+                data = await ws.receive_text()
+                if data:
+                    try:
+                        cmd = json.loads(data)
+                        action = str(cmd.get("action", "")).lower()
+                        target_sym = str(cmd.get("symbol", "")).upper()
+                        if action == "subscribe" and target_sym:
+                            await hub.subscribe(conn, target_sym)
+                        elif action == "unsubscribe" and target_sym:
+                            await hub.unsubscribe(conn, target_sym)
+                    except Exception:
+                        pass
+        except WebSocketDisconnect:
+            pass
+        except Exception as exc:
+            logger.debug("AVE general WebSocket closed: %s", exc)
+        finally:
+            await hub.disconnect(conn)
+
     app.include_router(router)
     app.include_router(router, prefix="/api")
 
@@ -1215,9 +1326,10 @@ def build_app(ctx: EngineContext):
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str):
         reserved_prefixes = (
-            "api", "health", "docs", "openapi.json", "redoc", "stream", "live",
+            "api", "health", "docs", "openapi.json", "redoc", "stream", "live", "ws",
             "status", "positions", "orders", "ledger", "regime", "v1", "strategy",
-            "portfolio", "compression", "news", "auth", "emergency", "indicators", "events"
+            "portfolio", "compression", "news", "auth", "emergency", "indicators", "events",
+            "research"
         )
         first_segment = full_path.split("/")[0]
         if first_segment in reserved_prefixes:
