@@ -117,8 +117,9 @@ def run_preflight(args: argparse.Namespace) -> int:
         try:
             from core.auth import SecurityVault
             passphrase = os.getenv("VAULT_PASSPHRASE", "")
+            iterations = int(auth_cfg.get("pbkdf2_iterations", 600_000))
             if passphrase:
-                vault = SecurityVault(passphrase=passphrase, vault_path=vault_path)
+                vault = SecurityVault(passphrase=passphrase, iterations=iterations, vault_path=vault_path)
                 tokens = vault.load()
                 refresh_exp = float(tokens.get("refresh_token_expires_at", 0))
                 remaining_h = (refresh_exp - time.time()) / 3600.0
