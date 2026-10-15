@@ -224,3 +224,24 @@ def test_macro_export_endpoint(client, prefix):
     assert "regime" in lines[0]
 
 
+@pytest.mark.parametrize("prefix", ["", "/api"])
+def test_ave_mode_toggle_endpoint(client, prefix):
+    # Test valid modes
+    for mode in ["shadow", "live", "off", "shadow"]:
+        r = client.post(f"{prefix}/config/ave-mode", json={"mode": mode})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["success"] is True
+        assert data["mode"] == mode
+
+        # Verify get endpoint returns updated mode
+        r_get = client.get(f"{prefix}/config/ave-mode")
+        assert r_get.status_code == 200
+        assert r_get.json()["mode"] == mode
+
+    # Test invalid mode returns 422
+    r_bad = client.post(f"{prefix}/config/ave-mode", json={"mode": "invalid_mode"})
+    assert r_bad.status_code == 422
+
+
+

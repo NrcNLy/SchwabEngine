@@ -18,16 +18,28 @@
   "volatility_multiplier": 1.0,
   "ave": {
     "mode": "shadow",
-    "s_sat": 0.80,
+    "s_sat": 0.8,
     "theta": 0.35,
     "upper_breach_mode": "tighten",
     "snapshot_max_age_min": 90.0,
     "anchors": {
-      "favorable": {"k_u": 3.0, "k_l": 2.0, "gamma": 1.8},
-      "chop": {"k_u": 1.5, "k_l": 1.5, "gamma": 0.6},
-      "defensive": {"k_u": 1.0, "k_l": 0.5, "gamma": 1.0}
+      "favorable": {
+        "k_u": 3.0,
+        "k_l": 2.0,
+        "gamma": 1.8
+      },
+      "chop": {
+        "k_u": 1.5,
+        "k_l": 1.5,
+        "gamma": 0.6
+      },
+      "defensive": {
+        "k_u": 1.0,
+        "k_l": 0.5,
+        "gamma": 1.0
+      }
     }
   },
-  "_updated_at": "2026-10-09T12:55:03.261580+00:00",
+  "_updated_at": "2026-10-15T01:59:31.742667+00:00",
   "_source": "enhanced_preassessment"
 }

@@ -49,7 +49,7 @@ from pathlib import Path
 import socket
 import sqlite3
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -115,6 +115,10 @@ class StrategyConfigRequest(BaseModel):
     rvol_min_regime_a:     Optional[float] = None
     rsi_oversold:          Optional[float] = None
     llm_mode:              Optional[str]   = None  # "pro", "flash", "disabled"
+
+
+class AveModeRequest(BaseModel):
+    mode: str
 
 
 class AuthExchangeRequest(BaseModel):
@@ -910,6 +914,55 @@ def build_app(ctx: EngineContext):
         recs = await asyncio.to_thread(ctx.portfolio_manager.run_morning_scan)
         return {"recommendations_generated": len(recs)}
 
+    # ---- ave configuration --------------------------------------------
+
+    @router.get("/config/ave-mode")
+    async def get_ave_mode():
+        """Retrieve current AVE operating mode ('live' | 'shadow' | 'off')."""
+        cfg = await asyncio.to_thread(read_json, STRATEGY_CONFIG_FILE, {})
+        ave_cfg = (cfg or {}).get("ave", {})
+        return {"mode": str(ave_cfg.get("mode", "shadow")).lower()}
+
+    @router.post("/config/ave-mode")
+    async def update_ave_mode(req: AveModeRequest):
+        """
+        Dynamically mutate AVE operating mode in-memory across the live engine
+        and persist to strategy_config.json on disk.
+        """
+        mode = req.mode.lower().strip()
+        if mode not in ("live", "shadow", "off"):
+            raise HTTPException(status_code=422, detail="Mode must be 'live', 'shadow', or 'off'")
+
+        def mutate(curr: Dict[str, Any]) -> None:
+            if "ave" not in curr:
+                curr["ave"] = {}
+            curr["ave"]["mode"] = mode
+            curr["_updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        await asyncio.to_thread(update_json, STRATEGY_CONFIG_FILE, mutate, {})
+
+        # Mutate in-memory engine if running in-process
+        if hasattr(ctx, "live_engine") and ctx.live_engine is not None:
+            if hasattr(ctx.live_engine, "set_ave_mode"):
+                ctx.live_engine.set_ave_mode(mode)
+        elif hasattr(ctx, "strategy_engine") and hasattr(ctx.strategy_engine, "set_ave_mode"):
+            ctx.strategy_engine.set_ave_mode(mode)
+
+        # Mutate headless trader daemon via atomic IPC control signal
+        try:
+            from core.ipc import write_control_signal
+            await asyncio.to_thread(
+                write_control_signal,
+                action="SET_AVE_MODE",
+                reason=f"Operator requested {mode}",
+                mode=mode,
+            )
+        except Exception as exc:
+            logger.warning("Could not write IPC control signal for AVE mode: %s", exc)
+
+        await manager.broadcast({"event": "AVE_MODE_CHANGED", "mode": mode})
+        return {"success": True, "mode": mode}
+
     # ---- research / macro exports -------------------------------------
 
     @router.get("/research/macro-export")
@@ -1327,7 +1380,7 @@ def build_app(ctx: EngineContext):
     async def spa(full_path: str):
         reserved_prefixes = (
             "api", "health", "docs", "openapi.json", "redoc", "stream", "live", "ws",
-            "status", "positions", "orders", "ledger", "regime", "v1", "strategy",
+            "status", "positions", "orders", "ledger", "regime", "v1", "strategy", "config",
             "portfolio", "compression", "news", "auth", "emergency", "indicators", "events",
             "research"
         )

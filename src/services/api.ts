@@ -238,3 +238,15 @@ export const savePromotionalDebt = (
     () => request<{ success: boolean; message?: string }>('/v1/liquidity/promotional-debt', { method: 'POST', body: debt }),
     'Could not save the promotional debt.',
   );
+
+export type AveOperatingMode = 'live' | 'shadow' | 'off';
+
+export const fetchAveMode = () =>
+  request<{ mode: AveOperatingMode }>('/config/ave-mode');
+
+export const updateAveMode = (mode: AveOperatingMode) =>
+  action(
+    () => request<{ success: boolean; mode: AveOperatingMode }>('/config/ave-mode', { method: 'POST', body: { mode } }),
+    'Could not update AVE mode.',
+  );
+

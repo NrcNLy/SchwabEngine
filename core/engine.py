@@ -349,6 +349,13 @@ class LiveEngine(_EngineBase):
         if self.micro is not None:
             strategy.set_pre_signal_filter(self.micro.pre_signal_filter)
 
+    def set_ave_mode(self, mode: str) -> None:
+        """Dynamically mutate AVE mode in-memory across all active brackets and future brackets."""
+        self.ave_mode = str(mode).lower()
+        for sym, b in list(self.ave_brackets.items()):
+            b.mode = self.ave_mode
+        logger.info("LiveEngine AVE mode mutated in-memory to: %s (%d active brackets)", self.ave_mode, len(self.ave_brackets))
+
     # -- streamer thread entry points --------------------------------------
 
     def on_tick(self, symbol: str, fields: Dict[str, Any]) -> None:
@@ -787,6 +794,12 @@ class SimEngine(_EngineBase):
         self._chop_min = float(reg.get("ci_chop_threshold", 61.8))
         orb = (cfg.get("strategies", {}) or {}).get("orb_15m", {}) or {}
         self._rr = Decimal(str(orb.get("risk_reward_target", 2.5)))
+        self.ave_mode = str((cfg.get("ave", {}) or {}).get("mode", "shadow")).lower()
+
+    def set_ave_mode(self, mode: str) -> None:
+        """Dynamically mutate AVE mode in-memory."""
+        self.ave_mode = str(mode).lower()
+        logger.info("SimEngine AVE mode mutated in-memory to: %s", self.ave_mode)
 
     async def handle_market_event(self, event: Any) -> None:
         sym = str(event.ticker).upper()

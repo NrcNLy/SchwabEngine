@@ -313,6 +313,11 @@ async def _control_signal_poller(ctx: EngineContext, engine: Any, stop: asyncio.
                     logger.warning("IPC CONTROL SIGNAL: Emergency LIQUIDATE_ALL requested.")
                     if engine is not None:
                         asyncio.create_task(engine.flatten_all("IPC_EMERGENCY_LIQUIDATE"))
+                elif action == "SET_AVE_MODE":
+                    mode = str(sig.get("mode", "shadow")).lower()
+                    if engine is not None and hasattr(engine, "set_ave_mode"):
+                        engine.set_ave_mode(mode)
+                    logger.info("IPC CONTROL SIGNAL: Set AVE mode to %s", mode)
                 await asyncio.to_thread(acknowledge_control_signal)
         except Exception as exc:
             logger.debug("control_signal_poller error: %s", exc)
@@ -360,8 +365,10 @@ async def run(args: argparse.Namespace) -> int:
             return 3
 
     if engine is not None:
+        ctx.live_engine = engine
         ctx.flatten_cb = engine.flatten_all
     else:
+        ctx.live_engine = None
         ctx.flatten_cb = lambda: None
 
     # Verification ping to ntfy alert topic on startup

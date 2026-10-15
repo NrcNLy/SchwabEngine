@@ -54,9 +54,10 @@ def write_control_signal(
     reason: str = "",
     sequence_id: Optional[int] = None,
     file_path: Optional[Path | str] = None,
+    **extra: Any,
 ) -> Dict[str, Any]:
     """
-    Atomically writes state/control_signal.json to request HALT, RESUME, or LIQUIDATE_ALL.
+    Atomically writes state/control_signal.json to request HALT, RESUME, LIQUIDATE_ALL, or SET_AVE_MODE.
     """
     target_path = Path(file_path) if file_path is not None else CONTROL_SIGNAL_FILE
     now_utc = datetime.now(timezone.utc).isoformat()
@@ -71,6 +72,7 @@ def write_control_signal(
         "acknowledged_by_trader": False,
         "acknowledged_at": None,
     }
+    payload.update(extra)
     _atomic_write_json(target_path, payload)
     return payload
 
