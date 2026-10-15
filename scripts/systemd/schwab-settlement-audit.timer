@@ -1,0 +1,9 @@
+[Unit]
+Description=Timer for Schwab Friday T+1 Settlement Audit (09:30:05 EDT Oct 16, 2026)
+
+[Timer]
+OnCalendar=2026-10-16 13:30:05 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

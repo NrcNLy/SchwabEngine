@@ -1,0 +1,17 @@
+[Unit]
+Description=Schwab Friday T+1 Settlement Verification Audit
+After=network.target
+
+[Service]
+Type=oneshot
+User=nicho
+Group=nicho
+WorkingDirectory=/home/nicho/schwab_engine
+EnvironmentFile=-/home/nicho/schwab_engine/.env
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=/home/nicho/schwab_engine/.venv/bin/python /home/nicho/schwab_engine/scripts/verify_friday_settlement.py --expected-nlv 5563.97
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=schwab-settlement-audit
