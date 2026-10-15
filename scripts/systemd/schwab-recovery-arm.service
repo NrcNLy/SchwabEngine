@@ -10,6 +10,7 @@ User=nicho
 Group=nicho
 WorkingDirectory=/home/nicho/schwab_engine
 EnvironmentFile=/home/nicho/schwab_engine/.env
+Environment=ENGINE_STATE_DIR=/home/nicho/schwab_state
 ExecStart=/home/nicho/schwab_engine/.venv/bin/python scripts/autonomous_recovery_soxl.py arm
 StandardOutput=journal
 StandardError=journal

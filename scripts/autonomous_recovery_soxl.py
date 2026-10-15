@@ -120,8 +120,9 @@ def run_preflight(args: argparse.Namespace) -> int:
             iterations = int(auth_cfg.get("pbkdf2_iterations", 600_000))
             if passphrase:
                 vault = SecurityVault(passphrase=passphrase, iterations=iterations, vault_path=vault_path)
-                tokens = vault.load()
-                refresh_exp = float(tokens.get("refresh_token_expires_at", 0))
+                issued = tokens.get("refresh_token_issued_at") or tokens.get("obtained_at") or 0
+                refresh_ttl = int(auth_cfg.get("refresh_token_ttl_sec", 604800))
+                refresh_exp = float(tokens.get("refresh_token_expires_at") or (float(issued) + refresh_ttl if issued else 0))
                 remaining_h = (refresh_exp - time.time()) / 3600.0
                 if remaining_h <= 0:
                     print(f"[FAIL] Refresh token EXPIRED! Re-auth required: manual_auth.py")

@@ -15,7 +15,17 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-STATE_DIR = Path(os.environ.get("ENGINE_STATE_DIR", "state"))
+def _resolve_state_dir() -> Path:
+    env_val = os.environ.get("ENGINE_STATE_DIR")
+    if env_val:
+        return Path(env_val)
+    vm_state = Path("/home/nicho/schwab_state")
+    if vm_state.is_dir():
+        return vm_state
+    return Path("state")
+
+
+STATE_DIR = _resolve_state_dir()
 
 MACRO_STATE_FILE = STATE_DIR / "macro_liquidity.json"
 POLICY_FILE = STATE_DIR / "liquidity_policy.json"
