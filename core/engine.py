@@ -152,6 +152,9 @@ class _EngineBase:
         sym = symbol.upper()
         if self.ctx.is_halted:
             return "kill switch engaged"
+        # Autonomous Recovery Safety Invariant: halt new entries across session
+        if bool((self.cfg.get("recovery", {}) or {}).get("halt_new_entries", False)):
+            return "recovery protocol active: all new entries halted"
         if not self.ignore_session:
             t_phase = get_session_phase(now_et(), self.cfg)
             permitted, _, reason = is_entry_permitted(t_phase, self.cfg)
@@ -390,6 +393,8 @@ class LiveEngine(_EngineBase):
                 est = YangZhangEstimator(window_size=self._yz_window)
                 self._yz_estimators[sym] = est
             yz_vol = est.add_bar(open_p, high_p, low_p, close_p)
+            pos = self.ledger.positions.get(sym)
+
             # Adaptive Volatility Envelope (AVE) feed
             if self.ave_mode != "off":
                 bracket = self.ave_brackets.get(sym)
@@ -401,8 +406,19 @@ class LiveEngine(_EngineBase):
                         bid_price=float(fields.get("bid_price", px)),
                     )
 
-            pos = self.ledger.positions.get(sym)
             if pos is not None:
+                # Dedicated autonomous recovery supervisor bypass hook
+                if getattr(pos, "recovery_locked", False) and hasattr(self, "recovery") and self.recovery is not None:
+                    self.recovery.on_tick(
+                        symbol=sym,
+                        price=float(px),
+                        bid_price=float(fields.get("bid_price", px)),
+                        ask_price=float(fields.get("ask_price", px)),
+                        volume=int(fields.get("total_volume", 0)),
+                    )
+                    return
+
+                hurst_h = getattr(self.strategy, "hurst_h", None)
                 # Dynamic volatility stop ratchet evaluation gated by Hurst Exponent
                 if self.ctx.risk_manager is not None:
                     k_stop = float(self._yz_multipliers.get(sym, self._yz_default_k))
@@ -701,7 +717,23 @@ class LiveEngine(_EngineBase):
             self._exiting.discard(sym)
 
     async def _rearm_stop(self, sym: str, qty: int, entry: Decimal) -> None:
-        stop_px = q(entry * (Decimal("1") - self.settings.tier2_stop_pct))
+        pos = self.ledger.positions.get(sym)
+        last_px = pos.last_price if pos is not None and pos.last_price > 0 else entry
+        calc_stop = q(entry * (Decimal("1") - self.settings.tier2_stop_pct))
+        
+        # Invariant Fix (F6): A sell stop order cannot be placed at or above the current market price.
+        # Fallback to max(floor, last * 0.97) if calc_stop >= last_px.
+        floor_px = Decimal("99.75") if sym == "SOXL" else Decimal("0.01")
+        if calc_stop >= last_px:
+            fallback = q(last_px * Decimal("0.97"))
+            stop_px = max(floor_px, fallback)
+            logger.warning(
+                "[%s] Calculated stop $%s was at/above market $%s. Adjusted to $%s.",
+                sym, calc_stop, last_px, stop_px
+            )
+        else:
+            stop_px = calc_stop
+
         try:
             sid = await asyncio.to_thread(self.om.place_broker_stop, sym, qty, float(stop_px))
             self._stop_ids[sym] = sid

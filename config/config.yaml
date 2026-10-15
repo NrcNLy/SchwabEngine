@@ -413,3 +413,22 @@ server:
   port: 8080
   # Directory of the built dashboard (vite build) served by the API process
   static_dir: "dist"
+
+# ---------------------------------------------------------------------------
+# Autonomous Recovery Sequence (SOXL #47)
+# ---------------------------------------------------------------------------
+recovery:
+  enabled: true
+  symbol: "SOXL"
+  expected_qty: 18
+  floor_price: 99.75
+  trail_pct: 0.025
+  take_profit_min_pct: 0.05
+  take_profit_max_pct: 0.08
+  shadow_until: "09:44:59"
+  recalibrate_at: "09:45:00"
+  terminal_flush_at: "15:50:00"
+  s0_deadline: "09:47:00"
+  s0_retry_until: "10:30:00"
+  halt_new_entries: true
+  broker_floor_stop: true

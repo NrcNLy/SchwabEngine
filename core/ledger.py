@@ -73,6 +73,7 @@ class ManagedPosition:
     ratchet_permitted: bool = True
     funded_with_settled: bool = True
     settle_date: Optional[date] = None
+    recovery_locked: bool = False
 
     def __post_init__(self):
         if self.high_water_mark <= Decimal("0.00"):
@@ -551,6 +552,7 @@ class SettlementLedger:
         opened_at: Optional[datetime] = None,
         funded_with_settled: bool = True,
         settle_date: Optional[date] = None,
+        recovery_locked: bool = False,
     ) -> ManagedPosition:
         """Adopts an existing holding into the managed positions ledger."""
         sym = symbol.upper()
@@ -572,10 +574,11 @@ class SettlementLedger:
                 opened_at=trade_dt,
                 funded_with_settled=funded_with_settled,
                 settle_date=eff_settle,
+                recovery_locked=recovery_locked,
             )
             self.positions[sym] = pos
-            logger.info("Adopted managed position: %s x%d @ $%s (settled_funding=%s)",
-                        sym, quantity, entry_px, funded_with_settled)
+            logger.info("Adopted managed position: %s x%d @ $%s (settled_funding=%s, recovery_locked=%s)",
+                        sym, quantity, entry_px, funded_with_settled, recovery_locked)
             return pos
 
     def record_sell(

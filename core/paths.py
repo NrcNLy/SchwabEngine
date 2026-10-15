@@ -29,4 +29,7 @@ TELEMETRY_DB_PATH = STATE_DIR / "telemetry.db"
 CONTROL_SIGNAL_FILE = STATE_DIR / "control_signal.json"
 DYNAMIC_POLICY_FILE = STATE_DIR / "dynamic_policy.json"
 DAILY_QUOTA_FILE = STATE_DIR / "daily_quota.json"
+RECOVERY_PLAN_FILE = STATE_DIR / "recovery_plan.json"
+RECOVERY_STATE_FILE = STATE_DIR / "recovery_state.json"
+RECOVERY_STATUS_FILE = STATE_DIR / "recovery_status.json"
 TRADER_IPC_SOCKET = Path(os.environ.get("TRADER_IPC_SOCKET", "/tmp/schwab_trader.sock"))

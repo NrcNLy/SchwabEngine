@@ -225,16 +225,34 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
     ctx.broker_sync = sync
 
     # Adopt existing broker holdings as actively managed inventory
+    rec_cfg_data = cfg.get("recovery", {}) or {}
+    rec_enabled = bool(rec_cfg_data.get("enabled", False))
+    rec_sym = str(rec_cfg_data.get("symbol", "SOXL")).upper()
+    rec_floor = float(rec_cfg_data.get("floor_price", 99.75))
+
     for bp_item in sync.get_positions():
-        stop_val = round(float(bp_item.avg_cost) * (1.0 - float(cfg.get("risk", {}).get("tier2_stop_pct", 0.04))), 2)
+        is_rec = rec_enabled and (bp_item.symbol.upper() == rec_sym)
+        if is_rec:
+            stop_val = rec_floor
+            target_val = None
+            is_locked = True
+            logger.info("Adopting %s with Recovery Protocol: stop=$%.2f (floor safeguard), recovery_locked=True",
+                        bp_item.symbol, stop_val)
+        else:
+            stop_val = round(float(bp_item.avg_cost) * (1.0 - float(cfg.get("risk", {}).get("tier2_stop_pct", 0.04))), 2)
+            target_val = None
+            is_locked = False
+
         ledger.adopt_position(
             symbol=bp_item.symbol,
             quantity=bp_item.quantity,
             entry_price=bp_item.avg_cost,
             current_price=bp_item.current_price,
             stop_price=stop_val,
+            target_price=target_val,
             regime="A",
             simulated=False,
+            recovery_locked=is_locked,
         )
     sync.set_managed_symbols(ledger.positions.keys())
 
@@ -277,6 +295,26 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
     handles.streamer = streamer
 
     tasks.append(asyncio.create_task(engine.run_broker_sync(stop), name="broker-sync"))
+
+    # Autonomous Recovery Supervisor wiring
+    if rec_enabled:
+        try:
+            from execution.recovery_supervisor import RecoveryConfig, RecoverySupervisor
+            r_cfg = RecoveryConfig.from_dict(rec_cfg_data)
+            basis_val = 110.42
+            pos_soxl = ledger.positions.get(rec_sym)
+            if pos_soxl:
+                basis_val = float(pos_soxl.entry_price)
+            supervisor = RecoverySupervisor(config=r_cfg, engine=engine, basis=basis_val)
+            supervisor.state = "PREOPEN_ARMED"
+            supervisor.start(loop)
+            engine.recovery = supervisor
+            ctx.recovery_supervisor = supervisor
+            logger.info("Autonomous Recovery Supervisor wired for %s (basis=$%.2f, state=PREOPEN_ARMED).",
+                        rec_sym, basis_val)
+        except Exception as exc:
+            logger.error("Failed to initialize RecoverySupervisor: %s", exc)
+
     logger.warning("LIVE MODE: real orders will be routed to Schwab account ...%s.",
                    str(cfg.get("account", {}).get("required_suffix", "")))
     return engine
@@ -318,6 +356,16 @@ async def _control_signal_poller(ctx: EngineContext, engine: Any, stop: asyncio.
                     if engine is not None and hasattr(engine, "set_ave_mode"):
                         engine.set_ave_mode(mode)
                     logger.info("IPC CONTROL SIGNAL: Set AVE mode to %s", mode)
+                elif action == "RECOVERY_ARM":
+                    if hasattr(engine, "recovery") and engine.recovery is not None:
+                        engine.recovery.state = "PREOPEN_ARMED"
+                        engine.recovery.persist_state()
+                        logger.info("IPC CONTROL SIGNAL: Recovery supervisor ARMED.")
+                elif action == "RECOVERY_DISARM":
+                    if hasattr(engine, "recovery") and engine.recovery is not None:
+                        engine.recovery.state = "DISARMED"
+                        engine.recovery.persist_state()
+                        logger.info("IPC CONTROL SIGNAL: Recovery supervisor DISARMED.")
                 await asyncio.to_thread(acknowledge_control_signal)
         except Exception as exc:
             logger.debug("control_signal_poller error: %s", exc)

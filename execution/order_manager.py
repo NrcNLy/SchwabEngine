@@ -425,6 +425,15 @@ class OrderManager:
 
     replace_broker_stop = update_broker_stop
 
+    @staticmethod
+    def is_essential(reason: str) -> bool:
+        """Determines if an exit order is essential and bypasses daily quota limits."""
+        return reason in (
+            "MANDATORY_FLATTEN", "EMERGENCY", "API_EMERGENCY", "TIER1_STOP", "TIER2_STOP",
+            "RECOVERY_FLOOR", "RECOVERY_TRAIL", "RECOVERY_TARGET", "RECOVERY_EOD",
+            "EOD_FLAT", "IPC_EMERGENCY_LIQUIDATE"
+        )
+
     def execute_market_sell(
         self,
         symbol:   str,
@@ -497,7 +506,7 @@ class OrderManager:
             sym, qty, reason,
         )
 
-        is_essential = reason in ("MANDATORY_FLATTEN", "EMERGENCY", "API_EMERGENCY", "TIER1_STOP", "TIER2_STOP")
+        is_essential = self.is_essential(reason)
         action = reason if is_essential else "MARKET_SELL"
         resp     = self._rest.place_order(self._account_hash, body, is_essential=is_essential, action=action)
         order_id = self._extract_order_id(resp.headers.get("Location", ""))
@@ -520,6 +529,89 @@ class OrderManager:
                 },
             )
         return order_id
+
+    def execute_marketable_limit_sell(
+        self,
+        symbol: str,
+        quantity: int,
+        limit_price: float,
+        reason: str = "RECOVERY_TARGET",
+    ) -> str:
+        """
+        Submits a marketable LIMIT SELL order (DAY, NORMAL).
+        Used for non-urgent target exits to control slippage.
+        """
+        sym = symbol.upper()
+        qty = int(quantity)
+
+        # 1. Hard Pre-Trade GFV Check
+        if self._ledger is not None and hasattr(self._ledger, "can_sell_position"):
+            can_sell, veto_msg = self._ledger.can_sell_position(sym, qty)
+            if not can_sell:
+                logger.critical(
+                    "OrderManager: GFV EXECUTION VETO — Refusing limit sell %s x%d [%s]. %s",
+                    sym, qty, reason, veto_msg,
+                )
+                raise GoodFaithViolationBlockedError(veto_msg)
+
+        self._require_firewall()
+
+        px_str = f"{limit_price:.2f}"
+        body = self._build_order(
+            instruction=_INST_SELL,
+            order_type=_OT_LIMIT,
+            symbol=sym,
+            quantity=qty,
+            price=px_str,
+        )
+
+        is_essential = self.is_essential(reason)
+        action = reason if is_essential else "LIMIT_SELL"
+        resp = self._rest.place_order(self._account_hash, body, is_essential=is_essential, action=action)
+        order_id = self._extract_order_id(resp.headers.get("Location", ""))
+
+        logger.info(
+            "OrderManager: LIMIT SELL order placed — id=%s | %s ×%d @ $%s [reason=%s]",
+            order_id, sym, qty, px_str, reason,
+        )
+        if self.telemetry is not None:
+            self.telemetry.record_event(
+                aggregate_id=sym,
+                event_type="LIMIT_SELL",
+                payload={
+                    "symbol": sym,
+                    "quantity": qty,
+                    "price": px_str,
+                    "reason": reason,
+                    "order_id": order_id,
+                    "category": "ORDER/FLOW",
+                    "message": f"Marketable limit sell placed for {sym} x{qty} @ ${px_str} [reason={reason}]",
+                },
+            )
+        return order_id
+
+    def find_working_sell_stop(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Finds any active WORKING SELL STOP order for symbol.
+        Used for idempotent broker stop verification.
+        """
+        self._require_firewall()
+        sym = symbol.upper()
+        try:
+            working = self._rest.get_orders(self._account_hash, status="WORKING")
+        except Exception as exc:
+            logger.warning("OrderManager: failed to fetch working orders to find stop for %s: %s", sym, exc)
+            return None
+
+        for o in working:
+            if str(o.get("orderType", "")).upper() == "STOP":
+                legs = o.get("orderLegCollection", [])
+                for leg in legs:
+                    leg_sym = leg.get("instrument", {}).get("symbol", "").upper()
+                    leg_inst = str(leg.get("instruction", "")).upper()
+                    if leg_sym == sym and leg_inst == "SELL":
+                        return o
+        return None
 
     # ------------------------------------------------------------------
     # Order management

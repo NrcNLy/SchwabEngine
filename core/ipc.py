@@ -58,11 +58,25 @@ def write_control_signal(
 ) -> Dict[str, Any]:
     """
     Atomically writes state/control_signal.json to request HALT, RESUME, LIQUIDATE_ALL, or SET_AVE_MODE.
+    Enforces monotonic sequence_id tracking and preserves unacknowledged LIQUIDATE_ALL.
     """
     target_path = Path(file_path) if file_path is not None else CONTROL_SIGNAL_FILE
     now_utc = datetime.now(timezone.utc).isoformat()
     if sequence_id is None:
         sequence_id = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    # Invariant Fix (F10): Check existing unacknowledged signal
+    existing = read_control_signal(target_path)
+    if existing and not existing.get("acknowledged_by_trader"):
+        # Enforce strictly monotonic sequence_id
+        prev_seq = int(existing.get("sequence_id", 0) or 0)
+        if sequence_id <= prev_seq:
+            sequence_id = prev_seq + 1
+
+        # LIQUIDATE_ALL is terminal and sticky; cannot be overwritten by non-emergency actions
+        if str(existing.get("action", "")).upper() == "LIQUIDATE_ALL" and action.upper() != "LIQUIDATE_ALL":
+            logger.warning("write_control_signal: Refusing to overwrite active unacknowledged LIQUIDATE_ALL with %s", action)
+            return existing
 
     payload = {
         "sequence_id": sequence_id,
