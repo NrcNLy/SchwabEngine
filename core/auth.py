@@ -368,14 +368,16 @@ class SchwabAuthManager:
         decoded_code = urllib.parse.unquote(auth_code)
         logger.info("SchwabAuthManager: exchanging authorization code for tokens.")
 
+        encoded_data = urllib.parse.urlencode({
+            "grant_type":   "authorization_code",
+            "code":          decoded_code,
+            "redirect_uri":  redirect_uri,
+        }, safe="@")
+
         response = requests.post(
             self._token_url,
             headers=self._basic_auth_header(),
-            data={
-                "grant_type":   "authorization_code",
-                "code":          decoded_code,
-                "redirect_uri":  redirect_uri,
-            },
+            data=encoded_data,
             timeout=15,
         )
         response.raise_for_status()

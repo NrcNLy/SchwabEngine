@@ -59,8 +59,9 @@ def exchange_and_save(raw_input_url_or_code, redirect_uri="https://127.0.0.1:555
         "redirect_uri": redirect_uri,
     }
 
-    print("Sending token exchange request to Schwab API...")
-    resp = requests.post("https://api.schwabapi.com/v1/oauth/token", headers=headers, data=data, timeout=15)
+    encoded_body = urllib.parse.urlencode(data, safe="@")
+    print(f"Sending token exchange request to Schwab API (literal @ preserved: {'@' in encoded_body})...")
+    resp = requests.post("https://api.schwabapi.com/v1/oauth/token", headers=headers, data=encoded_body, timeout=15)
     
     if resp.status_code != 200:
         print(f"Exchange failed! Status: {resp.status_code}")
@@ -69,7 +70,8 @@ def exchange_and_save(raw_input_url_or_code, redirect_uri="https://127.0.0.1:555
         alt_uri = "https://127.0.0.1" if ":5556" in redirect_uri else "https://127.0.0.1:5556"
         print(f"Attempting fallback exchange with alternate redirect_uri: {alt_uri}...")
         data["redirect_uri"] = alt_uri
-        resp = requests.post("https://api.schwabapi.com/v1/oauth/token", headers=headers, data=data, timeout=15)
+        encoded_body_alt = urllib.parse.urlencode(data, safe="@")
+        resp = requests.post("https://api.schwabapi.com/v1/oauth/token", headers=headers, data=encoded_body_alt, timeout=15)
         if resp.status_code != 200:
             print(f"Fallback exchange also failed! Status: {resp.status_code}")
             print(f"Response: {resp.text}")
