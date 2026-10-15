@@ -126,19 +126,51 @@ def main():
     else:
         print("  --> ALL POSITIONS FLAT (0 shares open). SOXL is confirmed closed.")
 
+    print(f"\n[2.1] RAW CURRENT BALANCES:")
+    for k, v in sorted(cur_bal.items()):
+        print(f"  {k:<35}: {v}")
+
+    if proj_bal:
+        print(f"\n[2.2] RAW PROJECTED BALANCES:")
+        for k, v in sorted(proj_bal.items()):
+            print(f"  {k:<35}: {v}")
+
     # 4. Working & Today's Orders
-    working_orders = rest.get_orders(target_hash, status="WORKING")
+    orders_url = f"{rest._trader_base}/accounts/{target_hash}/orders"
+    today_from = "2026-10-15T00:00:00.000Z"
+    today_to = "2026-10-15T23:59:59.000Z"
+
+    working_orders = []
+    try:
+        working_orders = rest._get(orders_url, params={
+            "fromEnteredTime": today_from,
+            "toEnteredTime": today_to,
+            "status": "WORKING",
+            "maxResults": 50,
+        }).json()
+    except Exception as exc:
+        print(f"  [WARN] Failed to query working orders with status=WORKING: {exc}")
+
     print(f"\n[4] WORKING ORDERS AUDIT:")
     print(f"  Active Working Orders Count: {len(working_orders)}")
     if working_orders:
         for o in working_orders:
             print(f"    - Order ID {o.get('orderId')}: {o.get('orderType')} {o.get('status')}")
     else:
-        print("  --> NO WORKING ORDERS (Order book is clean).")
+        print("  --> NO WORKING ORDERS (Order book is confirmed clean).")
 
-    all_recent_orders = rest.get_orders(target_hash, max_results=30)
-    print(f"\n[5] TODAY'S RECENT EXECUTED / RECENT ORDERS:")
-    for o in all_recent_orders[:5]:
+    all_recent_orders = []
+    try:
+        all_recent_orders = rest._get(orders_url, params={
+            "fromEnteredTime": today_from,
+            "toEnteredTime": today_to,
+            "maxResults": 50,
+        }).json()
+    except Exception as exc:
+        print(f"  [WARN] Failed to query recent orders: {exc}")
+
+    print(f"\n[5] TODAY'S RECENT EXECUTED / RECENT ORDERS ({len(all_recent_orders)} total):")
+    for o in all_recent_orders[:10]:
         oid = o.get("orderId")
         status = o.get("status")
         otype = o.get("orderType")
@@ -153,22 +185,29 @@ def main():
         exec_price = "N/A"
         if acts:
             exec_price = acts[0].get("executionLegs", [{}])[0].get("price", "N/A")
-        print(f"  Order {oid}: {instruction} {sym} x{qty} | Type: {otype} | Status: {status} | Limit: {price} | Executed: ${exec_price} | Entered: {entered_time}")
+        print(f"  Order {oid}: {instruction} {sym} x{qty} | Type: {otype} | Status: {status} | Executed: ${exec_price} | Entered: {entered_time} | Closed: {close_time}")
 
     # 5. Transactions for today
     print(f"\n[6] TODAY'S TRANSACTIONS & CLEARING AUDIT (2026-10-15):")
     tx_url = f"{rest._trader_base}/accounts/{target_hash}/transactions"
-    today_str = "2026-10-15"
-    tx_resp = rest._get(tx_url, params={
-        "startDate": f"{today_str}T00:00:00.000Z",
-        "endDate": f"{today_str}T23:59:59.000Z",
-    }).json()
+    tx_resp = []
+    try:
+        tx_resp = rest._get(tx_url, params={
+            "startDate": today_from,
+            "endDate": today_to,
+        }).json()
+    except Exception as exc:
+        print(f"  [WARN] Transactions query with dates failed: {exc}")
+        try:
+            tx_resp = rest._get(tx_url).json()
+        except Exception as exc2:
+            print(f"  [FAIL] Unparameterized transactions query also failed: {exc2}")
 
     if isinstance(tx_resp, list):
         print(f"  Found {len(tx_resp)} transaction(s) for today:")
         for tx in tx_resp:
             tx_id = tx.get("activityId")
-            tx_date = tx.get("time")
+            tx_date = tx.get("time") or tx.get("settlementDate") or tx.get("tradeDate")
             tx_type = tx.get("type")
             net_amt = tx.get("netAmount", 0.0)
             desc = tx.get("description", "")
