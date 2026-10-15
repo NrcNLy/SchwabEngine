@@ -1,0 +1,21 @@
+[Unit]
+Description=Schwab SOXL Recovery Standalone Heartbeat Watchdog Daemon
+After=network.target schwab-trader.service
+Wants=schwab-trader.service
+OnFailure=schwab-notify@%n.service
+
+[Service]
+Type=simple
+User=nicho
+Group=nicho
+WorkingDirectory=/home/nicho/schwab_engine
+EnvironmentFile=/home/nicho/schwab_engine/.env
+ExecStart=/home/nicho/schwab_engine/.venv/bin/python scripts/autonomous_recovery_soxl.py watchdog
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=schwab-recovery-watchdog
+
+[Install]
+WantedBy=multi-user.target

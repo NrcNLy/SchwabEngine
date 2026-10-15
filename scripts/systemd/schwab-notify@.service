@@ -1,0 +1,8 @@
+[Unit]
+Description=Schwab Failure Notification to ntfy.sh for %i
+
+[Service]
+Type=oneshot
+User=nicho
+Group=nicho
+ExecStart=/usr/bin/curl -s -d "Systemd unit failure: %i on schwab-trader VM" https://ntfy.sh/schwab-trader-nrc-8472

@@ -1,0 +1,16 @@
+[Unit]
+Description=Schwab SOXL Autonomous Recovery Pre-Open Arming Sequence
+After=network.target schwab-trader.service
+Wants=schwab-trader.service
+OnFailure=schwab-notify@%n.service
+
+[Service]
+Type=oneshot
+User=nicho
+Group=nicho
+WorkingDirectory=/home/nicho/schwab_engine
+EnvironmentFile=/home/nicho/schwab_engine/.env
+ExecStart=/home/nicho/schwab_engine/.venv/bin/python scripts/autonomous_recovery_soxl.py arm
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=schwab-recovery-arm

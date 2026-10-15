@@ -1,0 +1,11 @@
+[Unit]
+Description=Trigger Schwab SOXL Autonomous Recovery Arm at 08:50 AM EDT
+PartOf=schwab-trader.service
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 08:50:00 America/New_York
+Persistent=true
+Unit=schwab-recovery-arm.service
+
+[Install]
+WantedBy=timers.target
