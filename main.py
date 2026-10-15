@@ -358,6 +358,16 @@ async def _control_signal_poller(ctx: EngineContext, engine: Any, stop: asyncio.
                     logger.info("IPC CONTROL SIGNAL: Set AVE mode to %s", mode)
                 elif action == "RECOVERY_ARM":
                     if hasattr(engine, "recovery") and engine.recovery is not None:
+                        try:
+                            from core.runtime import load_config
+                            from execution.recovery_supervisor import RecoveryConfig
+                            fresh_cfg = load_config()
+                            if "recovery" in fresh_cfg:
+                                engine.recovery.cfg = RecoveryConfig.from_dict(fresh_cfg["recovery"])
+                                logger.info("Recovery supervisor config updated from config.yaml: trail_pct=%.3f, u=[%.3f, %.3f]",
+                                            engine.recovery.cfg.trail_pct, engine.recovery.cfg.u_min, engine.recovery.cfg.u_max)
+                        except Exception as cfg_err:
+                            logger.warning("Could not refresh recovery config on ARM: %s", cfg_err)
                         engine.recovery.state = "PREOPEN_ARMED"
                         engine.recovery.persist_state()
                         logger.info("IPC CONTROL SIGNAL: Recovery supervisor ARMED.")

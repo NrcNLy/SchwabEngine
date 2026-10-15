@@ -422,9 +422,9 @@ recovery:
   symbol: "SOXL"
   expected_qty: 18
   floor_price: 99.75
-  trail_pct: 0.025
-  take_profit_min_pct: 0.05
-  take_profit_max_pct: 0.08
+  trail_pct: 0.018
+  take_profit_min_pct: 0.035
+  take_profit_max_pct: 0.045
   shadow_until: "09:44:59"
   recalibrate_at: "09:45:00"
   terminal_flush_at: "15:50:00"
