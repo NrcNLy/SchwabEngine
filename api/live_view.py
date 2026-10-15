@@ -1012,9 +1012,65 @@ def render_live_dashboard() -> str:
       }
     }
 
-    // Initial poll + interval
+    // WebSocket Real-Time Telemetry Bridge (#68)
+    let telemetryWs = null;
+    let wsReconnectTimer = null;
+    function connectTelemetryWebSocket() {
+      if (wsReconnectTimer) {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+      }
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.host || 'localhost:8080';
+      const wsUrl = `${protocol}//${host}/ws/telemetry`;
+
+      try {
+        telemetryWs = new WebSocket(wsUrl);
+        telemetryWs.onopen = () => {
+          const syncEl = document.getElementById('sync-status');
+          if (syncEl) syncEl.textContent = 'Live • WebSocket 1Hz';
+        };
+        telemetryWs.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'ping') {
+              telemetryWs.send(JSON.stringify({ type: 'pong' }));
+              return;
+            }
+            if (data.balances && data.balances.settled_cash !== undefined) {
+              const cashEl = document.getElementById('cash-settled');
+              if (cashEl) cashEl.textContent = formatCurrency(data.balances.settled_cash);
+            }
+            if (data.regime && data.regime.classification) {
+              const regimeEl = document.getElementById('regime-tag');
+              if (regimeEl) regimeEl.textContent = data.regime.classification;
+            }
+          } catch (e) {}
+        };
+        telemetryWs.onclose = () => {
+          const syncEl = document.getElementById('sync-status');
+          if (syncEl) syncEl.textContent = 'Reconnecting WebSocket...';
+          scheduleWsReconnect();
+        };
+        telemetryWs.onerror = () => {
+          try { telemetryWs.close(); } catch(e) {}
+        };
+      } catch (err) {
+        scheduleWsReconnect();
+      }
+    }
+    function scheduleWsReconnect() {
+      if (wsReconnectTimer) return;
+      wsReconnectTimer = setTimeout(() => {
+        wsReconnectTimer = null;
+        connectTelemetryWebSocket();
+      }, 3000);
+    }
+
+    // Initial poll + interval + WebSocket
     hydrateHistoricalEvents();
     pollTelemetry();
+    connectTelemetryWebSocket();
     setInterval(pollTelemetry, POLL_INTERVAL_MS);
   </script>
 </body>

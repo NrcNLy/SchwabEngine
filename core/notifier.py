@@ -44,8 +44,16 @@ def send_alert(
 
     url = f"https://ntfy.sh/{target_topic}"
 
+    title_str = str(title)
+    try:
+        title_str.encode("ascii")
+        encoded_title = title_str
+    except UnicodeEncodeError:
+        from email.header import Header
+        encoded_title = Header(title_str, "utf-8").encode()
+
     headers = {
-        "Title": str(title),
+        "Title": encoded_title,
         "Priority": str(priority),
     }
 

@@ -1,0 +1,21 @@
+[Unit]
+Description=Schwab Pre-Market Preflight Validator & Invariant Latch Gatekeeper (#60)
+After=network.target schwab-trader.service schwab-web.service
+Wants=schwab-trader.service schwab-web.service
+OnFailure=schwab-preflight-fail.service
+
+[Service]
+Type=oneshot
+User=nicho
+Group=nicho
+WorkingDirectory=/home/nicho/schwab_engine
+EnvironmentFile=/home/nicho/schwab_engine/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=ENGINE_STATE_DIR=/home/nicho/schwab_state
+ExecStart=/home/nicho/schwab_engine/.venv/bin/python scripts/preflight.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=schwab-preflight
+
+[Install]
+WantedBy=multi-user.target

@@ -67,6 +67,12 @@ class SQLiteTradeStore:
                         regime TEXT DEFAULT '',
                         simulated INTEGER NOT NULL DEFAULT 0,
                         env TEXT NOT NULL DEFAULT 'active',
+                        tranche_1_filled INTEGER DEFAULT 0,
+                        tranche_2_filled INTEGER DEFAULT 0,
+                        breakeven_latched INTEGER DEFAULT 0,
+                        posterior_alpha REAL DEFAULT 10.0,
+                        posterior_beta REAL DEFAULT 10.0,
+                        kelly_fraction REAL DEFAULT 0.0,
                         created_at TEXT NOT NULL DEFAULT (datetime('now'))
                     );
                     """
@@ -81,6 +87,45 @@ class SQLiteTradeStore:
                     """
                     CREATE INDEX IF NOT EXISTS idx_trades_env_created
                     ON trades (env, created_at);
+                    """
+                )
+
+                # Migration for existing databases
+                cur = conn.execute("PRAGMA table_info(trades);")
+                existing_cols = {row[1] for row in cur.fetchall()}
+                if "tranche_1_filled" not in existing_cols:
+                    conn.execute("ALTER TABLE trades ADD COLUMN tranche_1_filled INTEGER DEFAULT 0;")
+                if "tranche_2_filled" not in existing_cols:
+                    conn.execute("ALTER TABLE trades ADD COLUMN tranche_2_filled INTEGER DEFAULT 0;")
+                if "breakeven_latched" not in existing_cols:
+                    conn.execute("ALTER TABLE trades ADD COLUMN breakeven_latched INTEGER DEFAULT 0;")
+                if "posterior_alpha" not in existing_cols:
+                    conn.execute("ALTER TABLE trades ADD COLUMN posterior_alpha REAL DEFAULT 10.0;")
+                if "posterior_beta" not in existing_cols:
+                    conn.execute("ALTER TABLE trades ADD COLUMN posterior_beta REAL DEFAULT 10.0;")
+                if "kelly_fraction" not in existing_cols:
+                    conn.execute("ALTER TABLE trades ADD COLUMN kelly_fraction REAL DEFAULT 0.0;")
+
+                # Position brackets table for multi-tranche tracking
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS position_brackets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT NOT NULL,
+                        total_shares INTEGER NOT NULL,
+                        entry_price REAL NOT NULL,
+                        s0_reference REAL NOT NULL,
+                        current_stop_price REAL NOT NULL,
+                        remaining_shares INTEGER NOT NULL,
+                        tranche_1_filled INTEGER DEFAULT 0,
+                        tranche_2_filled INTEGER DEFAULT 0,
+                        breakeven_latched INTEGER DEFAULT 0,
+                        is_risk_free INTEGER DEFAULT 0,
+                        realized_pnl REAL DEFAULT 0.0,
+                        status TEXT NOT NULL DEFAULT 'ACTIVE',
+                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    );
                     """
                 )
             finally:
@@ -100,6 +145,12 @@ class SQLiteTradeStore:
         regime: str = "",
         trade_id: Optional[str] = None,
         env: str = "active",
+        tranche_1_filled: bool = False,
+        tranche_2_filled: bool = False,
+        breakeven_latched: bool = False,
+        posterior_alpha: Optional[float] = None,
+        posterior_beta: Optional[float] = None,
+        kelly_fraction: Optional[float] = None,
     ) -> str:
         tid = trade_id or str(uuid.uuid4())
         ts_str = timestamp.isoformat()
@@ -110,8 +161,10 @@ class SQLiteTradeStore:
                     """
                     INSERT OR REPLACE INTO trades (
                         trade_id, symbol, side, quantity, price, cost_basis,
-                        realized_pnl, disallowed_loss, timestamp, regime, simulated, env
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        realized_pnl, disallowed_loss, timestamp, regime, simulated, env,
+                        tranche_1_filled, tranche_2_filled, breakeven_latched,
+                        posterior_alpha, posterior_beta, kelly_fraction
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         tid,
@@ -126,11 +179,58 @@ class SQLiteTradeStore:
                         regime,
                         1 if simulated else 0,
                         env,
+                        1 if tranche_1_filled else 0,
+                        1 if tranche_2_filled else 0,
+                        1 if breakeven_latched else 0,
+                        float(posterior_alpha) if posterior_alpha is not None else 10.0,
+                        float(posterior_beta) if posterior_beta is not None else 10.0,
+                        float(kelly_fraction) if kelly_fraction is not None else 0.0,
                     ),
                 )
             finally:
                 conn.close()
         return tid
+
+    def record_tranche_progression(
+        self,
+        symbol: str,
+        tranche_1_filled: bool,
+        tranche_2_filled: bool,
+        breakeven_latched: bool,
+        trade_id: Optional[str] = None,
+        env: str = "active",
+    ) -> None:
+        """Updates tranche progression flags for an active position in SQLite trades.db."""
+        t1 = 1 if tranche_1_filled else 0
+        t2 = 1 if tranche_2_filled else 0
+        be = 1 if breakeven_latched else 0
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                if trade_id:
+                    conn.execute(
+                        """
+                        UPDATE trades
+                        SET tranche_1_filled = ?, tranche_2_filled = ?, breakeven_latched = ?
+                        WHERE trade_id = ?
+                        """,
+                        (t1, t2, be, trade_id),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE trades
+                        SET tranche_1_filled = ?, tranche_2_filled = ?, breakeven_latched = ?
+                        WHERE id = (
+                            SELECT id FROM trades
+                            WHERE symbol = ? AND env = ?
+                            ORDER BY id DESC LIMIT 1
+                        )
+                        """,
+                        (t1, t2, be, symbol.upper(), env),
+                    )
+            finally:
+                conn.close()
 
     def fetch_trades_today(
         self,
@@ -147,7 +247,9 @@ class SQLiteTradeStore:
                 cur = conn.execute(
                     """
                     SELECT id, trade_id, symbol, side, quantity, price, cost_basis,
-                           realized_pnl, disallowed_loss, timestamp, regime, simulated, env, created_at
+                           realized_pnl, disallowed_loss, timestamp, regime, simulated, env,
+                           tranche_1_filled, tranche_2_filled, breakeven_latched, created_at,
+                           posterior_alpha, posterior_beta, kelly_fraction
                     FROM trades
                     WHERE env = ?
                     ORDER BY id ASC

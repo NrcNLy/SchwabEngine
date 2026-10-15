@@ -26,7 +26,7 @@ from urllib.parse import urlencode
 import requests
 from requests import Response, Session
 
-from core.rate_limiter import TokenBucket, build_from_config
+from core.rate_limiter import SchwabRateGovernor, TokenBucket, build_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +282,7 @@ class SchwabRestClient:
                     headers=self._auth_headers(),
                     timeout=10,
                 )
+                SchwabRateGovernor.get_instance().record_response(resp.status_code, dict(resp.headers))
 
                 if resp.status_code == 401:
                     logger.warning(
@@ -345,6 +346,7 @@ class SchwabRestClient:
                     headers={**self._auth_headers(), "Content-Type": "application/json"},
                     timeout=10,
                 )
+                SchwabRateGovernor.get_instance().record_response(resp.status_code, dict(resp.headers))
 
                 if resp.status_code == 401:
                     logger.warning(
@@ -402,6 +404,7 @@ class SchwabRestClient:
                     headers=self._auth_headers(),
                     timeout=10,
                 )
+                SchwabRateGovernor.get_instance().record_response(resp.status_code, dict(resp.headers))
 
                 if resp.status_code == 401:
                     logger.warning(
@@ -441,7 +444,7 @@ class SchwabRestClient:
     # Public API — Order Lifecycle (Phase 6)
     # ------------------------------------------------------------------
 
-    def place_order(self, account_hash: str, order_body: dict, is_essential: bool = False, action: str = "PLACE_ORDER") -> Response:
+    def place_order(self, account_hash: str, order_body: dict, is_essential: bool = True, action: str = "CRITICAL_EXIT") -> Response:
         """
         Submit a new order for the specified account.
 
@@ -527,7 +530,7 @@ class SchwabRestClient:
         """
         url = f"{self._trader_base}/accounts/{account_hash}/orders/{order_id}"
         try:
-            self._delete(url)
+            self._delete(url, is_essential=True, action="CRITICAL_EXIT")
             return True
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 404:

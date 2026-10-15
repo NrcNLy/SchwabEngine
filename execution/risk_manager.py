@@ -17,7 +17,8 @@ the external backstop never contribute to it.
 import math
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("risk_manager")
 
@@ -29,6 +30,7 @@ ROBUSTNESS_KAPPA = 15
 class RiskEngine:
     def __init__(self, wins: int = 45, executions: int = 100, payoff_ratio: float = 1.6):
         self._active_positions = {}
+        self.brackets: Dict[str, Any] = {}
         self.macro_risk_multiplier: float = 1.0
         # Empirical performance inputs. These are static defaults until the
         # trade log feeds them; the posterior (and therefore the high-probability
@@ -36,6 +38,87 @@ class RiskEngine:
         self.wins = wins
         self.executions = executions
         self.payoff_ratio = payoff_ratio
+
+    def create_breakout_bracket(
+        self,
+        symbol: str,
+        total_shares: int,
+        entry_price: float,
+        s0_reference: Optional[float] = None,
+        trade_store: Optional[Any] = None,
+    ) -> Any:
+        """
+        Instantiates MultiTrancheBracket upon confirmed breakout entry (#62).
+        Records initial state to active positions and trade_store if available.
+        """
+        from execution.bracket_manager import MultiTrancheBracket
+        bracket = MultiTrancheBracket(
+            symbol=symbol,
+            total_shares=total_shares,
+            entry_price=entry_price,
+            s0_reference=s0_reference,
+        )
+        sym = symbol.upper()
+        self.brackets[sym] = bracket
+        self._active_positions[sym] = bracket
+
+        if trade_store is not None and hasattr(trade_store, "record_tranche_progression"):
+            try:
+                trade_store.record_tranche_progression(
+                    symbol=sym,
+                    tranche_1_filled=False,
+                    tranche_2_filled=False,
+                    breakeven_latched=False,
+                )
+            finally:
+                pass
+
+        logger.info(
+            "[%s] MultiTrancheBracket instantiated upon breakout entry: %d shares @ $%.2f",
+            sym, total_shares, entry_price,
+        )
+        return bracket
+
+    def get_bracket(self, symbol: str) -> Optional[Any]:
+        return self.brackets.get(symbol.upper())
+
+    def remove_bracket(self, symbol: str) -> Optional[Any]:
+        sym = symbol.upper()
+        self._active_positions.pop(sym, None)
+        return self.brackets.pop(sym, None)
+
+    def update_bracket_state(
+        self,
+        symbol: str,
+        current_price: float,
+        current_time: datetime,
+        yz_vol: float = 0.0,
+        hurst_exponent: Optional[float] = None,
+        trade_store: Optional[Any] = None,
+    ) -> List[Any]:
+        """
+        Updates bracket state on market price/time update.
+        Records tranche progression to trade_store on state transitions.
+        """
+        bracket = self.get_bracket(symbol)
+        if bracket is None:
+            return []
+
+        actions = bracket.update_state(
+            current_price, current_time, yz_vol=yz_vol, hurst_exponent=hurst_exponent
+        )
+        if actions and trade_store is not None and hasattr(trade_store, "record_tranche_progression"):
+            try:
+                trade_store.record_tranche_progression(
+                    symbol=symbol.upper(),
+                    tranche_1_filled=bracket.tranche_1_filled,
+                    tranche_2_filled=bracket.tranche_2_filled,
+                    breakeven_latched=bracket.breakeven_latched,
+                )
+            except Exception as exc:
+                logger.warning("[%s] Failed to update tranche progression in trade_store: %s", symbol, exc)
+
+        return actions
 
     def update_macro_risk_multiplier(self, multiplier: float) -> None:
         """Dynamically updates the macro liquidity risk multiplier (0.0 to 1.0)."""

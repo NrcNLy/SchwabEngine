@@ -42,11 +42,18 @@ Configuration sources (config.yaml):
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
+import pytz
+
+from execution.sizing_governor import BayesianSizingGovernor, SizingVerdict
 
 logger = logging.getLogger(__name__)
+
+_EDT = pytz.timezone("America/New_York")
 
 # ---------------------------------------------------------------------------
 # Schwab order constants (Schwab API v1 field names)
@@ -104,15 +111,23 @@ class OrderManager:
         rest_client,
         ledger,
         cfg: dict,
+        sizing_governor: Optional[BayesianSizingGovernor] = None,
     ) -> None:
         """
         Args:
-            rest_client: Initialised SchwabRestClient.
-            ledger:      ComplianceLedger (for order cost validation).
-            cfg:         Top-level config dict.
+            rest_client:     Initialised SchwabRestClient.
+            ledger:          ComplianceLedger (for order cost validation).
+            cfg:             Top-level config dict.
+            sizing_governor: BayesianSizingGovernor instance (or instantiated from cfg).
         """
         self._rest      = rest_client
         self._ledger    = ledger
+        self.sizing_governor: BayesianSizingGovernor = sizing_governor or BayesianSizingGovernor(
+            config=cfg
+        )
+        if self._ledger is not None and hasattr(self._ledger, "sizing_governor"):
+            if getattr(self._ledger, "sizing_governor", None) is None:
+                self._ledger.sizing_governor = self.sizing_governor
 
         acct_cfg = cfg.get("account", {})
         self._required_suffix:   str       = str(acct_cfg.get("required_suffix",  "015"))
@@ -128,6 +143,7 @@ class OrderManager:
         self._firewall_ok:    bool = False
         self._tier2_stops:    Dict[str, Dict[str, Any]] = {}
         self.telemetry:       Any = None
+        self._router:         Any = None
 
     # ------------------------------------------------------------------
     # Account Firewall
@@ -195,12 +211,31 @@ class OrderManager:
         self._account_hash   = target_hash
         self._account_number = target_number
         self._firewall_ok    = True
+        if self._router is not None:
+            self._router.account_hash = target_hash
 
         logger.info(
             "OrderManager: firewall PASSED — account=...%s | hash=%s…",
             target_number[-4:] if target_number and len(target_number) >= 4 else target_number,
             target_hash[:12],
         )
+
+    @property
+    def router(self) -> Any:
+        """AdaptiveExecutionRouter instance attached to OrderManager."""
+        if self._router is None:
+            from execution.almgren_chriss import AdaptiveExecutionRouter
+            self._router = AdaptiveExecutionRouter(
+                rest_client=self._rest,
+                account_hash=self._account_hash,
+                telemetry=self.telemetry,
+            )
+        else:
+            if self._account_hash and not getattr(self._router, "account_hash", None):
+                self._router.account_hash = self._account_hash
+            if self.telemetry and not getattr(self._router, "telemetry", None):
+                self._router.telemetry = self.telemetry
+        return self._router
 
     @property
     def account_hash(self) -> Optional[str]:
@@ -213,14 +248,107 @@ class OrderManager:
         return self._account_number
 
     # ------------------------------------------------------------------
+    # Position Sizing & Trade Recording
+    # ------------------------------------------------------------------
+
+    def calculate_position_size(
+        self,
+        symbol: str,
+        price: float,
+        atr: float,
+        settled_cash: Optional[float] = None,
+        total_nlv: Optional[float] = None,
+    ) -> SizingVerdict:
+        """
+        Calculates position size using Bayesian Quarter-Kelly sizing, ATR volatility
+        normalization, and hard T+1 cash settlement reserve gating.
+        """
+        if settled_cash is None:
+            settled_cash = float(self._ledger.settled_cash) if self._ledger is not None else 0.0
+        if total_nlv is None:
+            total_nlv = float(self._ledger.nlv) if self._ledger is not None else 0.0
+        return self.sizing_governor.calculate_position_size(
+            symbol=symbol,
+            price=price,
+            atr=atr,
+            settled_cash=settled_cash,
+            total_nlv=total_nlv,
+        )
+
+    def record_trade_execution(
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        price: float,
+        cost_basis: Optional[float] = None,
+        realized_pnl: float = 0.0,
+        disallowed_loss: float = 0.0,
+        regime: str = "",
+        timestamp: Optional[datetime] = None,
+        trade_id: Optional[str] = None,
+        simulated: bool = False,
+        env: str = "active",
+        is_win: Optional[bool] = None,
+        win_loss_ratio: Optional[float] = None,
+    ) -> str:
+        """
+        Records a trade execution in state/trades.db with updated Bayesian posterior
+        alpha, beta, and Kelly fractions.
+        """
+        side_upper = side.upper()
+        if is_win is not None:
+            self.sizing_governor.update_trade_outcome(is_win=is_win, win_loss_ratio=win_loss_ratio)
+        elif side_upper == "SELL" and realized_pnl != 0.0:
+            win = realized_pnl > 0
+            self.sizing_governor.update_trade_outcome(is_win=win, win_loss_ratio=win_loss_ratio)
+
+        alpha = self.sizing_governor.alpha
+        beta = self.sizing_governor.beta
+        kelly = self.sizing_governor.kelly_fraction
+
+        eff_cost = cost_basis if cost_basis is not None else (quantity * price)
+        eff_ts = timestamp or datetime.now(_EDT)
+
+        trade_store = getattr(self._ledger, "trade_store", None)
+        if trade_store is None:
+            try:
+                from core.trade_store import SQLiteTradeStore
+                trade_store = SQLiteTradeStore()
+            except Exception as exc:
+                logger.debug("OrderManager: SQLiteTradeStore fallback failed: %s", exc)
+
+        tid = trade_id
+        if trade_store is not None:
+            tid = trade_store.record_trade(
+                symbol=symbol,
+                side=side_upper,
+                quantity=quantity,
+                price=price,
+                cost_basis=eff_cost,
+                timestamp=eff_ts,
+                simulated=simulated,
+                realized_pnl=realized_pnl,
+                disallowed_loss=disallowed_loss,
+                regime=regime,
+                trade_id=trade_id,
+                env=env,
+                posterior_alpha=alpha,
+                posterior_beta=beta,
+                kelly_fraction=kelly,
+            )
+        return tid or str(uuid.uuid4())
+
+    # ------------------------------------------------------------------
     # Order submission
     # ------------------------------------------------------------------
 
     def place_limit_buy(
         self,
         symbol:      str,
-        quantity:    int,
-        limit_price: float,
+        quantity:    Optional[int] = None,
+        limit_price: float = 0.0,
+        atr:         Optional[float] = None,
     ) -> str:
         """
         Submit a SINGLE Day LIMIT BUY order.
@@ -230,10 +358,14 @@ class OrderManager:
               Price formatted to exactly 2 decimal places.
               Quantity must be a whole integer.
 
+        If quantity is omitted or None, calculates position size dynamically via
+        BayesianSizingGovernor using price, ATR, and account settled cash.
+
         Args:
             symbol:      Ticker string (e.g. "SOXL").
-            quantity:    Whole number of shares to buy.
+            quantity:    Whole number of shares to buy (optional if atr provided).
             limit_price: Limit price per share.
+            atr:         Optional 14-period ATR for dynamic Bayesian sizing.
 
         Returns:
             Order ID string extracted from the Location header.
@@ -243,8 +375,25 @@ class OrderManager:
             requests.HTTPError:   On HTTP 400 (bad payload) or other errors.
         """
         self._require_firewall()
-        qty   = int(quantity)
-        price = f"{float(limit_price):.2f}"   # 2 decimal places — HTTP 400 prevention
+        px_float = float(limit_price)
+
+        if quantity is None:
+            eff_atr = float(atr) if atr is not None else 1.0
+            verdict = self.calculate_position_size(symbol, px_float, eff_atr)
+            qty = verdict.shares
+            if qty < 1:
+                raise ValueError(
+                    f"OrderManager: sizing governor returned 0 shares for {symbol} "
+                    f"(reason: {verdict.bottleneck_reason})"
+                )
+            logger.info(
+                "OrderManager: dynamic Bayesian sizing allocated %d shares ($%.2f) for %s [bottleneck=%s]",
+                qty, verdict.notional_usd, symbol, verdict.bottleneck_reason,
+            )
+        else:
+            qty = int(quantity)
+
+        price = f"{px_float:.2f}"   # 2 decimal places — HTTP 400 prevention
 
         body = self._build_order(
             instruction=_INST_BUY,
@@ -267,7 +416,56 @@ class OrderManager:
             "OrderManager: LIMIT BUY order placed — id=%s | %s ×%d @ $%s",
             order_id, symbol, qty, price,
         )
+        if self.telemetry is not None:
+            self.telemetry.record_event(
+                aggregate_id=symbol.upper(),
+                event_type="LIMIT_BUY",
+                payload={
+                    "symbol": symbol.upper(),
+                    "quantity": qty,
+                    "price": price,
+                    "order_id": order_id,
+                    "posterior_alpha": self.sizing_governor.alpha,
+                    "posterior_beta": self.sizing_governor.beta,
+                    "kelly_fraction": self.sizing_governor.kelly_fraction,
+                    "category": "ORDER/FLOW",
+                    "message": f"Limit buy placed for {symbol.upper()} x{qty} @ ${price} (f_qk={self.sizing_governor.kelly_fraction:.4f})",
+                },
+            )
+        try:
+            from core.event_ledger import publish_event
+            from core.event_models import OrderRoutedEvent
+            publish_event(
+                OrderRoutedEvent(
+                    client_order_id=order_id,
+                    symbol=symbol.upper(),
+                    action="BUY",
+                    shares=qty,
+                    limit_price=px_float,
+                    notional=round(qty * px_float, 2),
+                )
+            )
+        except Exception:
+            pass
         return order_id
+
+    def place_catastrophic_hardware_stop(
+        self,
+        symbol: str,
+        quantity: int,
+        s0_price: float,
+        catastrophic_pct: float = 0.06,
+    ) -> str:
+        """
+        Route only the catastrophic hardware floor ($S_0 \times 0.94$) to Schwab API
+        as a contingent broker stop order.
+
+        NOTE (#54): Submitting unconditional exchange-side STOP_MARKET orders at 09:30:00
+        open is deprecated to eliminate opening cross whipsaw. Synthetic stops are managed
+        in-memory via MicrostructureSentinel.
+        """
+        stop_price = float(s0_price) * (1.0 - float(catastrophic_pct))
+        return self.place_broker_stop(symbol, quantity, stop_price)
 
     def place_broker_stop(
         self,
@@ -278,8 +476,9 @@ class OrderManager:
         """
         Submit a Tier 2 catastrophe STOP SELL order.
 
-        Spec (research doc): "orderType: STOP, duration: DAY, placed at -4.0%
-        from entry to protect against process crashes or network failure."
+        Spec (#54): Submitting unconditional exchange-side STOP_MARKET orders at 09:30:00
+        open is DEPRECATED to eliminate opening cross whipsaw. Route only the catastrophic
+        hardware floor (S0 * 0.94) to Schwab API as a contingent order.
 
         This is the broker-side safety net — it leaves shares unencumbered
         (no OCO bracket) so the client-side Tier 1 can execute market sells
@@ -288,7 +487,7 @@ class OrderManager:
         Args:
             symbol:     Ticker string.
             quantity:   Whole shares to protect.
-            stop_price: Trigger price (entry × 0.96 per spec).
+            stop_price: Trigger price (entry × 0.94 per #54 catastrophic floor).
 
         Returns:
             Order ID of the placed stop order.
@@ -336,6 +535,21 @@ class OrderManager:
                     "message": f"Tier-2 catastrophe stop placed for {symbol.upper()} x{qty} @ ${price} (id={order_id})",
                 },
             )
+        try:
+            from core.event_ledger import publish_event
+            from core.event_models import OrderRoutedEvent
+            publish_event(
+                OrderRoutedEvent(
+                    client_order_id=order_id,
+                    symbol=symbol.upper(),
+                    action="SELL",
+                    shares=qty,
+                    limit_price=float(stop_price),
+                    notional=round(qty * float(stop_price), 2),
+                )
+            )
+        except Exception:
+            pass
         return order_id
 
     def update_broker_stop(
@@ -421,6 +635,20 @@ class OrderManager:
                     "message": f"Tier-2 catastrophe stop cancel-replace executed for {sym} — old={oid}, new={new_id} @ ${float(new_stop_price):.2f}",
                 },
             )
+        try:
+            from core.event_ledger import publish_event
+            from core.event_models import SentinelRatchetEvent
+            publish_event(
+                SentinelRatchetEvent(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    symbol=sym,
+                    high_watermark=float(new_stop_price),
+                    dynamic_trail_price=float(new_stop_price),
+                    floor_price=float(new_stop_price),
+                )
+            )
+        except Exception:
+            pass
         return new_id, True
 
     replace_broker_stop = update_broker_stop
@@ -431,8 +659,59 @@ class OrderManager:
         return reason in (
             "MANDATORY_FLATTEN", "EMERGENCY", "API_EMERGENCY", "TIER1_STOP", "TIER2_STOP",
             "RECOVERY_FLOOR", "RECOVERY_TRAIL", "RECOVERY_TARGET", "RECOVERY_EOD",
-            "EOD_FLAT", "IPC_EMERGENCY_LIQUIDATE"
+            "EOD_FLAT", "IPC_EMERGENCY_LIQUIDATE",
+            "EMERGENCY_HARD_SWEEP", "LIMIT_PEGGED", "SOFT_FLOOR_BREACH", "SUSTAINED_SOFT_BREACH"
         )
+
+    def liquidate_optimal(
+        self,
+        symbol: str,
+        total_shares: int,
+        urgency: str = "NORMAL",
+        reason: Optional[str] = None,
+    ) -> Any:
+        """
+        Executes optimal liquidation via AdaptiveExecutionRouter.
+        Enforces GFV pre-trade checks and account firewall before routing child orders.
+        """
+        sym = symbol.upper()
+        qty = int(total_shares)
+        action_reason = reason or urgency
+
+        # 1. Hard Pre-Trade GFV Check
+        if self._ledger is not None and hasattr(self._ledger, "can_sell_position"):
+            can_sell, veto_msg = self._ledger.can_sell_position(sym, qty)
+            if not can_sell:
+                logger.critical(
+                    "OrderManager: GFV EXECUTION VETO — Refusing to sell %s x%d [%s]. %s (Forced Overnight Hold).",
+                    sym, qty, action_reason, veto_msg,
+                )
+                if self.telemetry is not None:
+                    self.telemetry.record_event(
+                        aggregate_id=sym,
+                        event_type="GFV_SELL_BLOCKED",
+                        payload={
+                            "symbol": sym,
+                            "quantity": qty,
+                            "reason": action_reason,
+                            "veto_reason": veto_msg,
+                            "action": "FORCED_OVERNIGHT_HOLD",
+                            "category": "GFV_PROTECTION",
+                            "message": f"Sell order for {sym} blocked to prevent Good Faith Violation: {veto_msg}",
+                        },
+                    )
+                raise GoodFaithViolationBlockedError(veto_msg)
+
+        self._require_firewall()
+        return self.router.liquidate_optimal(symbol=sym, total_shares=qty, urgency=urgency)
+
+    def execute_terminal_flush(self, symbol: str, quantity: int) -> Any:
+        """
+        15:50:00 EDT Terminal Cash Flush.
+        Triggers AdaptiveExecutionRouter with urgency='TERMINAL_FLUSH',
+        allowing 60 seconds of adaptive limit-pegging before falling back to IOC if unfilled by 15:52:00 EDT.
+        """
+        return self.liquidate_optimal(symbol=symbol, total_shares=quantity, urgency="TERMINAL_FLUSH", reason="TERMINAL_FLUSH")
 
     def execute_market_sell(
         self,
@@ -441,7 +720,8 @@ class OrderManager:
         reason:   str = "TIER1_STOP",
     ) -> str:
         """
-        Execute an immediate MARKET SELL to close or reduce a position.
+        Execute an optimal liquidation sell order via AdaptiveExecutionRouter.
+        Replaces direct unconstrained market order submissions to eliminate 3x ETF slippage.
 
         Used for:
             - Tier 1 trailing stop trigger (client-side).
@@ -453,68 +733,34 @@ class OrderManager:
         If purchased with unsettled funds (and not yet settled), blocks the sell order
         and raises GoodFaithViolationBlockedError to force an overnight hold, overriding
         intraday EOD liquidation routines.
-
-        Note: Market orders have no price parameter — the ``price`` field is
-        omitted from the order body to avoid HTTP 400.
-
-        Args:
-            symbol:   Ticker string.
-            quantity: Whole shares to sell.
-            reason:   Human-readable reason for logging (default "TIER1_STOP").
-
-        Returns:
-            Order ID of the market sell order.
         """
         sym = symbol.upper()
         qty = int(quantity)
 
-        # 1. Hard Pre-Trade GFV Check
-        if self._ledger is not None and hasattr(self._ledger, "can_sell_position"):
-            can_sell, veto_msg = self._ledger.can_sell_position(sym, qty)
-            if not can_sell:
-                logger.critical(
-                    "OrderManager: GFV EXECUTION VETO — Refusing to sell %s x%d [%s]. %s (Forced Overnight Hold).",
-                    sym, qty, reason, veto_msg,
-                )
-                if self.telemetry is not None:
-                    self.telemetry.record_event(
-                        aggregate_id=sym,
-                        event_type="GFV_SELL_BLOCKED",
-                        payload={
-                            "symbol": sym,
-                            "quantity": qty,
-                            "reason": reason,
-                            "veto_reason": veto_msg,
-                            "action": "FORCED_OVERNIGHT_HOLD",
-                            "category": "GFV_PROTECTION",
-                            "message": f"Sell order for {sym} blocked to prevent Good Faith Violation: {veto_msg}",
-                        },
-                    )
-                raise GoodFaithViolationBlockedError(veto_msg)
-
-        self._require_firewall()
-
-        body = self._build_order(
-            instruction=_INST_SELL,
-            order_type=_OT_MARKET,
-            symbol=sym,
-            quantity=qty,
-        )
+        # Map reason to urgency mode
+        if reason in (
+            "EMERGENCY_CATASTROPHIC", "CATASTROPHIC", "CIRCUIT_BREAKER",
+            "EMERGENCY", "API_EMERGENCY", "IPC_EMERGENCY_LIQUIDATE", "EMERGENCY_HARD_SWEEP"
+        ):
+            urgency = "EMERGENCY_CATASTROPHIC"
+        elif reason in ("EOD_FLAT", "MANDATORY_FLATTEN", "TERMINAL_FLUSH", "RECOVERY_EOD"):
+            urgency = "TERMINAL_FLUSH"
+        else:
+            urgency = "NORMAL"
 
         logger.info(
-            "OrderManager: MARKET SELL %s ×%d [reason=%s]",
-            sym, qty, reason,
+            "OrderManager: OPTIMAL LIQUIDATION SELL %s ×%d [reason=%s, urgency=%s]",
+            sym, qty, reason, urgency,
         )
 
-        is_essential = self.is_essential(reason)
-        action = reason if is_essential else "MARKET_SELL"
-        resp     = self._rest.place_order(self._account_hash, body, is_essential=is_essential, action=action)
-        order_id = self._extract_order_id(resp.headers.get("Location", ""))
+        summary = self.liquidate_optimal(symbol=sym, total_shares=qty, urgency=urgency, reason=reason)
+        order_id = summary.primary_order_id or (summary.order_ids[-1] if summary.order_ids else "OPTIMAL_FILL")
 
         logger.info(
-            "OrderManager: MARKET SELL order placed — id=%s | %s ×%d",
-            order_id, sym, qty,
+            "OrderManager: OPTIMAL SELL order executed — id=%s | %s ×%d @ $%.2f (slippage: %.1fbps)",
+            order_id, sym, summary.filled_shares, summary.average_fill_price, summary.slippage_bps,
         )
+
         if self.telemetry is not None:
             self.telemetry.record_event(
                 aggregate_id=symbol.upper(),
@@ -523,11 +769,30 @@ class OrderManager:
                     "symbol": symbol.upper(),
                     "quantity": qty,
                     "reason": reason,
+                    "urgency": urgency,
                     "order_id": order_id,
+                    "avg_fill_price": summary.average_fill_price,
+                    "slippage_bps": summary.slippage_bps,
+                    "execution_duration": summary.execution_duration,
                     "category": "ORDER/FLOW",
-                    "message": f"Market sell executed for {symbol.upper()} x{qty} [reason={reason}]",
+                    "message": f"Market sell executed via AdaptiveRouter for {symbol.upper()} x{qty} [reason={reason}, avg_px=${summary.average_fill_price:.2f}, slippage={summary.slippage_bps:.1f}bps]",
                 },
             )
+        try:
+            from core.event_ledger import publish_event
+            from core.event_models import OrderRoutedEvent
+            publish_event(
+                OrderRoutedEvent(
+                    client_order_id=order_id,
+                    symbol=sym,
+                    action="SELL",
+                    shares=qty,
+                    limit_price=summary.average_fill_price,
+                    notional=summary.filled_shares * summary.average_fill_price,
+                )
+            )
+        except Exception:
+            pass
         return order_id
 
     def execute_marketable_limit_sell(
@@ -588,6 +853,21 @@ class OrderManager:
                     "message": f"Marketable limit sell placed for {sym} x{qty} @ ${px_str} [reason={reason}]",
                 },
             )
+        try:
+            from core.event_ledger import publish_event
+            from core.event_models import OrderRoutedEvent
+            publish_event(
+                OrderRoutedEvent(
+                    client_order_id=order_id,
+                    symbol=sym,
+                    action="SELL",
+                    shares=qty,
+                    limit_price=px_val,
+                    notional=round(qty * px_val, 2),
+                )
+            )
+        except Exception:
+            pass
         return order_id
 
     def find_working_sell_stop(self, symbol: str) -> Optional[Dict[str, Any]]:
@@ -774,3 +1054,56 @@ class OrderManager:
                 "OrderManager: initialize_firewall() must be called before "
                 "submitting any orders."
             )
+
+    def record_execution_fill(
+        self,
+        order_id: str,
+        symbol: str,
+        fill_price: float,
+        slippage_usd: float = 0.0,
+        fee_usd: float = 0.0,
+    ) -> None:
+        """
+        Record an order fill execution into the zero-allocation event ledger (< 5us).
+        """
+        try:
+            from core.event_ledger import publish_event
+            from core.event_models import ExecutionFilledEvent
+            publish_event(
+                ExecutionFilledEvent(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    order_id=str(order_id),
+                    symbol=str(symbol).upper(),
+                    fill_price=float(fill_price),
+                    slippage_usd=float(slippage_usd),
+                    fee_usd=float(fee_usd),
+                )
+            )
+        except Exception:
+            pass
+
+    def record_settlement_update(
+        self,
+        settled_cash: float,
+        unsettled_cash: float,
+        total_nlv: float,
+        gfv_count: int = 0,
+    ) -> None:
+        """
+        Record cash settlement and NLV state update into the event ledger (< 5us).
+        """
+        try:
+            from core.event_ledger import publish_event
+            from core.event_models import SettlementUpdatedEvent
+            publish_event(
+                SettlementUpdatedEvent(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    settled_cash=float(settled_cash),
+                    unsettled_cash=float(unsettled_cash),
+                    total_nlv=float(total_nlv),
+                    gfv_count=int(gfv_count),
+                )
+            )
+        except Exception:
+            pass
+

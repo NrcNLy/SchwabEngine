@@ -4,8 +4,11 @@
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Engine Mode
+# Engine & Trading Mode
 # ---------------------------------------------------------------------------
+trading:
+  engine_active: false
+
 engine:
   # Default is dry-run. Live order routing requires a valid token vault AND either
   # this flag set to true or the `--live` CLI flag. Live mode fails closed: it never
@@ -40,14 +43,23 @@ risk:
 
   # NLV-relative limits (single source of truth for ledger, API and UI)
   single_ticker_cap_pct: 0.33     # max notional per ticker = 33% of NLV
+  max_position_size_pct: 0.33     # max position size relative to NLV (<= 0.33)
   max_risk_per_trade_pct: 0.02    # 2% of NLV
+  max_account_risk_pct: 0.03      # max account risk limit (<= 0.03)
   daily_drawdown_pct: 0.05        # 5% of NLV circuit breaker
 
   # Maximum loss per trade (used in Quarter-Kelly sizing)
   max_loss_per_trade: 50.00
 
-  # Tier-2 broker-side catastrophe stop: percentage below entry price
-  tier2_stop_pct: 0.04   # 4.0%
+  # Tier-2 broker-side catastrophe stop: percentage below entry price (S0 * 0.94)
+  tier2_stop_pct: 0.06   # 6.0% catastrophic hardware floor
+
+  # Synthetic Microstructure Sentinel & Opening Cross Buffer (#54)
+  sentinel:
+    soft_floor_pct: 0.037         # 3.7% soft synthetic floor
+    hard_catastrophic_pct: 0.060  # 6.0% catastrophic hardware floor
+    opening_buffer_seconds: 90    # 09:30:00 to 09:31:30 EDT buffer
+    vwap_window_seconds: 30       # 30-second rolling VWAP
 
   # Breakeven trigger: move stop to entry once price gains this multiple of R
   breakeven_trigger_r: 1.0

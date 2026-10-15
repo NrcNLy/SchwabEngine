@@ -127,6 +127,7 @@ class EngineContext:
 
         self.auth_manager = None
         self.risk_manager = None          # execution.risk_manager.RiskEngine
+        self.bracket_manager = None       # execution.bracket_manager.MultiTrancheBracketManager
         self.order_manager = None
         self.rest_client = None
         self.strategy_engine = None

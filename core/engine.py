@@ -65,7 +65,7 @@ class EngineSettings:
             symbols=[str(s).upper() for s in (cfg.get("engine", {}) or {}).get("symbols", [])],
             eod=parse_hhmm(sched.get("eod_liquidation_time"), "15:50:00"),
             flat_deadline=parse_hhmm(sched.get("flat_deadline_time"), "15:55:00"),
-            tier2_stop_pct=Decimal(str(risk.get("tier2_stop_pct", 0.04))),
+            tier2_stop_pct=Decimal(str(risk.get("tier2_stop_pct", 0.06))),
         )
 
 
@@ -188,6 +188,8 @@ class _EngineBase:
         macro_at = parse_hhmm(None, "08:35:00")
         rollover_at = parse_hhmm((self.cfg.get("schedule", {}) or {}).get("t1_rollover_time"), "09:00:00")
         close = dtime(16, 15)
+        if governor is not None and hasattr(self, "bar_connector") and self.bar_connector is not None:
+            self.bar_connector.set_governor(governor)
 
         while not stop.is_set():
             try:
@@ -323,6 +325,7 @@ class LiveEngine(_EngineBase):
         self.loop = loop
         self._stop_ids: Dict[str, str] = {}
         self._open_order_ids: Dict[str, str] = {}   # order id -> symbol (engine-placed, still working)
+        self.sentinels: Dict[str, Any] = {}         # symbol -> MicrostructureSentinel (#54)
         from indicators.volatility import YangZhangEstimator
         yz_cfg = (cfg.get("risk", {}) or {}).get("yang_zhang_stops", {}) or {}
         self._yz_window = int(yz_cfg.get("rolling_window", 30))
@@ -352,6 +355,17 @@ class LiveEngine(_EngineBase):
         if self.micro is not None:
             strategy.set_pre_signal_filter(self.micro.pre_signal_filter)
 
+        # Zero-Allocation Bar Resampler & Pipeline Connector (#63)
+        from data.stream_resampler import BarResampler, BarPipelineConnector, IntradayBarWriter
+        self.bar_writer = IntradayBarWriter()
+        self.resampler = BarResampler(loop=self.loop)
+        self.bar_connector = BarPipelineConnector(
+            sentinels=self.sentinels,
+            regime_governor=None,
+            bar_writer=self.bar_writer,
+        )
+        self.resampler.register_listener(self.bar_connector.on_bar_completed)
+
     def set_ave_mode(self, mode: str) -> None:
         """Dynamically mutate AVE mode in-memory across all active brackets and future brackets."""
         self.ave_mode = str(mode).lower()
@@ -377,6 +391,13 @@ class LiveEngine(_EngineBase):
         if price is None:
             return
         self.ctx.mark_tick("SCHWAB")
+        if hasattr(self, "resampler") and self.resampler is not None:
+            try:
+                tick_vol = float(fields.get("last_size", fields.get("total_volume", 0)) or 0.0)
+                tick_ts = fields.get("timestamp")
+                self.resampler.on_tick(symbol=sym, price=float(price), volume=tick_vol, timestamp=tick_ts)
+            except Exception:
+                pass
         try:
             px = Decimal(str(price))
             self.ledger.mark_price(sym, px)
@@ -418,6 +439,64 @@ class LiveEngine(_EngineBase):
                     )
                     return
 
+                # MicrostructureSentinel virtual stop evaluation (#54)
+                sentinel = self.sentinels.get(sym)
+                if sentinel is None and pos.entry_price > 0:
+                    from execution.microstructure_sentinel import MicrostructureSentinel
+                    sentinel_cfg = (self.cfg.get("risk", {}) or {}).get("sentinel", {}) or {}
+                    sentinel = MicrostructureSentinel(
+                        symbol=sym,
+                        s0_reference=float(pos.entry_price),
+                        soft_floor_pct=float(sentinel_cfg.get("soft_floor_pct", 0.037)),
+                        hard_catastrophic_pct=float(self.settings.tier2_stop_pct),
+                        opening_buffer_seconds=int(sentinel_cfg.get("opening_buffer_seconds", 90)),
+                        vwap_window_seconds=int(sentinel_cfg.get("vwap_window_seconds", 30)),
+                    )
+                    self.sentinels[sym] = sentinel
+
+                if sentinel is not None:
+                    from zoneinfo import ZoneInfo
+                    now_edt = datetime.now(ZoneInfo("America/New_York"))
+                    tick_vol = float(fields.get("total_volume", fields.get("volume", 0)) or 0)
+                    bid_px = float(fields.get("bid_price", px))
+                    sentinel_verdict = sentinel.evaluate_stop(
+                        current_time_edt=now_edt,
+                        current_price=float(px),
+                        current_volume=tick_vol,
+                        bid_price=bid_px,
+                    )
+                    if not sentinel_verdict.should_exit and sentinel_verdict.reason == "OPENING_AUCTION_NOISE":
+                        logger.debug(
+                            "[%s] Exit suppressed by MicrostructureSentinel: OPENING_AUCTION_NOISE (px=%.2f, vwap=%.2f)",
+                            sym, float(px), sentinel_verdict.current_vwap,
+                        )
+                        return
+                    if sentinel_verdict.should_exit:
+                        logger.warning(
+                            "[%s] MicrostructureSentinel triggered %s (%s) @ px=%.2f, vwap=%.2f",
+                            sym, sentinel_verdict.exit_type, sentinel_verdict.reason, float(px), sentinel_verdict.current_vwap,
+                        )
+                        if self.telemetry is not None:
+                            self.telemetry.record_event(
+                                aggregate_id=sym,
+                                event_type="SENTINEL_STOP_TRIGGER",
+                                payload={
+                                    "symbol": sym,
+                                    "price": str(px),
+                                    "vwap": sentinel_verdict.current_vwap,
+                                    "reason": sentinel_verdict.reason,
+                                    "exit_type": sentinel_verdict.exit_type,
+                                    "category": "RISK",
+                                    "message": f"MicrostructureSentinel triggered {sentinel_verdict.exit_type} ({sentinel_verdict.reason}) on {sym} @ ${px}",
+                                },
+                            )
+                        if sentinel_verdict.exit_type == "LIMIT_PEGGED":
+                            pegged_limit = sentinel_verdict.pegged_limit_price or round(bid_px - 0.02, 2)
+                            self.loop.call_soon_threadsafe(self._request_limit_exit, sym, sentinel_verdict.reason, pegged_limit)
+                        else:
+                            self.loop.call_soon_threadsafe(self._request_exit, sym, sentinel_verdict.reason)
+                        return
+
                 hurst_h = getattr(self.strategy, "hurst_h", None)
                 # Dynamic volatility stop ratchet evaluation gated by Hurst Exponent
                 if self.ctx.risk_manager is not None:
@@ -453,6 +532,35 @@ class LiveEngine(_EngineBase):
                                 },
                             )
 
+                # Multi-Tranche Bracket ratchet evaluation (#62)
+                if self.ctx.risk_manager is not None:
+                    bracket = self.ctx.risk_manager.get_bracket(sym)
+                    if bracket is not None and not bracket.is_closed:
+                        from zoneinfo import ZoneInfo
+                        now_edt = datetime.now(ZoneInfo("America/New_York"))
+                        trade_store = getattr(self.ledger, "trade_store", None)
+                        b_actions = self.ctx.risk_manager.update_bracket_state(
+                            sym,
+                            float(px),
+                            now_edt,
+                            yz_vol=float(yz_vol),
+                            hurst_exponent=hurst_h,
+                            trade_store=trade_store,
+                        )
+                        for b_act in b_actions:
+                            if b_act.action_type == "SELL":
+                                logger.info("[%s] MultiTrancheBracket action: %s %d shares @ $%.2f (%s)",
+                                            sym, b_act.action_type, b_act.shares, b_act.price, b_act.reason)
+                                if b_act.shares >= pos.quantity:
+                                    self.loop.call_soon_threadsafe(self._request_exit, sym, b_act.reason)
+                                else:
+                                    self.loop.call_soon_threadsafe(self._request_partial_exit, sym, b_act.shares, b_act.reason)
+                            elif b_act.action_type == "UPDATE_STOP":
+                                logger.info("[%s] MultiTrancheBracket stop ratcheted: $%.2f (%s)",
+                                            sym, b_act.stop_price, b_act.reason)
+                                if b_act.stop_price is not None:
+                                    pos.stop_price = Decimal(str(b_act.stop_price))
+
                 reason = None
                 if pos.stop_price is not None and px <= pos.stop_price:
                     reason = "TIER1_STOP"
@@ -484,6 +592,16 @@ class LiveEngine(_EngineBase):
         if symbol in self._exiting:
             return
         asyncio.ensure_future(self.exit_position(symbol, reason))
+
+    def _request_partial_exit(self, symbol: str, quantity: int, reason: str) -> None:
+        if symbol in self._exiting:
+            return
+        asyncio.ensure_future(self.exit_position(symbol, reason, quantity=quantity))
+
+    def _request_limit_exit(self, symbol: str, reason: str, limit_price: float) -> None:
+        if symbol in self._exiting:
+            return
+        asyncio.ensure_future(self.exit_position(symbol, reason, limit_price=limit_price))
 
     # -- entries -----------------------------------------------------------
 
@@ -625,6 +743,18 @@ class LiveEngine(_EngineBase):
         except Exception as exc:
             logger.critical("[%s] BROKER CATASTROPHE STOP FAILED (%s). Position is protected only by Tier 1.", sym, exc)
 
+        # Bind MicrostructureSentinel to track in-memory soft floor and opening cross buffer (#54)
+        from execution.microstructure_sentinel import MicrostructureSentinel
+        sentinel_cfg = (self.cfg.get("risk", {}) or {}).get("sentinel", {}) or {}
+        self.sentinels[sym] = MicrostructureSentinel(
+            symbol=sym,
+            s0_reference=float(price),
+            soft_floor_pct=float(sentinel_cfg.get("soft_floor_pct", 0.037)),
+            hard_catastrophic_pct=float(self.settings.tier2_stop_pct),
+            opening_buffer_seconds=int(sentinel_cfg.get("opening_buffer_seconds", 90)),
+            vwap_window_seconds=int(sentinel_cfg.get("vwap_window_seconds", 30)),
+        )
+
         # Arm and start AVE Virtual Bracket
         if self.ave_mode != "off":
             try:
@@ -649,11 +779,32 @@ class LiveEngine(_EngineBase):
             except Exception as exc:
                 logger.warning("[%s] Could not initialize AVE bracket: %s", sym, exc)
 
+        # Instantiate MultiTrancheBracket upon confirmed breakout entry (#62)
+        if self.ctx.risk_manager is not None:
+            try:
+                trade_store = getattr(self.ledger, "trade_store", None)
+                self.ctx.risk_manager.create_breakout_bracket(
+                    symbol=sym,
+                    total_shares=filled,
+                    entry_price=float(price),
+                    s0_reference=float(price),
+                    trade_store=trade_store,
+                )
+            except Exception as exc:
+                logger.warning("[%s] Could not initialize MultiTrancheBracket: %s", sym, exc)
+
         return True
 
     # -- exits -------------------------------------------------------------
 
-    async def exit_position(self, symbol: str, reason: str, cancel_stop: bool = True) -> bool:
+    async def exit_position(
+        self,
+        symbol: str,
+        reason: str,
+        cancel_stop: bool = True,
+        limit_price: Optional[float] = None,
+        quantity: Optional[int] = None,
+    ) -> bool:
         sym = symbol.upper()
         if sym in self._exiting:
             return False
@@ -661,15 +812,16 @@ class LiveEngine(_EngineBase):
         if pos is None:
             return False
 
+        qty = quantity if (quantity is not None and 0 < quantity < pos.quantity) else pos.quantity
+
         # Pre-exit GFV veto check: hold overnight if shares were purchased with unsettled funds
-        can_sell, veto_reason = self.ledger.can_sell_position(sym, pos.quantity)
+        can_sell, veto_reason = self.ledger.can_sell_position(sym, qty)
         if not can_sell:
             logger.warning("[%s] Exit blocked by GFV protection (%s). Position held overnight.", sym, veto_reason)
             return False
 
         self._exiting.add(sym)
         try:
-            qty = pos.quantity
             sid = self._stop_ids.pop(sym, None) if cancel_stop else None
             if sid:
                 self._open_order_ids.pop(sid, None)
@@ -679,7 +831,10 @@ class LiveEngine(_EngineBase):
                     logger.warning("[%s] Could not cancel broker stop %s: %s", sym, sid, exc)
 
             try:
-                oid = await asyncio.to_thread(self.om.execute_market_sell, sym, qty, reason)
+                if limit_price is not None:
+                    oid = await asyncio.to_thread(self.om.execute_marketable_limit_sell, sym, qty, limit_price, reason)
+                else:
+                    oid = await asyncio.to_thread(self.om.execute_market_sell, sym, qty, reason)
             except GoodFaithViolationBlockedError as gfv_err:
                 logger.warning("[%s] Market sell blocked by GFV protection (%s). Position held overnight.", sym, gfv_err)
                 return False
@@ -708,10 +863,17 @@ class LiveEngine(_EngineBase):
                 )
             except Exception:
                 pass
-            if filled >= qty and sym in self.ave_brackets:
-                b = self.ave_brackets.pop(sym, None)
-                if b is not None:
-                    b.stop_actor()
+            if pos.quantity <= 0:
+                self.sentinels.pop(sym, None)
+                if self.ctx.risk_manager is not None:
+                    self.ctx.risk_manager.remove_bracket(sym)
+                if sym in self.ave_brackets:
+                    b = self.ave_brackets.pop(sym, None)
+                    if b is not None:
+                        b.stop_actor()
+            else:
+                # Re-arm broker stop for remaining partial quantity
+                await self._rearm_stop(sym, pos.quantity, pos.entry_price)
             return filled >= qty
         finally:
             self._exiting.discard(sym)
@@ -878,6 +1040,26 @@ class SimEngine(_EngineBase):
                             "message": f"Dynamic stop rose to ${pos.stop_price} on {sym}",
                         },
                     )
+            # Multi-Tranche Bracket evaluation (#62)
+            if self.ctx.risk_manager is not None:
+                bracket = self.ctx.risk_manager.get_bracket(sym)
+                if bracket is not None and not bracket.is_closed:
+                    from zoneinfo import ZoneInfo
+                    now_edt = datetime.now(ZoneInfo("America/New_York"))
+                    trade_store = getattr(self.ledger, "trade_store", None)
+                    b_actions = self.ctx.risk_manager.update_bracket_state(
+                        sym, float(price), now_edt, yz_vol=yz_vol,
+                        hurst_exponent=hurst_h, trade_store=trade_store,
+                    )
+                    for b_act in b_actions:
+                        if b_act.action_type == "SELL":
+                            logger.info("[%s] SIM MultiTrancheBracket action: %s %d shares @ $%.2f (%s)",
+                                        sym, b_act.action_type, b_act.shares, b_act.price, b_act.reason)
+                            await self._sim_exit(sym, price, b_act.reason, quantity=b_act.shares)
+                        elif b_act.action_type == "UPDATE_STOP":
+                            if b_act.stop_price is not None:
+                                pos.stop_price = Decimal(str(b_act.stop_price))
+
             if pos.stop_price is not None and price <= pos.stop_price:
                 if self.telemetry is not None:
                     self.telemetry.record_event(
@@ -959,33 +1141,50 @@ class SimEngine(_EngineBase):
                 )
             except Exception:
                 pass
+
+            # Instantiate MultiTrancheBracket upon confirmed breakout entry (#62)
+            if self.ctx.risk_manager is not None:
+                try:
+                    trade_store = getattr(self.ledger, "trade_store", None)
+                    self.ctx.risk_manager.create_breakout_bracket(
+                        symbol=sym,
+                        total_shares=shares,
+                        entry_price=float(price),
+                        s0_reference=float(price),
+                        trade_store=trade_store,
+                    )
+                except Exception as exc:
+                    logger.warning("[%s] Could not initialize Sim MultiTrancheBracket: %s", sym, exc)
         finally:
             self._in_flight.discard(sym)
 
-    async def _sim_exit(self, sym: str, price: Decimal, reason: str) -> bool:
+    async def _sim_exit(self, sym: str, price: Decimal, reason: str, quantity: Optional[int] = None) -> bool:
         if sym in self._exiting:
             return False
         pos = self.ledger.positions.get(sym)
         if pos is None:
             return False
-        can_sell, veto_reason = self.ledger.can_sell_position(sym, pos.quantity)
+        qty = quantity if (quantity is not None and 0 < quantity < pos.quantity) else pos.quantity
+        can_sell, veto_reason = self.ledger.can_sell_position(sym, qty)
         if not can_sell:
             logger.warning("[%s] SIM exit blocked by GFV protection: %s (holding overnight)", sym, veto_reason)
             return False
         self._exiting.add(sym)
         try:
-            self.ledger.record_sell(sym, pos.quantity, price, simulated=True)
-            logger.info("[%s] SIM exit %s @ %s", sym, reason, price)
+            self.ledger.record_sell(sym, qty, price, simulated=True)
+            logger.info("[%s] SIM exit %s: sold %d @ %s", sym, reason, qty, price)
             try:
                 from core.notifier import send_alert
                 send_alert(
-                    title=f"Order Filled: SELL {pos.quantity} {sym} (SIM)",
-                    message=f"Simulated exit {reason}: sold {pos.quantity} {sym} at ${price}.",
+                    title=f"Order Filled: SELL {qty} {sym} (SIM)",
+                    message=f"Simulated exit {reason}: sold {qty} {sym} at ${price}.",
                     priority="default",
                     tags=["moneybag", "outbox_tray"],
                 )
             except Exception:
                 pass
+            if pos.quantity <= 0 and self.ctx.risk_manager is not None:
+                self.ctx.risk_manager.remove_bracket(sym)
             return True
         finally:
             self._exiting.discard(sym)

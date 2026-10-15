@@ -236,6 +236,13 @@ class RecoverySupervisor:
         self.state: str = RecoveryMachineState.DISARMED
         self.bracket: Optional[Bracket] = None
         self.gate = QuoteGate(self.symbol, reference_price=103.60)
+        from execution.microstructure_sentinel import MicrostructureSentinel
+        self.sentinel = MicrostructureSentinel(
+            symbol=self.symbol,
+            s0_reference=103.60,
+            soft_floor_pct=0.037,
+            hard_catastrophic_pct=0.060,
+        )
         self.exit_latched: bool = False
         self.exit_reason: Optional[str] = None
         self.exit_order_id: Optional[str] = None
@@ -435,24 +442,48 @@ class RecoverySupervisor:
         if t_str < "09:30:00":
             return
 
-        # 1. Hard Floor Sentinel ($99.75) Breach Check (Active throughout session)
+        # 1. Microstructure Sentinel Floor Breach Check (#54)
         if not self.exit_latched and self.state in (
             RecoveryMachineState.SENTINEL_SHADOW,
             RecoveryMachineState.SHADOW_FLOOR_ONLY,
             RecoveryMachineState.TRACKING_LIVE,
             RecoveryMachineState.RECALIBRATING,
         ):
-            if quote.bid <= self.cfg.floor or quote.last <= self.cfg.floor:
-                logger.critical(
-                    "[%s] CRITICAL: Hard floor breached! Price: $%.2f, Bid: $%.2f <= Floor: $%.2f",
-                    self.symbol, quote.last, quote.bid, self.cfg.floor,
+            verdict = self.sentinel.evaluate_stop(
+                current_time_edt=now_edt,
+                current_price=quote.last,
+                current_volume=msg.get("volume", 0),
+                bid_price=quote.bid,
+            )
+            if verdict.should_exit:
+                if verdict.exit_type == "EMERGENCY_HARD_SWEEP":
+                    logger.critical(
+                        "[%s] CRITICAL: Hard catastrophic floor breached! Price: $%.2f, Bid: $%.2f <= Hard Floor: $%.2f",
+                        self.symbol, quote.last, quote.bid, self.sentinel.hard_floor,
+                    )
+                    await self._trigger_exit(
+                        reason="EMERGENCY_HARD_SWEEP",
+                        price=quote.last,
+                        order_type="MARKET",
+                    )
+                    return
+                else:
+                    logger.warning(
+                        "[%s] Soft floor breached with confirmed breakdown! (VWAP: $%.2f)",
+                        self.symbol, verdict.current_vwap,
+                    )
+                    pegged_px = verdict.pegged_limit_price or round(quote.bid - 0.02, 2)
+                    await self._trigger_exit(
+                        reason="RECOVERY_FLOOR",
+                        price=pegged_px,
+                        order_type="LIMIT",
+                    )
+                    return
+            elif verdict.reason == "OPENING_AUCTION_NOISE":
+                logger.info(
+                    "[%s] Opening cross price dip ($%.2f) filtered as OPENING_AUCTION_NOISE (soft floor: $%.2f). Exit suppressed.",
+                    self.symbol, quote.last, self.sentinel.soft_floor,
                 )
-                await self._trigger_exit(
-                    reason="RECOVERY_FLOOR",
-                    price=quote.last,
-                    order_type="MARKET",
-                )
-                return
 
         # 2. Tracking Live: Ratchet Stop, Trailing Breach, or Target Breach
         if self.state == RecoveryMachineState.TRACKING_LIVE and not self.exit_latched:

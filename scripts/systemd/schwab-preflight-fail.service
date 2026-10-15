@@ -1,0 +1,11 @@
+[Unit]
+Description=Schwab Preflight Invariant Failure Latch Fallback & Emergency Alert
+
+[Service]
+Type=oneshot
+User=nicho
+Group=nicho
+WorkingDirectory=/home/nicho/schwab_engine
+EnvironmentFile=/home/nicho/schwab_engine/.env
+Environment=ENGINE_STATE_DIR=/home/nicho/schwab_state
+ExecStart=/bin/sh -c 'curl -s -H "Title: 🚨 [PREFLIGHT FAILED] Invariant Breach" -H "Priority: urgent" -H "Tags: rotating_light,fire" -d "CRITICAL: schwab-preflight.service failed on schwab-trader VM. trading.engine_active locked false." https://ntfy.sh/schwab-trader-nrc-8472'

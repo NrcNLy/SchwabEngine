@@ -1477,9 +1477,22 @@ class StrategyEngine:
             self._record_trap_suppression(state.symbol, "15m_ORB")
             return None
 
-        # Pre-signal gate check (e.g. microstructure veto before burning ORB or starting cooldown)
-        if self._pre_filter and not self._pre_filter(state.symbol, "15m_ORB"):
-            return None
+        # Emit zero-allocation telemetry event
+        try:
+            from core.event_ledger import publish_event
+            from core.event_models import SignalGeneratedEvent
+            publish_event(
+                SignalGeneratedEvent(
+                    timestamp=now.isoformat(),
+                    symbol=state.symbol,
+                    strategy="15m_ORB",
+                    rvol=float(rvol),
+                    ses_score=float(getattr(self, "_current_ses_score", 0.0) or 0.0),
+                    s0_price=float(state.orb_high or entry),
+                )
+            )
+        except Exception:
+            pass
 
         return TradeSignal(
             timestamp=now,
@@ -1494,6 +1507,7 @@ class StrategyEngine:
             regime=state.current_regime,
             metrics=metrics,
         )
+
 
     # ------------------------------------------------------------------
     # Strategy 2 — VWAP Mean-Reversion

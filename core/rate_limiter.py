@@ -1,21 +1,32 @@
 """
 core/rate_limiter.py
 ====================
-Thread-safe Token Bucket rate limiter and Schwab Daily Message Quota Enforcer.
+Thread-safe, non-blocking asynchronous rate limiter, Burst Token Bucket,
+and Schwab Daily Message Quota Guard (#66).
 
-Enforces:
-1. Schwab Daily Message Quota (<4,000 calls/day per Schwab Trader API limits):
-   - Hard-cap ceiling of 3,500 calls/day (persisted in schwab_state/daily_quota.json).
-   - Rollover reset at 00:00 UTC.
-   - At >= 3,200 calls: logs WARNING and throttles non-essential background syncs to 60s intervals.
-   - At >= 3,500 calls: hard-blocks all non-essential REST calls; only allows
-     cancellations and emergency liquidations (MANDATORY_FLATTEN).
-2. Per-minute Token Bucket:
-   - Max 100 requests/minute (refill rate = 100/60 = 1.667 tokens/sec), burst capacity 20.
+Enforces institutional rate bounds:
+1. Multi-Tier Token Bucket Architecture:
+   - Tier 1: Sustained Rate Limiter:
+     * 120 requests per rolling 60-second window (2.0 req/sec maximum).
+   - Tier 2: Micro-Burst Bucket:
+     * Max burst capacity: 20 tokens; refill rate: 2 tokens/second.
+   - Tier 3: Daily Quota Hard-Cap:
+     * 3,500 requests per calendar day (UTC reset at 00:00:00).
+     * Warning threshold at 3,000 requests.
+     * Emergency non-essential REST freeze at 3,300 requests (only critical order cancellations/stops allowed).
+2. Priority Preemption:
+   - CRITICAL_EXIT: Bypasses queue up to burst cap, preempts pending NORMAL polling tasks.
+   - NORMAL: Standard quotes, account polling, order placement.
+   - BACKGROUND: Historical data backfill, off-hours workers.
+3. HTTP 429 Protection:
+   - Detects HTTP 429 responses; triggers exponential backoff (initial 2s, 4s, 8s, up to 30s)
+   - Cooldown for all BACKGROUND tasks.
 """
 
 from __future__ import annotations
 
+import asyncio
+import collections
 import json
 import logging
 import os
@@ -24,30 +35,421 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Coroutine, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_QUOTA_FILE = Path("schwab_state/daily_quota.json")
 MAX_DAILY_CALLS = 3500
-WARNING_THRESHOLD = 3200
-DEFAULT_RPM = 100
-DEFAULT_BURST = 20
+FREEZE_THRESHOLD = 3300
+WARNING_THRESHOLD = 3000
+SUSTAINED_RPM = 120
+BURST_CAPACITY = 20.0
+BURST_REFILL_RATE = 2.0  # tokens / second
 
 
 class DailyQuotaExceededError(RuntimeError):
-    """Raised when the 3,500 daily outbound request limit is reached for non-essential calls."""
+    """Raised when the daily outbound request ceiling is reached for non-essential calls."""
 
+
+# ===========================================================================
+# SchwabRateGovernor (Async, Multi-Tier, Priority Preemption, Quota Guard)
+# ===========================================================================
+
+class SchwabRateGovernor:
+    """
+    Thread-safe, non-blocking asynchronous rate governor for Schwab REST API.
+
+    Features:
+    - Tier 1: Sustained rate limiter (120 req / 60s rolling window, 2.0 req/s max).
+    - Tier 2: Micro-burst bucket (capacity 20 tokens, refill 2.0 tokens/s).
+    - Tier 3: Daily quota guard (3,500 daily ceiling, warning at 3,000, freeze at 3,300, 00:00 UTC rollover).
+    - Priority queue preemption: CRITICAL_EXIT preempts pending NORMAL / BACKGROUND tasks.
+    - HTTP 429 backoff: exponential backoff (2s -> 4s -> 8s -> 16s -> 30s) and background cooldown.
+    """
+
+    _instance: Optional[SchwabRateGovernor] = None
+    _singleton_lock: threading.Lock = threading.Lock()
+
+    def __init__(
+        self,
+        sustained_rpm: int = SUSTAINED_RPM,
+        burst_capacity: float = BURST_CAPACITY,
+        burst_refill_rate: float = BURST_REFILL_RATE,
+        daily_ceiling: int = MAX_DAILY_CALLS,
+        warning_threshold: int = WARNING_THRESHOLD,
+        freeze_threshold: int = FREEZE_THRESHOLD,
+        quota_file: Optional[Path | str] = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep_func: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
+    ) -> None:
+        self._sustained_rpm = sustained_rpm
+        self._burst_capacity = float(burst_capacity)
+        self._burst_refill_rate = float(burst_refill_rate)
+        self._daily_ceiling = daily_ceiling
+        self._warning_threshold = warning_threshold
+        self._freeze_threshold = freeze_threshold
+        self._quota_file = Path(quota_file or DEFAULT_QUOTA_FILE)
+        self._clock = clock
+        self._sleep = sleep_func
+
+        self._lock = asyncio.Lock()
+        self._file_lock = threading.RLock()
+
+        # Token bucket state
+        now = self._clock()
+        self._burst_tokens: float = float(burst_capacity)
+        self._last_burst_refill: float = now
+        self._timestamps: collections.deque[float] = collections.deque()
+        self._next_slot: float = now
+        self._critical_burst_used: int = 0
+
+        # Quota state
+        self._cached_date_utc: Optional[str] = None
+        self._daily_count: int = 0
+        self._has_warned: bool = False
+        self._init_quota_state()
+
+        # 429 Backoff & Cooldown state
+        self._consecutive_429: int = 0
+        self._backoff_until: float = 0.0
+        self._current_backoff: float = 0.0
+        self._background_cooldown_until: float = 0.0
+
+        logger.info(
+            "SchwabRateGovernor initialised: sustained_rpm=%d (%.1f req/s), "
+            "burst_capacity=%.1f, refill_rate=%.1f/s, daily_ceiling=%d, freeze_threshold=%d",
+            self._sustained_rpm, self._sustained_rpm / 60.0,
+            self._burst_capacity, self._burst_refill_rate,
+            self._daily_ceiling, self._freeze_threshold,
+        )
+
+    @classmethod
+    def get_instance(
+        cls,
+        sustained_rpm: int = SUSTAINED_RPM,
+        burst_capacity: float = BURST_CAPACITY,
+        burst_refill_rate: float = BURST_REFILL_RATE,
+        daily_ceiling: int = MAX_DAILY_CALLS,
+        warning_threshold: int = WARNING_THRESHOLD,
+        freeze_threshold: int = FREEZE_THRESHOLD,
+        quota_file: Optional[Path | str] = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep_func: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
+    ) -> SchwabRateGovernor:
+        """Thread-safe access to the singleton SchwabRateGovernor."""
+        with cls._singleton_lock:
+            if cls._instance is None:
+                cls._instance = cls(
+                    sustained_rpm=sustained_rpm,
+                    burst_capacity=burst_capacity,
+                    burst_refill_rate=burst_refill_rate,
+                    daily_ceiling=daily_ceiling,
+                    warning_threshold=warning_threshold,
+                    freeze_threshold=freeze_threshold,
+                    quota_file=quota_file,
+                    clock=clock,
+                    sleep_func=sleep_func,
+                )
+            return cls._instance
+
+    @classmethod
+    def reset_instance(cls) -> None:
+        """Reset the singleton instance (primarily for testing)."""
+        with cls._singleton_lock:
+            cls._instance = None
+
+    # ------------------------------------------------------------------
+    # Persistent State Management (Daily Quota)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _current_utc_date() -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def _init_quota_state(self) -> None:
+        with self._file_lock:
+            self._load_or_reset_quota()
+
+    def _load_or_reset_quota(self) -> Tuple[str, int]:
+        today = self._current_utc_date()
+        if not self._quota_file.exists():
+            self._cached_date_utc = today
+            self._daily_count = 0
+            self._save_quota()
+            return today, 0
+
+        try:
+            raw = self._quota_file.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            file_date = data.get("date_utc")
+            count = int(data.get("count", 0))
+
+            if file_date == today:
+                self._cached_date_utc = today
+                self._daily_count = count
+            else:
+                logger.info(
+                    "SchwabRateGovernor: 00:00 UTC rollover detected (previous: %s, now: %s). Resetting daily quota.",
+                    file_date, today,
+                )
+                self._cached_date_utc = today
+                self._daily_count = 0
+                self._has_warned = False
+                self._save_quota()
+        except Exception as exc:
+            logger.warning(
+                "SchwabRateGovernor: failed to parse quota file %s: %s. Re-initializing.",
+                self._quota_file, exc,
+            )
+            self._cached_date_utc = today
+            self._daily_count = 0
+            self._save_quota()
+
+        return self._cached_date_utc, self._daily_count
+
+    def _save_quota(self) -> None:
+        self._quota_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "date_utc": self._cached_date_utc,
+            "count": self._daily_count,
+            "last_updated_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        data_str = json.dumps(payload, indent=2)
+
+        temp_dir = self._quota_file.parent
+        fd, temp_path = tempfile.mkstemp(dir=temp_dir, prefix="quota_", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(data_str)
+            os.replace(temp_path, self._quota_file)
+        except Exception:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+
+    # ------------------------------------------------------------------
+    # Internal Refill & Purge Helpers
+    # ------------------------------------------------------------------
+
+    def _refill_burst(self, now: float) -> None:
+        elapsed = now - self._last_burst_refill
+        if elapsed > 0:
+            self._burst_tokens = min(
+                self._burst_capacity,
+                self._burst_tokens + elapsed * self._burst_refill_rate,
+            )
+            self._last_burst_refill = now
+            # Decay critical burst used proportional to refilled tokens
+            decay = elapsed * self._burst_refill_rate
+            self._critical_burst_used = max(0, int(self._critical_burst_used - decay))
+
+    def _purge_old_timestamps(self, now: float) -> None:
+        cutoff = now - 60.0
+        while self._timestamps and self._timestamps[0] <= cutoff:
+            self._timestamps.popleft()
+
+    # ------------------------------------------------------------------
+    # Rate Governor Core Acquisition
+    # ------------------------------------------------------------------
+
+    async def acquire(self, priority: str = "NORMAL") -> bool:
+        """
+        Non-blocking asynchronous token acquisition with multi-tier bounds.
+
+        Priorities:
+        - `CRITICAL_EXIT`: Order cancellations, stops, emergency liquidations.
+          Bypasses queue up to burst cap (20 tokens), preempts pending NORMAL polling.
+        - `NORMAL`: Standard quotes, order submission, account sync.
+        - `BACKGROUND`: Off-hours workers, historical bar backfill. Cooled off after 429.
+
+        Returns:
+            True if token acquired and caller may proceed.
+            False if request is rejected due to daily quota freeze or hard limit.
+        """
+        priority_norm = priority.upper().strip()
+        is_critical = priority_norm in {
+            "CRITICAL_EXIT",
+            "CRITICAL",
+            "CANCEL",
+            "CANCEL_ORDER",
+            "EMERGENCY",
+            "EMERGENCY_LIQUIDATION",
+            "MANDATORY_FLATTEN",
+            "STOP",
+        }
+
+        async with self._lock:
+            # 1. Daily Quota Verification & Rollover Check
+            with self._file_lock:
+                self._load_or_reset_quota()
+
+            now = self._clock()
+            self._purge_old_timestamps(now)
+            self._refill_burst(now)
+
+            # Warning threshold check
+            if self._daily_count >= self._warning_threshold and not self._has_warned:
+                logger.warning(
+                    "SchwabRateGovernor WARNING: daily request count %d reached warning threshold %d "
+                    "(ceiling: %d, freeze: %d).",
+                    self._daily_count, self._warning_threshold, self._daily_ceiling, self._freeze_threshold,
+                )
+                self._has_warned = True
+
+            # Daily Quota Freeze (>= 3,300 requests) & Hard-Cap (>= 3,500 requests)
+            if self._daily_count >= self._freeze_threshold and not is_critical:
+                logger.error(
+                    "SchwabRateGovernor: EMERGENCY NON-ESSENTIAL REST FREEZE ACTIVE (%d/%d requests). "
+                    "Rejecting %s request.",
+                    self._daily_count, self._daily_ceiling, priority_norm,
+                )
+                return False
+
+            if self._daily_count >= self._daily_ceiling and not is_critical:
+                logger.error(
+                    "SchwabRateGovernor: DAILY CEILING HARD-CAP REACHED (%d/%d). Rejecting %s.",
+                    self._daily_count, self._daily_ceiling, priority_norm,
+                )
+                return False
+
+            # 2. Scheduling & Rate Limit Calculation
+            target_time = now
+
+            if is_critical:
+                # CRITICAL_EXIT: Bypasses queue up to burst capacity
+                if self._critical_burst_used < self._burst_capacity:
+                    self._critical_burst_used += 1
+                    target_time = now
+                else:
+                    # Exceeded burst cap under extreme emergency, schedule immediate next available slot
+                    slot = max(now, self._next_slot) + (1.0 / self._burst_refill_rate)
+                    self._next_slot = slot
+                    target_time = slot
+            else:
+                # NORMAL or BACKGROUND
+                if self._burst_tokens >= 1.0 and len(self._timestamps) < self._sustained_rpm:
+                    # Token available in burst bucket and sustained rate not exceeded
+                    self._burst_tokens -= 1.0
+                    target_time = now
+                else:
+                    # Micro-burst or sustained window limit reached: schedule smooth refill slot
+                    slot = max(now, self._next_slot) + (1.0 / self._burst_refill_rate)
+                    if len(self._timestamps) >= self._sustained_rpm:
+                        # Tier 1 Sustained Rate Limiter: oldest request in rolling 60s must roll out
+                        earliest = self._timestamps[len(self._timestamps) - self._sustained_rpm]
+                        slot = max(slot, earliest + 60.0)
+                    self._next_slot = slot
+                    target_time = slot
+
+            # 3. 429 Backoff & Background Cooldown Application
+            if priority_norm == "BACKGROUND" and self._background_cooldown_until > target_time:
+                target_time = self._background_cooldown_until
+
+            if self._backoff_until > target_time:
+                target_time = self._backoff_until
+
+            wait_needed = max(0.0, target_time - now)
+
+        # 4. Asynchronous Sleep (outside lock to avoid blocking other tasks)
+        if wait_needed > 0:
+            await self._sleep(wait_needed)
+
+        # 5. Commit Request Timestamp & Increment Daily Quota
+        async with self._lock:
+            now_exec = self._clock()
+            self._timestamps.append(now_exec)
+            with self._file_lock:
+                self._daily_count += 1
+                self._save_quota()
+            return True
+
+    def record_response(self, status_code: int, headers: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Record outbound HTTP response status to detect 429 Too Many Requests
+        and trigger exponential backoff.
+        """
+        now = self._clock()
+        if status_code == 429:
+            self._consecutive_429 += 1
+            # Exponential backoff: 2s, 4s, 8s, 16s, up to 30s
+            backoff = min(30.0, 2.0 * (2 ** (self._consecutive_429 - 1)))
+            if headers:
+                retry_after = headers.get("Retry-After") or headers.get("retry-after")
+                if retry_after is not None:
+                    try:
+                        backoff = max(backoff, float(retry_after))
+                    except (ValueError, TypeError):
+                        pass
+
+            self._current_backoff = backoff
+            self._backoff_until = max(self._backoff_until, now + backoff)
+            # Cool off BACKGROUND tasks with extended cooldown
+            self._background_cooldown_until = max(
+                self._background_cooldown_until,
+                now + max(backoff * 2.0, 30.0),
+            )
+            logger.warning(
+                "SchwabRateGovernor: HTTP 429 detected (#%d). Exponential backoff: %.1fs (until %.1f). "
+                "BACKGROUND tasks cooled off until %.1f.",
+                self._consecutive_429, backoff, self._backoff_until, self._background_cooldown_until,
+            )
+        elif 200 <= status_code < 300:
+            if now >= self._backoff_until:
+                self._consecutive_429 = 0
+                self._current_backoff = 0.0
+
+    def get_telemetry(self) -> Dict[str, Any]:
+        """
+        Return institutional telemetry dictionary:
+        - requests_today
+        - current_rpm
+        - burst_tokens_available
+        - quota_remaining
+        """
+        now = self._clock()
+        self._purge_old_timestamps(now)
+        self._refill_burst(now)
+        with self._file_lock:
+            self._load_or_reset_quota()
+            today_count = self._daily_count
+
+        return {
+            "requests_today": today_count,
+            "current_rpm": len(self._timestamps),
+            "burst_tokens_available": round(self._burst_tokens, 2),
+            "quota_remaining": max(0, self._daily_ceiling - today_count),
+            "warning_threshold": self._warning_threshold,
+            "freeze_threshold": self._freeze_threshold,
+            "daily_ceiling": self._daily_ceiling,
+            "consecutive_429": self._consecutive_429,
+            "backoff_active": now < self._backoff_until,
+            "background_cooling_off": now < self._background_cooldown_until,
+        }
+
+
+def get_governor() -> SchwabRateGovernor:
+    """Return the singleton SchwabRateGovernor instance."""
+    return SchwabRateGovernor.get_instance()
+
+
+# ===========================================================================
+# Backward Compatibility Wrappers (TokenBucket, SchwabRateLimiter)
+# ===========================================================================
 
 class TokenBucket:
     """
-    Thread-safe token bucket implementation.
-
+    Thread-safe token bucket implementation for synchronous components.
     Tokens refill continuously at `refill_rate` tokens/second up to `capacity`.
-    Each API call must acquire one token via `acquire()` before proceeding.
     """
 
-    def __init__(self, capacity: float, refill_rate: float, reserve: float = 8.0, max_debt: float = 5.0) -> None:
+    def __init__(
+        self,
+        capacity: float = BURST_CAPACITY,
+        refill_rate: float = BURST_REFILL_RATE,
+        reserve: float = 8.0,
+        max_debt: float = 5.0,
+    ) -> None:
         if capacity <= 0:
             raise ValueError(f"capacity must be > 0, got {capacity}")
         if refill_rate <= 0:
@@ -57,18 +459,11 @@ class TokenBucket:
         self._refill_rate: float = refill_rate
         self._reserve: float = reserve
         self._max_debt: float = max_debt
-        self._tokens: float = capacity          # Start full
+        self._tokens: float = capacity
         self._last_refill: float = time.monotonic()
         self._lock: threading.Lock = threading.Lock()
 
-        logger.info(
-            "TokenBucket initialised: capacity=%.1f tokens, "
-            "refill_rate=%.2f tokens/sec (≈%.0f RPM ceiling), reserve=%.1f, max_debt=%.1f",
-            capacity, refill_rate, refill_rate * 60, reserve, max_debt,
-        )
-
     def _refill(self) -> None:
-        """Credit elapsed tokens since last refill (call inside lock)."""
         now = time.monotonic()
         elapsed = now - self._last_refill
         credited = elapsed * self._refill_rate
@@ -81,16 +476,6 @@ class TokenBucket:
         timeout: Optional[float] = None,
         is_essential: bool = False,
     ) -> bool:
-        """
-        Block until `tokens` tokens are available and consume them.
-
-        Non-essential requests cannot consume into the `reserve` (default 8 tokens).
-        Essential requests can consume into the reserve and even go into bounded debt (down to -max_debt).
-
-        Returns:
-            True  — tokens acquired, caller may proceed.
-            False — timed out before tokens became available.
-        """
         if tokens > self._capacity:
             raise ValueError(
                 f"Requested {tokens} tokens exceeds bucket capacity {self._capacity}"
@@ -124,7 +509,6 @@ class TokenBucket:
             time.sleep(min(sleep_duration, 0.05))
 
     def available(self) -> float:
-        """Return current token count (approximate — for monitoring only)."""
         with self._lock:
             self._refill()
             return self._tokens
@@ -139,14 +523,7 @@ class TokenBucket:
 
 class SchwabRateLimiter:
     """
-    Singleton rate limiter and daily message quota enforcer for the Schwab API.
-
-    Features:
-    - Daily call tracker persisted to `schwab_state/daily_quota.json`, reset at 00:00 UTC.
-    - Warning threshold at 3,200 calls/day: triggers sync throttling to 60s.
-    - Hard ceiling at 3,500 calls/day: blocks all non-essential REST calls; only allows
-      cancellations and emergency liquidations (MANDATORY_FLATTEN).
-    - Per-minute token bucket: max 100 requests/minute, burst 20.
+    Synchronous rate limiter and daily message quota enforcer for backward compatibility.
     """
 
     _instance: Optional[SchwabRateLimiter] = None
@@ -156,9 +533,9 @@ class SchwabRateLimiter:
         self,
         quota_file: Optional[Path | str] = None,
         max_daily_calls: int = MAX_DAILY_CALLS,
-        warning_threshold: int = WARNING_THRESHOLD,
-        capacity: float = DEFAULT_BURST,
-        refill_rate: float = DEFAULT_RPM / 60.0,
+        warning_threshold: int = 3200,
+        capacity: float = BURST_CAPACITY,
+        refill_rate: float = 100.0 / 60.0,
     ) -> None:
         self._quota_file = Path(quota_file or DEFAULT_QUOTA_FILE)
         self._max_daily_calls = max_daily_calls
@@ -167,7 +544,6 @@ class SchwabRateLimiter:
         self._bucket = TokenBucket(capacity=capacity, refill_rate=refill_rate)
         self._lock = threading.RLock()
 
-        # In-memory cached quota state
         self._cached_date_utc: Optional[str] = None
         self._cached_count: int = 0
         self._has_warned: bool = False
@@ -179,11 +555,10 @@ class SchwabRateLimiter:
         cls,
         quota_file: Optional[Path | str] = None,
         max_daily_calls: int = MAX_DAILY_CALLS,
-        warning_threshold: int = WARNING_THRESHOLD,
-        capacity: float = DEFAULT_BURST,
-        refill_rate: float = DEFAULT_RPM / 60.0,
+        warning_threshold: int = 3200,
+        capacity: float = BURST_CAPACITY,
+        refill_rate: float = 100.0 / 60.0,
     ) -> SchwabRateLimiter:
-        """Thread-safe access to the singleton rate limiter."""
         with cls._singleton_lock:
             if cls._instance is None:
                 cls._instance = cls(
@@ -197,13 +572,8 @@ class SchwabRateLimiter:
 
     @classmethod
     def reset_instance(cls) -> None:
-        """Reset the singleton instance (primarily for unit tests)."""
         with cls._singleton_lock:
             cls._instance = None
-
-    # ------------------------------------------------------------------
-    # Persistent State Management
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _current_utc_date() -> str:
@@ -214,7 +584,6 @@ class SchwabRateLimiter:
             self._load_or_reset_quota()
 
     def _load_or_reset_quota(self) -> Tuple[str, int]:
-        """Loads quota from disk. If the stored date is older than today UTC, resets count to 0."""
         today = self._current_utc_date()
         if not self._quota_file.exists():
             self._cached_date_utc = today
@@ -232,18 +601,10 @@ class SchwabRateLimiter:
                 self._cached_date_utc = today
                 self._cached_count = count
             else:
-                logger.info(
-                    "SchwabRateLimiter: 00:00 UTC rollover detected (previous: %s, now: %s). Resetting daily quota.",
-                    file_date, today,
-                )
                 self._cached_date_utc = today
                 self._cached_count = 0
                 self._save_quota()
-        except Exception as exc:
-            logger.warning(
-                "SchwabRateLimiter: failed to parse quota file %s: %s. Re-initializing.",
-                self._quota_file, exc,
-            )
+        except Exception:
             self._cached_date_utc = today
             self._cached_count = 0
             self._save_quota()
@@ -251,7 +612,6 @@ class SchwabRateLimiter:
         return self._cached_date_utc, self._cached_count
 
     def _save_quota(self) -> None:
-        """Persists current date and call count atomically."""
         self._quota_file.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "date_utc": self._cached_date_utc,
@@ -260,7 +620,6 @@ class SchwabRateLimiter:
         }
         data_str = json.dumps(payload, indent=2)
 
-        # Atomic write
         temp_dir = self._quota_file.parent
         fd, temp_path = tempfile.mkstemp(dir=temp_dir, prefix="quota_", suffix=".tmp")
         try:
@@ -272,29 +631,19 @@ class SchwabRateLimiter:
                 os.remove(temp_path)
             raise
 
-    # ------------------------------------------------------------------
-    # Quota Inquiries & Checks
-    # ------------------------------------------------------------------
-
     def get_daily_count(self) -> int:
-        """Returns the current outbound request count for today UTC."""
         with self._lock:
             _, count = self._load_or_reset_quota()
             return count
 
     def should_throttle_sync(self) -> bool:
-        """True if the daily request count exceeds the 3,200 warning threshold."""
         return self.get_daily_count() >= self._warning_threshold
 
     def is_daily_limit_exceeded(self) -> bool:
-        """True if the daily count has reached or exceeded 3,500."""
         return self.get_daily_count() >= self._max_daily_calls
 
     @staticmethod
     def is_essential_call(action: str = "NORMAL", is_essential: bool = False) -> bool:
-        """
-        Returns True if the action is essential: order cancellations or emergency liquidations.
-        """
         if is_essential:
             return True
         action_upper = action.upper()
@@ -307,11 +656,8 @@ class SchwabRateLimiter:
             "MANDATORY_FLATTEN",
             "FLATTEN",
             "DELETE",
+            "CRITICAL_EXIT",
         }
-
-    # ------------------------------------------------------------------
-    # Token & Quota Acquisition
-    # ------------------------------------------------------------------
 
     def acquire(
         self,
@@ -320,16 +666,6 @@ class SchwabRateLimiter:
         is_essential: bool = False,
         action: str = "NORMAL",
     ) -> bool:
-        """
-        Acquire rate-limited token and increment daily quota.
-
-        Rules:
-        - If daily count >= 3,500 and request is not essential:
-          raises DailyQuotaExceededError.
-        - If daily count >= 3,200: logs WARNING.
-        - Essential requests (cancellations and MANDATORY_FLATTEN) are permitted even if quota >= 3,500.
-        - Acquires token from the per-minute token bucket (max 100 RPM, burst 20).
-        """
         with self._lock:
             _, current_count = self._load_or_reset_quota()
             essential = self.is_essential_call(action, is_essential)
@@ -358,12 +694,10 @@ class SchwabRateLimiter:
                     )
                     self._has_warned = True
 
-        # Acquire token from the per-minute bucket with reserve & debt rules
         acquired = self._bucket.acquire(tokens=tokens, timeout=timeout, is_essential=essential)
         if not acquired:
             return False
 
-        # On successful token acquisition, increment daily count
         with self._lock:
             _, count = self._load_or_reset_quota()
             self._cached_count = count + int(tokens)
@@ -378,8 +712,6 @@ class SchwabRateLimiter:
         is_essential: bool = False,
         action: str = "NORMAL",
     ) -> bool:
-        """Asynchronous wrapper around acquire() to prevent blocking the event loop."""
-        import asyncio
         return await asyncio.to_thread(
             self.acquire,
             tokens=tokens,
@@ -389,7 +721,6 @@ class SchwabRateLimiter:
         )
 
     def available(self) -> float:
-        """Return available tokens in the bucket."""
         return self._bucket.available()
 
     def __repr__(self) -> str:
@@ -400,12 +731,10 @@ class SchwabRateLimiter:
 
 
 def build_from_config(cfg: dict) -> SchwabRateLimiter:
-    """
-    Construct or return the singleton SchwabRateLimiter from config.
-    """
+    """Construct or return the singleton SchwabRateLimiter from config."""
     rl_cfg = cfg.get("rate_limiter", {})
-    capacity = float(rl_cfg.get("capacity", DEFAULT_BURST))
-    refill_rate = float(rl_cfg.get("refill_rate", DEFAULT_RPM / 60.0))
+    capacity = float(rl_cfg.get("capacity", BURST_CAPACITY))
+    refill_rate = float(rl_cfg.get("refill_rate", SUSTAINED_RPM / 60.0))
     quota_file = rl_cfg.get("quota_file", DEFAULT_QUOTA_FILE)
     max_daily = int(rl_cfg.get("max_daily_calls", MAX_DAILY_CALLS))
     warn_thresh = int(rl_cfg.get("warning_threshold", WARNING_THRESHOLD))

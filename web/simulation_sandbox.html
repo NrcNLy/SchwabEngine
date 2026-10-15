@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SchwabEngine - Real-Time Telemetry & Simulation Sandbox</title>
+  <!-- Tailwind CSS via CDN for Material 3 dark styling -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            surface: {
+              DEFAULT: '#090d16',
+              container: '#111827',
+              high: '#1f2937',
+              highest: '#374151'
+            },
+            brand: {
+              50: '#ecfdf5',
+              400: '#34d399',
+              500: '#10b981',
+              600: '#059669',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @keyframes pulse-fast {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.95); }
+    }
+    .pulse-dot {
+      animation: pulse-fast 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+    /* Custom scrollbars */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #090d16; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: #4b5563; }
+  </style>
+</head>
+<body class="bg-[#090d16] text-gray-100 min-h-screen font-sans antialiased selection:bg-emerald-500 selection:text-white">
+
+  <!-- Top App Bar -->
+  <header class="border-b border-gray-800 bg-[#0f172a]/90 backdrop-blur sticky top-0 z-50 px-4 sm:px-6 py-3.5">
+    <div class="max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+      <div class="flex items-center gap-3">
+        <div class="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+          </svg>
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-base font-bold text-gray-100">SchwabEngine Core 1 Telemetry Gateway</h1>
+            <span class="text-[10px] font-mono uppercase px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
+              WebSocket 1Hz
+            </span>
+          </div>
+          <p class="text-xs text-gray-400">Live Yang-Zhang Envelope Coordinates & Dashboard Simulation Bridge (#68)</p>
+        </div>
+      </div>
+
+      <!-- Live Connection Pill -->
+      <div class="flex items-center gap-3">
+        <div id="conn-pill" class="flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono border bg-amber-500/10 border-amber-500/30 text-amber-400">
+          <span id="conn-dot" class="w-2 h-2 rounded-full bg-amber-400 pulse-dot"></span>
+          <span id="conn-text">INITIALIZING...</span>
+        </div>
+        <button id="btn-reconnect" class="px-3 py-1 text-xs font-medium rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition">
+          Reconnect
+        </button>
+        <button id="btn-poll-snapshot" class="px-3 py-1 text-xs font-medium rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 transition">
+          REST Snapshot
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+
+    <!-- Engine Status Strip -->
+    <section class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div class="p-4 rounded-2xl bg-gray-900/80 border border-gray-800 shadow-sm flex flex-col justify-between">
+        <span class="text-xs uppercase font-mono text-gray-400">Engine State</span>
+        <div class="mt-2 flex items-center gap-2">
+          <span id="val-engine-state" class="text-xl font-bold font-mono text-emerald-400">STANDBY</span>
+        </div>
+        <span class="text-[11px] text-gray-500 mt-1" id="val-engine-sub">Core 0 Trading Loop</span>
+      </div>
+
+      <div class="p-4 rounded-2xl bg-gray-900/80 border border-gray-800 shadow-sm flex flex-col justify-between">
+        <span class="text-xs uppercase font-mono text-gray-400">Macro SES Score</span>
+        <div class="mt-2 flex items-baseline gap-2">
+          <span id="val-ses-score" class="text-xl font-bold font-mono text-cyan-400">0.12</span>
+          <span id="val-ses-regime" class="text-xs font-mono px-1.5 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-700">CHOP</span>
+        </div>
+        <span class="text-[11px] text-gray-500 mt-1" id="val-ses-bias">Bias: NEUTRAL</span>
+      </div>
+
+      <div class="p-4 rounded-2xl bg-gray-900/80 border border-gray-800 shadow-sm flex flex-col justify-between">
+        <span class="text-xs uppercase font-mono text-gray-400">Settled Cash</span>
+        <div class="mt-2">
+          <span id="val-settled-cash" class="text-xl font-bold font-mono text-emerald-400">$3,786.27</span>
+        </div>
+        <span class="text-[11px] text-gray-500 mt-1" id="val-total-nlv">Total NLV: $5,563.97</span>
+      </div>
+
+      <div class="p-4 rounded-2xl bg-gray-900/80 border border-gray-800 shadow-sm flex flex-col justify-between">
+        <span class="text-xs uppercase font-mono text-gray-400">Unsettled Cash (T+1)</span>
+        <div class="mt-2 flex items-baseline gap-2">
+          <span id="val-unsettled-cash" class="text-xl font-bold font-mono text-amber-400">$1,777.70</span>
+        </div>
+        <span class="text-[11px] text-gray-500 mt-1" id="val-gfv-count">GFV Count: 0 (Zero Violation Invariant)</span>
+      </div>
+    </section>
+
+    <!-- Main Grid: Envelope Coordinates & Interactive Sandbox -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+      <!-- Left 2 Cols: Envelope Visualization & Coordinates -->
+      <section class="lg:col-span-2 space-y-6">
+        <div class="p-5 rounded-2xl bg-gray-900/90 border border-gray-800 shadow-md space-y-4">
+          <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+            <div class="flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-cyan-400"></span>
+              <h2 class="text-sm font-bold tracking-wide uppercase font-mono text-gray-200">
+                Yang-Zhang Volatility Envelope Coordinates (<span id="envelope-symbol">SOXL</span>)
+              </h2>
+            </div>
+            <span class="text-xs font-mono text-gray-400" id="last-update-time">Timestamp: —</span>
+          </div>
+
+          <!-- Coordinate Badges -->
+          <div class="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <div class="p-3 rounded-xl bg-gray-800/60 border border-gray-700/60 text-center">
+              <span class="text-[10px] uppercase font-mono text-emerald-400 block mb-1">Target (+4.0%)</span>
+              <span id="coord-target" class="text-lg font-bold font-mono text-emerald-300">$106.37</span>
+            </div>
+            <div class="p-3 rounded-xl bg-gray-800/60 border border-gray-700/60 text-center">
+              <span class="text-[10px] uppercase font-mono text-cyan-400 block mb-1">High Watermark</span>
+              <span id="coord-hwm" class="text-lg font-bold font-mono text-cyan-300">$102.50</span>
+            </div>
+            <div class="p-3 rounded-xl bg-gray-800/60 border border-gray-700/60 text-center">
+              <span class="text-[10px] uppercase font-mono text-blue-400 block mb-1">Reference S0</span>
+              <span id="coord-s0" class="text-lg font-bold font-mono text-blue-300">$102.28</span>
+            </div>
+            <div class="p-3 rounded-xl bg-gray-800/60 border border-gray-700/60 text-center">
+              <span class="text-[10px] uppercase font-mono text-amber-400 block mb-1">Ratchet Trail</span>
+              <span id="coord-trail" class="text-lg font-bold font-mono text-amber-300">$99.85</span>
+            </div>
+            <div class="p-3 rounded-xl bg-gray-800/60 border border-gray-700/60 text-center col-span-2 sm:col-span-1">
+              <span class="text-[10px] uppercase font-mono text-rose-400 block mb-1">Catastrophic Floor</span>
+              <span id="coord-floor" class="text-lg font-bold font-mono text-rose-300">$96.23</span>
+            </div>
+          </div>
+
+          <!-- Visual Cone Diagram -->
+          <div class="relative w-full h-44 bg-gray-950 rounded-xl border border-gray-800 p-4 flex flex-col justify-between overflow-hidden">
+            <!-- Upper Target Line -->
+            <div class="flex items-center justify-between text-xs font-mono text-emerald-400 border-b border-dashed border-emerald-500/40 pb-1">
+              <span>Upper Target Cone (Take-Profit Band)</span>
+              <span id="bar-target">$106.37</span>
+            </div>
+            <!-- High Watermark -->
+            <div class="flex items-center justify-between text-xs font-mono text-cyan-400 border-b border-dotted border-cyan-500/40 pb-1">
+              <span>High Watermark Supremum sup M(t)</span>
+              <span id="bar-hwm">$102.50</span>
+            </div>
+            <!-- S0 Entry -->
+            <div class="flex items-center justify-between text-xs font-mono text-blue-400 border-b border-blue-500/40 pb-1">
+              <span>S0 Entry Reference</span>
+              <span id="bar-s0">$102.28</span>
+            </div>
+            <!-- Trail Stop -->
+            <div class="flex items-center justify-between text-xs font-mono text-amber-400 border-b border-dashed border-amber-500/40 pb-1">
+              <span>Dynamic Ratchet Soft Floor (30s VWAP pegged)</span>
+              <span id="bar-trail">$99.85</span>
+            </div>
+            <!-- Hard Floor -->
+            <div class="flex items-center justify-between text-xs font-mono text-rose-400 border-b border-rose-500/40 pb-1">
+              <span>Emergency Catastrophic Sweep Floor (-6.0%)</span>
+              <span id="bar-floor">$96.23</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Telemetry Inbound Stream Console -->
+        <div class="p-5 rounded-2xl bg-gray-900/90 border border-gray-800 shadow-md space-y-3">
+          <div class="flex items-center justify-between border-b border-gray-800 pb-2">
+            <h3 class="text-xs font-bold font-mono text-gray-300 uppercase">Live WebSocket Telemetry Frame Inspector</h3>
+            <span class="text-[11px] font-mono text-gray-500" id="packet-counter">Packets: 0</span>
+          </div>
+          <pre id="json-inspector" class="bg-gray-950 text-emerald-400 font-mono text-xs p-3.5 rounded-xl border border-gray-800 overflow-x-auto max-h-56">Waiting for WebSocket telemetry broadcast...</pre>
+        </div>
+      </section>
+
+      <!-- Right 1 Col: Interactive Simulation Sandbox Controls -->
+      <section class="space-y-6">
+        <div class="p-5 rounded-2xl bg-gray-900/90 border border-gray-800 shadow-md space-y-4">
+          <div class="flex items-center gap-2 border-b border-gray-800 pb-3">
+            <span class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+            <h2 class="text-sm font-bold tracking-wide uppercase font-mono text-gray-200">Simulation Controls</h2>
+          </div>
+
+          <div class="space-y-3">
+            <div>
+              <label class="text-xs font-mono text-gray-400 block mb-1">Simulated Reference S0 Price</label>
+              <input type="number" id="sim-s0" step="0.10" value="102.28" class="w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono text-gray-200 focus:outline-none focus:border-emerald-500">
+            </div>
+
+            <div>
+              <label class="text-xs font-mono text-gray-400 block mb-1">Simulated Current Price (S)</label>
+              <input type="number" id="sim-px" step="0.10" value="102.35" class="w-full bg-gray-950 border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono text-gray-200 focus:outline-none focus:border-emerald-500">
+            </div>
+
+            <div class="pt-2 border-t border-gray-800 space-y-2">
+              <span class="text-xs font-mono text-gray-400 block">Fast Trigger Scenarios</span>
+              <button id="btn-sim-target" class="w-full text-left px-3 py-2 rounded-lg bg-emerald-950/40 hover:bg-emerald-900/50 border border-emerald-500/30 text-emerald-300 text-xs font-mono transition flex justify-between items-center">
+                <span>Upper Target Touch (+4.0%)</span>
+                <span>$106.37</span>
+              </button>
+              <button id="btn-sim-trail" class="w-full text-left px-3 py-2 rounded-lg bg-amber-950/40 hover:bg-amber-900/50 border border-amber-500/30 text-amber-300 text-xs font-mono transition flex justify-between items-center">
+                <span>Ratchet Soft Trail Touch</span>
+                <span>$99.85</span>
+              </button>
+              <button id="btn-sim-catastrophic" class="w-full text-left px-3 py-2 rounded-lg bg-rose-950/40 hover:bg-rose-900/50 border border-rose-500/30 text-rose-300 text-xs font-mono transition flex justify-between items-center">
+                <span>Catastrophic Floor Breach (-6.0%)</span>
+                <span>$96.23</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="p-5 rounded-2xl bg-gray-900/90 border border-gray-800 shadow-md space-y-3">
+          <h3 class="text-xs font-bold font-mono text-gray-300 uppercase">Architecture Invariants (#68)</h3>
+          <ul class="text-xs text-gray-400 space-y-2 list-disc list-inside">
+            <li><span class="text-gray-200">1Hz Telemetry:</span> Periodic telemetry broadcast decoupled from Core 0 trade loop.</li>
+            <li><span class="text-gray-200">Automatic Reconnect:</span> Exponential retry with 2s polling fallback.</li>
+            <li><span class="text-gray-200">15s Keep-Alive:</span> WebSocket ping heartbeat keeps connection alive through cloud proxies.</li>
+          </ul>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <!-- WebSocket Client & Real-Time Bridge Script -->
+  <script>
+    (function() {
+      let ws = null;
+      let reconnectTimer = null;
+      let packetCount = 0;
+      const MAX_RECONNECT_DELAY = 10000;
+      let reconnectDelay = 1000;
+
+      // DOM Elements
+      const connPill = document.getElementById('conn-pill');
+      const connDot = document.getElementById('conn-dot');
+      const connText = document.getElementById('conn-text');
+      const btnReconnect = document.getElementById('btn-reconnect');
+      const btnPollSnapshot = document.getElementById('btn-poll-snapshot');
+      const jsonInspector = document.getElementById('json-inspector');
+      const packetCounter = document.getElementById('packet-counter');
+      const lastUpdateTime = document.getElementById('last-update-time');
+
+      // Metric DOM Elements
+      const elEngineState = document.getElementById('val-engine-state');
+      const elSesScore = document.getElementById('val-ses-score');
+      const elSesRegime = document.getElementById('val-ses-regime');
+      const elSesBias = document.getElementById('val-ses-bias');
+      const elSettledCash = document.getElementById('val-settled-cash');
+      const elTotalNlv = document.getElementById('val-total-nlv');
+      const elUnsettledCash = document.getElementById('val-unsettled-cash');
+      const elGfvCount = document.getElementById('val-gfv-count');
+
+      // Coordinate Elements
+      const elCoordTarget = document.getElementById('coord-target');
+      const elCoordHwm = document.getElementById('coord-hwm');
+      const elCoordS0 = document.getElementById('coord-s0');
+      const elCoordTrail = document.getElementById('coord-trail');
+      const elCoordFloor = document.getElementById('coord-floor');
+
+      const elBarTarget = document.getElementById('bar-target');
+      const elBarHwm = document.getElementById('bar-hwm');
+      const elBarS0 = document.getElementById('bar-s0');
+      const elBarTrail = document.getElementById('bar-trail');
+      const elBarFloor = document.getElementById('bar-floor');
+
+      function formatUSD(val) {
+        if (val === undefined || val === null) return '$0.00';
+        return '$' + Number(val).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      }
+
+      function updateConnectionUI(status) {
+        if (status === 'connected') {
+          connPill.className = 'flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono border bg-emerald-500/10 border-emerald-500/30 text-emerald-400';
+          connDot.className = 'w-2 h-2 rounded-full bg-emerald-400 pulse-dot';
+          connText.textContent = 'LIVE 1Hz STREAM';
+        } else if (status === 'reconnecting') {
+          connPill.className = 'flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono border bg-amber-500/10 border-amber-500/30 text-amber-400';
+          connDot.className = 'w-2 h-2 rounded-full bg-amber-400 pulse-dot';
+          connText.textContent = 'RECONNECTING...';
+        } else {
+          connPill.className = 'flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono border bg-rose-500/10 border-rose-500/30 text-rose-400';
+          connDot.className = 'w-2 h-2 rounded-full bg-rose-400';
+          connText.textContent = 'DISCONNECTED';
+        }
+      }
+
+      function handleTelemetryPacket(data) {
+        if (!data) return;
+        packetCount++;
+        packetCounter.textContent = `Packets: ${packetCount}`;
+        lastUpdateTime.textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+
+        // Render in JSON Inspector
+        jsonInspector.textContent = JSON.stringify(data, null, 2);
+
+        // Update Engine State
+        if (data.engine_state) {
+          elEngineState.textContent = data.engine_state;
+          if (data.engine_state === 'RUNNING') {
+            elEngineState.className = 'text-xl font-bold font-mono text-emerald-400';
+          } else if (data.engine_state === 'FLUSHED') {
+            elEngineState.className = 'text-xl font-bold font-mono text-rose-400';
+          } else {
+            elEngineState.className = 'text-xl font-bold font-mono text-amber-400';
+          }
+        }
+
+        // Update Regime
+        if (data.regime) {
+          elSesScore.textContent = data.regime.ses !== undefined ? Number(data.regime.ses).toFixed(2) : '0.12';
+          elSesRegime.textContent = data.regime.classification || 'CHOP';
+          elSesBias.textContent = `Bias: ${data.regime.bias || 'NEUTRAL'}`;
+        }
+
+        // Update Balances
+        if (data.balances) {
+          elSettledCash.textContent = formatUSD(data.balances.settled_cash);
+          elTotalNlv.textContent = `Total NLV: ${formatUSD(data.balances.total_nlv)}`;
+          elUnsettledCash.textContent = formatUSD(data.balances.unsettled_cash);
+          elGfvCount.textContent = `GFV Count: ${data.balances.gfv_count || 0} (Zero Violation Invariant)`;
+        }
+
+        // Update Envelopes
+        if (data.envelopes) {
+          const sym = Object.keys(data.envelopes)[0] || 'SOXL';
+          const env = data.envelopes[sym];
+          if (env) {
+            document.getElementById('envelope-symbol').textContent = sym;
+            elCoordTarget.textContent = formatUSD(env.target);
+            elCoordHwm.textContent = formatUSD(env.high_watermark);
+            elCoordS0.textContent = formatUSD(env.s0);
+            elCoordTrail.textContent = formatUSD(env.trail_stop);
+            elCoordFloor.textContent = formatUSD(env.catastrophic_floor);
+
+            elBarTarget.textContent = formatUSD(env.target);
+            elBarHwm.textContent = formatUSD(env.high_watermark);
+            elBarS0.textContent = formatUSD(env.s0);
+            elBarTrail.textContent = formatUSD(env.trail_stop);
+            elBarFloor.textContent = formatUSD(env.catastrophic_floor);
+          }
+        }
+      }
+
+      function connectWebSocket() {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host || 'localhost:8080';
+        const wsUrl = `${protocol}//${host}/ws/telemetry`;
+
+        updateConnectionUI('reconnecting');
+
+        try {
+          ws = new WebSocket(wsUrl);
+
+          ws.onopen = function() {
+            reconnectDelay = 1000;
+            updateConnectionUI('connected');
+          };
+
+          ws.onmessage = function(event) {
+            try {
+              const data = JSON.parse(event.data);
+              if (data.type === 'ping') {
+                ws.send(JSON.stringify({ type: 'pong' }));
+                return;
+              }
+              handleTelemetryPacket(data);
+            } catch (err) {
+              console.debug('Error parsing telemetry packet:', err);
+            }
+          };
+
+          ws.onclose = function() {
+            updateConnectionUI('reconnecting');
+            scheduleReconnect();
+          };
+
+          ws.onerror = function(err) {
+            console.debug('WebSocket error encountered:', err);
+            try { ws.close(); } catch(e) {}
+          };
+        } catch (err) {
+          console.debug('Failed to establish WebSocket:', err);
+          scheduleReconnect();
+        }
+      }
+
+      function scheduleReconnect() {
+        if (reconnectTimer) return;
+        reconnectTimer = setTimeout(function() {
+          reconnectTimer = null;
+          connectWebSocket();
+        }, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 1.5, MAX_RECONNECT_DELAY);
+      }
+
+      // REST Polling Fallback
+      async function pollSnapshot() {
+        try {
+          const resp = await fetch('/api/telemetry/snapshot');
+          if (resp.ok) {
+            const data = await resp.json();
+            handleTelemetryPacket(data);
+          }
+        } catch (err) {
+          console.debug('Snapshot poll error:', err);
+        }
+      }
+
+      btnReconnect.addEventListener('click', function() {
+        if (ws) {
+          try { ws.close(); } catch(e) {}
+        }
+        connectWebSocket();
+      });
+
+      btnPollSnapshot.addEventListener('click', pollSnapshot);
+
+      // Simulation Scenario Buttons
+      document.getElementById('btn-sim-target').addEventListener('click', function() {
+        document.getElementById('sim-px').value = '106.37';
+      });
+      document.getElementById('btn-sim-trail').addEventListener('click', function() {
+        document.getElementById('sim-px').value = '99.85';
+      });
+      document.getElementById('btn-sim-catastrophic').addEventListener('click', function() {
+        document.getElementById('sim-px').value = '96.23';
+      });
+
+      // Auto-connect on page load
+      connectWebSocket();
+    })();
+  </script>
+</body>
+</html>

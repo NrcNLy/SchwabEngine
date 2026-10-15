@@ -37,6 +37,7 @@ from core.liquidity_models import CollateralInvariantState, MacroLiquidityEvent,
 from core.paths import MACRO_STATE_FILE
 from core.runtime import EngineContext, build_ledger, ledger_buying_power, load_config
 from execution.risk_manager import RiskEngine
+from execution.bracket_manager import MultiTrancheBracket, MultiTrancheBracketManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")
 logger = logging.getLogger("main")
@@ -393,6 +394,7 @@ async def run(args: argparse.Namespace) -> int:
 
     ctx = EngineContext(cfg, live=live)
     ctx.risk_manager = RiskEngine()
+    ctx.bracket_manager = MultiTrancheBracketManager()
     await asyncio.to_thread(ctx.load_persisted_policy)
 
     loop = asyncio.get_running_loop()
@@ -575,10 +577,14 @@ def run_self_test() -> int:
     ctx = EngineContext(cfg, live=False)
     ctx.ledgers["sandbox"] = build_ledger(cfg, live=False)
     ctx.risk_manager = RiskEngine()
+    ctx.bracket_manager = MultiTrancheBracketManager()
+    bracket = ctx.risk_manager.create_breakout_bracket("SOXL", 100, 100.0)
+    assert bracket is not None
+    assert bracket.tranche_1_filled is False
     app = build_app(ctx)
     if app is None:
         return 1
-    logger.info("Test mode: FastAPI app built successfully. Contract verified.")
+    logger.info("Test mode: FastAPI app and MultiTrancheBracket contract verified.")
     return 0
 
 

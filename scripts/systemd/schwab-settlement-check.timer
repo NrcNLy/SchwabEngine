@@ -1,0 +1,10 @@
+[Unit]
+Description=Trigger Schwab Friday Settlement Check at 2026-10-16 09:30:05 EDT (13:30:05 UTC)
+
+[Timer]
+OnCalendar=2026-10-16 13:30:05 UTC
+Persistent=true
+Unit=schwab-settlement-check.service
+
+[Install]
+WantedBy=timers.target

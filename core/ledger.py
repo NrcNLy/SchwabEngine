@@ -171,6 +171,7 @@ class SettlementLedger:
         data_source: str = "SANDBOX_SIM",
         env: str = "active",
         trade_store: Optional[Any] = None,
+        sizing_governor: Optional[Any] = None,
     ):
         self._lock = threading.RLock()
         self.data_source = data_source
@@ -180,6 +181,7 @@ class SettlementLedger:
         self.dd_pct = _d(daily_drawdown_pct)
         self.cash_buffer = _d(cash_buffer)
         self.trade_store = trade_store
+        self.sizing_governor = sizing_governor
 
         self._settled: Decimal = q(_d(baseline_settled))
         self._lots: List[UnsettledLot] = []
@@ -528,11 +530,15 @@ class SettlementLedger:
             )
             self._trades.append(rec)
             if self.trade_store is not None:
+                alpha = getattr(self.sizing_governor, "alpha", 10.0) if self.sizing_governor is not None else 10.0
+                beta = getattr(self.sizing_governor, "beta", 10.0) if self.sizing_governor is not None else 10.0
+                kelly = getattr(self.sizing_governor, "kelly_fraction", 0.0) if self.sizing_governor is not None else 0.0
                 try:
                     self.trade_store.record_trade(
                         symbol=symbol, side="BUY", quantity=quantity, price=px, cost_basis=cost,
                         timestamp=trade_dt, simulated=simulated, realized_pnl=ZERO,
                         disallowed_loss=ZERO, regime=regime, trade_id=rec.trade_id, env=self.env,
+                        posterior_alpha=alpha, posterior_beta=beta, kelly_fraction=kelly,
                     )
                 except Exception as exc:
                     logger.error("Failed to persist BUY trade to SQLite: %s", exc)
@@ -643,11 +649,17 @@ class SettlementLedger:
             )
             self._trades.append(rec)
             if self.trade_store is not None:
+                if self.sizing_governor is not None and realized != ZERO:
+                    self.sizing_governor.update_trade_outcome(is_win=(realized > ZERO))
+                alpha = getattr(self.sizing_governor, "alpha", 10.0) if self.sizing_governor is not None else 10.0
+                beta = getattr(self.sizing_governor, "beta", 10.0) if self.sizing_governor is not None else 10.0
+                kelly = getattr(self.sizing_governor, "kelly_fraction", 0.0) if self.sizing_governor is not None else 0.0
                 try:
                     self.trade_store.record_trade(
                         symbol=symbol, side="SELL", quantity=qty, price=px, cost_basis=proceeds,
                         timestamp=trade_dt, simulated=simulated, realized_pnl=realized,
                         disallowed_loss=ZERO, regime=pos.regime if pos else "", trade_id=rec.trade_id, env=self.env,
+                        posterior_alpha=alpha, posterior_beta=beta, kelly_fraction=kelly,
                     )
                 except Exception as exc:
                     logger.error("Failed to persist SELL trade to SQLite: %s", exc)

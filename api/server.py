@@ -1358,6 +1358,44 @@ def build_app(ctx: EngineContext):
         finally:
             await hub.disconnect(conn)
 
+    @router.websocket("/ws/telemetry")
+    async def telemetry_websocket_stream(ws: WebSocket):
+        """
+        1Hz unified telemetry WebSocket stream (#68).
+        """
+        from web.websocket_manager import telemetry_manager
+        await telemetry_manager.connect(ws)
+        try:
+            while True:
+                msg = await ws.receive_text()
+                if msg == "ping":
+                    try:
+                        await ws.send_json({"type": "pong"})
+                    except Exception:
+                        break
+        except WebSocketDisconnect:
+            pass
+        except Exception as exc:
+            logger.debug("WebSocket telemetry closed: %s", exc)
+        finally:
+            telemetry_manager.disconnect(ws)
+
+    @router.get("/telemetry/snapshot")
+    async def get_telemetry_snapshot_route():
+        """
+        HTTP polling fallback returning unified telemetry payload snapshot (#68).
+        """
+        from web.websocket_manager import telemetry_manager
+        return telemetry_manager.get_latest_payload()
+
+    @router.get("/simulation_sandbox", response_class=HTMLResponse)
+    @router.get("/sandbox", response_class=HTMLResponse)
+    async def get_simulation_sandbox_html():
+        sandbox_path = PROJECT_ROOT / "web" / "simulation_sandbox.html"
+        if sandbox_path.is_file():
+            return HTMLResponse(content=sandbox_path.read_text(encoding="utf-8"))
+        raise HTTPException(status_code=404, detail="Simulation sandbox HTML not found")
+
     app.include_router(router)
     app.include_router(router, prefix="/api")
 
@@ -1382,7 +1420,7 @@ def build_app(ctx: EngineContext):
             "api", "health", "docs", "openapi.json", "redoc", "stream", "live", "ws",
             "status", "positions", "orders", "ledger", "regime", "v1", "strategy", "config",
             "portfolio", "compression", "news", "auth", "emergency", "indicators", "events",
-            "research"
+            "research", "simulation_sandbox", "sandbox"
         )
         first_segment = full_path.split("/")[0]
         if first_segment in reserved_prefixes:
