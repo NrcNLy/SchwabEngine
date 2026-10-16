@@ -9,7 +9,6 @@ Tests for workers/midday_optimizer.py:
 """
 
 import numpy as np
-import pytest
 
 from core.baselines_store import SQLiteBaselinesStore
 from core.ipc import read_dynamic_policy

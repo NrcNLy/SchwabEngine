@@ -8,8 +8,6 @@ Tests for atomic IPC signaling and local broadcast streaming:
 """
 
 import asyncio
-from pathlib import Path
-import pytest
 
 from core.ipc import (
     TraderIPCClient,

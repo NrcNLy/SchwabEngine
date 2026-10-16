@@ -18,12 +18,11 @@ from __future__ import annotations
 import math
 from datetime import date, datetime, time as dtime
 from decimal import Decimal
-from typing import List
 
 import pytest
 import pytz
 
-from core.engine import EngineSettings, LiveEngine, SimEngine
+from core.engine import EngineSettings, LiveEngine
 from core.ledger import BrokerBalances, ManagedPosition, SettlementLedger
 from core.liquidity_policy import LiquidityPolicy, compute_buying_power
 from core.runtime import EngineContext

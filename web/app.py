@@ -12,21 +12,15 @@ Exposes:
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 
-from web.websocket_manager import (
-    ConnectionManager,
-    build_telemetry_payload,
-    telemetry_manager,
-)
+from web.websocket_manager import telemetry_manager
 
 logger = logging.getLogger("SchwabEngine.WebGateway")
 

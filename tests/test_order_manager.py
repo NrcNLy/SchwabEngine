@@ -1,19 +1,13 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 import pytest
 
 from core.ledger import SettlementLedger
-from execution.order_manager import (
-    AccountFirewallError,
-    GoodFaithViolationBlockedError,
-    OrderManager,
-    TIER2_COOLDOWN_SEC,
-    TIER2_MIN_DELTA_PCT,
-)
+from execution.order_manager import AccountFirewallError, GoodFaithViolationBlockedError, OrderManager
 
 D = Decimal
 EDT = ZoneInfo("America/New_York")

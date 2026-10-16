@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-import pytest
 
 from core.collateral_engine import CollateralEngine
 from core.liquidity_models import CollateralInvariantState, PromotionalDebt

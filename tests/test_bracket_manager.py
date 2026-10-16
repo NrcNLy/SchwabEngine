@@ -15,16 +15,10 @@ Additional tests:
 """
 
 from datetime import datetime
-from decimal import Decimal
 from zoneinfo import ZoneInfo
 import pytest
 
-from execution.bracket_manager import (
-    MultiTrancheBracket,
-    BracketAction,
-    ActionType,
-    MultiTrancheBracketManager,
-)
+from execution.bracket_manager import MultiTrancheBracket, ActionType
 from execution.risk_manager import RiskEngine
 from core.trade_store import SQLiteTradeStore
 

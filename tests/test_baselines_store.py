@@ -8,11 +8,7 @@ Tests for SQLiteBaselinesStore (market_baselines.db):
 4. Concurrency under read/write threads.
 """
 
-from datetime import datetime, timezone
-import os
-from pathlib import Path
 import sqlite3
-import tempfile
 import threading
 import pytest
 

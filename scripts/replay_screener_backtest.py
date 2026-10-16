@@ -5,7 +5,6 @@ from math import floor, sqrt
 import sqlite3
 import logging
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

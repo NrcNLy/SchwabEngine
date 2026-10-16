@@ -20,7 +20,6 @@ import logging
 import os
 from pathlib import Path
 import sys
-import time
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 

@@ -12,9 +12,8 @@ Verifies:
 6. Single-session circuit breaker stop (-$50 risk cap).
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import pytest
 
 from core.universe_mask import UniverseExclusionMask
 from core.universe_manager import UniverseManager

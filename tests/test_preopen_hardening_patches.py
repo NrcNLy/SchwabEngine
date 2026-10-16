@@ -11,29 +11,14 @@ Verification suite for the October 9, 2026 Pre-Open Quantitative Hardening Patch
 
 from decimal import Decimal
 import math
-from datetime import datetime, time as dtime, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-import pytest
 
 from core.ledger import ManagedPosition
 from core.synthetic_divergence import SyntheticDivergenceEngine
-from core.universe_manager import (
-    UniverseManager,
-    HIGH_CORRELATION_SET,
-    PORTFOLIO_BETA_CEILING,
-    TICKER_BETAS,
-)
+from core.universe_manager import UniverseManager
 from execution.risk_manager import RiskEngine
-from execution.strategies import (
-    CandleBar,
-    MarketRegime,
-    RegimeMetrics,
-    StrategyEngine,
-    TradeSignal,
-    _compute_ema,
-    check_defensive_exit,
-    update_trailing_stop,
-)
+from execution.strategies import CandleBar, MarketRegime, RegimeMetrics, StrategyEngine, TradeSignal, check_defensive_exit, update_trailing_stop
 
 D = Decimal
 NY_TZ = ZoneInfo("America/New_York")

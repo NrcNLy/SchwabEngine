@@ -30,7 +30,7 @@ from collections import deque
 from datetime import datetime, timezone
 import logging
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 import orjson
 from fastapi import WebSocket, WebSocketDisconnect

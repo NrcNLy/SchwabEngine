@@ -12,7 +12,6 @@ import sys
 import json
 import sqlite3
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 
 # Add project root to path

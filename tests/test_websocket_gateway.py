@@ -15,21 +15,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-import json
 import pytest
 from starlette.testclient import TestClient
 
 from execution.microstructure_sentinel import MicrostructureSentinel
 from web.app import app
-from web.websocket_manager import (
-    ConnectionManager,
-    build_telemetry_payload,
-    pull_active_envelopes,
-    pull_latest_regime,
-    pull_settlement_balances,
-    record_settlement_balance,
-    telemetry_manager,
-)
+from web.websocket_manager import ConnectionManager, telemetry_manager
 
 
 def test_websocket_handshake_101():

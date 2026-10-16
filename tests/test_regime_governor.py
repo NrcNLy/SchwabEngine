@@ -18,7 +18,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
-import pytest
 
 from core.synthetic_divergence import (
     MacroRegime,

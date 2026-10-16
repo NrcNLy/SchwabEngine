@@ -18,22 +18,14 @@ import asyncio
 from datetime import datetime, timezone
 import json
 import logging
-import os
 from pathlib import Path
 import sqlite3
 import threading
 from typing import Any, Dict, List, Optional, Set, Union
 
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket
 
-from core.paths import (
-    ANCHOR_ACTIVE_FILE,
-    CONTROL_SIGNAL_FILE,
-    MACRO_STATE_FILE,
-    STATE_DIR,
-    TELEMETRY_DB_PATH,
-    TRADES_DB_PATH,
-)
+from core.paths import CONTROL_SIGNAL_FILE, STATE_DIR, TELEMETRY_DB_PATH, TRADES_DB_PATH
 from execution.microstructure_sentinel import MicrostructureSentinel
 
 logger = logging.getLogger("SchwabEngine.WebSocketGateway")

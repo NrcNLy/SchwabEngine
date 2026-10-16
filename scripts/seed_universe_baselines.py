@@ -26,7 +26,7 @@ import math
 from pathlib import Path
 import sqlite3
 import sys
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))

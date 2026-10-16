@@ -16,13 +16,12 @@ Unit, concurrency benchmark, and integration tests for:
 from __future__ import annotations
 
 import asyncio
-import collections
 import heapq
 import json
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -30,13 +29,7 @@ from requests import Response
 
 from api.server import build_app, compute_system_state
 from core.auth import AuthCircuitBreakerError, SchwabAuthManager, SecurityVault
-from core.rate_limiter import (
-    DailyQuotaExceededError,
-    SchwabRateGovernor,
-    SchwabRateLimiter,
-    TokenBucket,
-    get_governor,
-)
+from core.rate_limiter import DailyQuotaExceededError, SchwabRateGovernor, SchwabRateLimiter
 from core.rest_client import SchwabAsyncRestClient
 from core.runtime import EngineContext, build_ledger, load_config
 from execution.order_manager import OrderManager

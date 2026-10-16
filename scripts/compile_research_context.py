@@ -17,12 +17,10 @@ import argparse
 import datetime
 import json
 import logging
-import os
 import platform
 import shutil
 import sqlite3
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,8 +29,39 @@ logger = logging.getLogger("compile_research_context")
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
-# Subsystem file scopes
+# Subsystem file scopes and comprehensive categories
+COMPREHENSIVE_CATEGORIES: Dict[str, List[Tuple[str, str]]] = {
+    "Execution Subsystem": [
+        ("execution/microstructure_sentinel.py", "Opening cross VWAP buffer & soft/hard triggers"),
+        ("execution/adaptive_envelope.py", "Yang-Zhang volatility & asymptotic time-decay squeeze"),
+        ("execution/almgren_chriss.py", "Optimal execution slicing & NBBO limit pegging"),
+        ("execution/bracket_manager.py", "Multi-tranche profit ladder & breakeven ratchet"),
+        ("execution/sizing_governor.py", "Bayesian Quarter-Kelly sizing & cash settlement clamp"),
+        ("execution/order_manager.py", "Routing firewall & order state transitions"),
+        ("execution/risk_manager.py", "Account risk controls & exposure governors"),
+    ],
+    "Core & Data Subsystem": [
+        ("core/synthetic_divergence.py", "Multi-factor SES regime governor & relative strength"),
+        ("core/rate_limiter.py", "Schwab REST token bucket, burst controller & daily quota"),
+        ("core/event_ledger.py", "Zero-allocation SQLite WAL event ledger"),
+        ("core/event_models.py", "Zero-allocation SQLite WAL event models & schemas"),
+        ("core/ledger.py", "Three-bucket cash accounting & T+1 GFV state machine"),
+        ("data/stream_resampler.py", "WebSocket Level 1 streaming tick resampler"),
+    ],
+    "Web & Operational Scripts": [
+        ("web/websocket_manager.py", "FastAPI 1Hz real-time telemetry gateway"),
+        ("scripts/preflight.py", "12 pre-market invariant latch gates"),
+        ("scripts/verify_friday_settlement.py", "Automated T+1 settlement auditor"),
+        ("scripts/export_research_datasets.py", "Market data packaging pipeline"),
+    ],
+    "Configuration & Production Metadata": [
+        ("strategy_config.json", "Production strategy and regime configuration"),
+        ("metadata.json", "Engine deployment metadata & hardened release state"),
+    ],
+}
+
 SCOPE_DEFINITIONS: Dict[str, List[str]] = {
+    "comprehensive": [item[0] for sublist in COMPREHENSIVE_CATEGORIES.values() for item in sublist],
     "general": [
         "core/ledger.py",
         "core/synthetic_divergence.py",
@@ -158,8 +187,13 @@ def query_systemctl_status(unit: str) -> str:
 
 def inspect_sqlite_db(db_path: Path) -> Dict[str, Any]:
     """Inspects SQLite database for WAL pragma, size, tables and row counts."""
+    is_rel = False
+    try:
+        is_rel = db_path.is_relative_to(ROOT_DIR)
+    except Exception:
+        pass
     info: Dict[str, Any] = {
-        "path": str(db_path.relative_to(ROOT_DIR)) if db_path.is_relative_to(ROOT_DIR) else str(db_path),
+        "path": str(db_path.relative_to(ROOT_DIR)) if is_rel else str(db_path),
         "exists": db_path.exists(),
         "size_kb": round(db_path.stat().st_size / 1024, 2) if db_path.exists() else 0,
         "journal_mode": "unknown",
@@ -223,11 +257,12 @@ def sanitize_env_status() -> Dict[str, str]:
     return status
 
 
-def extract_code_file(rel_path: str) -> str:
+def extract_code_file(rel_path: str, subtitle: Optional[str] = None) -> str:
     """Reads and formats a source code or config file into a fenced Markdown block."""
     full_path = ROOT_DIR / rel_path
     if not full_path.exists():
-        return f"### `{rel_path}`\n\n> [!WARNING] File not found at `{full_path}`\n\n"
+        header = f"#### `{rel_path}`\n" if not subtitle else f"#### `{rel_path}` - {subtitle}\n"
+        return f"{header}\n> [!WARNING] File not found at `{full_path}`\n\n"
 
     try:
         content = full_path.read_text(encoding="utf-8", errors="replace")
@@ -238,10 +273,13 @@ def extract_code_file(rel_path: str) -> str:
         ext = full_path.suffix.lstrip(".").lower()
         fence = "json" if ext == "json" else "python" if ext in ("py", "pyw") else "text"
 
-        header = f"### `{rel_path}` ({line_count} lines, {size_bytes} bytes)\n"
+        header = f"#### `{rel_path}` ({line_count} lines, {size_bytes} bytes)\n"
+        if subtitle:
+            header = f"#### `{rel_path}` - {subtitle} ({line_count} lines, {size_bytes} bytes)\n"
         return f"{header}\n```{fence}\n{content}\n```\n\n"
     except Exception as exc:
-        return f"### `{rel_path}`\n\n> [!ERROR] Could not read file: {exc}\n\n"
+        header = f"#### `{rel_path}`\n" if not subtitle else f"#### `{rel_path}` - {subtitle}\n"
+        return f"{header}\n> [!ERROR] Could not read file: {exc}\n\n"
 
 
 def compile_research_context(
@@ -278,12 +316,37 @@ def compile_research_context(
         ROOT_DIR / "state" / "telemetry.db",
         ROOT_DIR / "state" / "market_baselines.db",
         ROOT_DIR / "data" / "schwab_telemetry.db",
+        Path("/home/nicho/schwab_state/trades.db"),
+        Path("/home/nicho/schwab_state/telemetry.db"),
+        Path("/home/nicho/schwab_state/market_baselines.db"),
     ]
-    db_reports = [inspect_sqlite_db(p) for p in db_candidates if p.exists() or (ROOT_DIR / "state").exists()]
+    seen_db = set()
+    unique_dbs = []
+    for p in db_candidates:
+        try:
+            resolved = str(p.resolve())
+            if p.exists() and resolved not in seen_db:
+                seen_db.add(resolved)
+                unique_dbs.append(p)
+        except Exception:
+            if p.exists():
+                unique_dbs.append(p)
+
+    db_reports = [inspect_sqlite_db(p) for p in unique_dbs]
 
     # Collect source modules for the specified scope
-    scoped_files = SCOPE_DEFINITIONS.get(scope, SCOPE_DEFINITIONS["general"])
-    code_blocks = [extract_code_file(f) for f in scoped_files]
+    if scope == "comprehensive":
+        sections_output = []
+        sec_idx = 1
+        for cat_name, file_tuples in COMPREHENSIVE_CATEGORIES.items():
+            sections_output.append(f"### 3.{sec_idx} {cat_name}\n\n")
+            for rel_path, desc in file_tuples:
+                sections_output.append(extract_code_file(rel_path, subtitle=desc))
+            sec_idx += 1
+        code_blocks_content = "".join(sections_output)
+    else:
+        scoped_files = SCOPE_DEFINITIONS.get(scope, SCOPE_DEFINITIONS["general"])
+        code_blocks_content = "".join([extract_code_file(f) for f in scoped_files])
 
     # Collect journalctl logs
     service_logs: Dict[str, Dict[str, str]] = {}
@@ -333,7 +396,7 @@ def compile_research_context(
 ## 3. Scoped Codebase Logic & Mathematical Formulations (Scope: `{scope}`)
 
 """
-    doc += "".join(code_blocks)
+    doc += code_blocks_content
 
     doc += rf"""
 ---

@@ -9,7 +9,6 @@ to auto-classify and extract UnifiedDocumentSnapshot records.
 import os
 import asyncio
 import json
-import time
 import hashlib
 import logging
 from datetime import date, datetime
@@ -24,15 +23,7 @@ except ImportError:
     genai = None
     types = None
 
-from core.liquidity_models import (
-    DocumentClass,
-    DocumentLineItem,
-    UnifiedDocumentSnapshot,
-    PromotionalDebt,
-    CollateralInvariantState,
-    LiquidityTarget,
-    extract_snapshot,
-)
+from core.liquidity_models import DocumentClass, DocumentLineItem, UnifiedDocumentSnapshot, PromotionalDebt, LiquidityTarget, extract_snapshot
 from core.collateral_engine import CollateralEngine
 from core.atomic_io import atomic_write_json, read_json, update_json
 from core.paths import PROCESSED_HASHES_FILE, STATE_DIR

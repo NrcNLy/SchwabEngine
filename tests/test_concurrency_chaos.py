@@ -4,7 +4,6 @@ import os
 import threading
 import time
 import pytest
-from pathlib import Path
 
 from core.trade_store import SQLiteTradeStore
 from core.ipc import (

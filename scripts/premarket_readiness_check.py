@@ -19,13 +19,13 @@ Exit code 0 indicates all required pre-market gates PASSED.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, time as dtime, timezone
+from datetime import datetime
 from decimal import Decimal
 import os
 from pathlib import Path
 import sqlite3
 import sys
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent

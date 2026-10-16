@@ -12,15 +12,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 import pytest
 
-from execution.almgren_chriss import (
-    AdaptiveExecutionRouter,
-    ExecutionSummary,
-    calculate_optimal_trajectory,
-    calculate_slice_trades,
-    optimal_liquidation_trajectory,
-    permanent_market_impact,
-    temporary_market_impact,
-)
+from execution.almgren_chriss import AdaptiveExecutionRouter, ExecutionSummary, calculate_slice_trades, optimal_liquidation_trajectory, permanent_market_impact, temporary_market_impact
 from execution.order_manager import OrderManager
 
 

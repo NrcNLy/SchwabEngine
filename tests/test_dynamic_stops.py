@@ -14,15 +14,10 @@ Unit tests for Phase 1 Quantitative Risk updates:
 from decimal import Decimal
 import math
 import numpy as np
-import pytest
 
 from core.ledger import ManagedPosition
 from execution.risk_manager import RiskEngine
-from indicators.volatility import (
-    OHLCBar,
-    YangZhangEstimator,
-    compute_hurst_rs,
-)
+from indicators.volatility import YangZhangEstimator, compute_hurst_rs
 
 D = Decimal
 

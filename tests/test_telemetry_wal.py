@@ -9,7 +9,6 @@ Automated tests for Phase 2 Deterministic Historical Event Telemetry with SQLite
 5. FastAPI /events and /api/events hydration endpoints.
 """
 
-from datetime import datetime, timezone
 import threading
 from typing import List
 import pytest

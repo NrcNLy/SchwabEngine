@@ -16,25 +16,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import List, Optional
+from typing import List
 import pytest
 import pytz
 
-from core.synthetic_divergence import (
-    DEFAULT_SYNTHETIC_PAIRS,
-    SyntheticDivergenceEngine,
-    SyntheticPair,
-)
+from core.synthetic_divergence import SyntheticDivergenceEngine
 from core.telemetry import SQLiteWALEventStore
 from core.universe_manager import UniverseManager
-from execution.strategies import (
-    CandleBar,
-    MarketRegime,
-    RegimeMetrics,
-    StrategyEngine,
-    SymbolState,
-    TradeSignal,
-)
+from execution.strategies import MarketRegime, RegimeMetrics, StrategyEngine, TradeSignal
 
 _EDT = pytz.timezone("America/New_York")
 

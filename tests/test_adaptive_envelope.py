@@ -17,11 +17,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import pytest
 
-from execution.adaptive_envelope import (
-    AdaptiveEnvelopeExecutor,
-    BreachType,
-    EnvelopeState,
-)
+from execution.adaptive_envelope import AdaptiveEnvelopeExecutor, BreachType
 from indicators.volatility import OHLCBar
 
 

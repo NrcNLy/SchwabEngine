@@ -6,7 +6,6 @@ Unit & Property-based tests for Bayesian Quarter-Kelly Sizing & Settlement Reser
 
 from __future__ import annotations
 
-import math
 from unittest.mock import MagicMock
 import pytest
 

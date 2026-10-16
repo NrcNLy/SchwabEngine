@@ -18,11 +18,9 @@ import argparse
 from datetime import datetime, timedelta, timezone
 import json
 import logging
-import math
-import os
 from pathlib import Path
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:

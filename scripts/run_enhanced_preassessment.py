@@ -27,7 +27,6 @@ from pathlib import Path
 import re
 import sys
 import tempfile
-import time
 from typing import Any, Dict, List, Optional
 import xml.etree.ElementTree as ET
 
@@ -41,13 +40,7 @@ if str(ROOT) not in sys.path:
 
 load_dotenv(ROOT / ".env")
 
-from macro.governor_schema import (
-    MacroRegimeEnum,
-    SectorDriftMultipliers,
-    MacroRegimeResponse,
-    create_safe_degraded_fallback,
-    parse_and_validate_macro_payload,
-)
+from macro.governor_schema import MacroRegimeEnum, MacroRegimeResponse, create_safe_degraded_fallback, parse_and_validate_macro_payload
 
 logging.basicConfig(
     level=logging.INFO,

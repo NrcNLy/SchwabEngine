@@ -13,8 +13,6 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone, time as dtime
 from decimal import Decimal
-import logging
-from typing import Any, Dict, Optional
 
 import pytest
 import pytz
@@ -23,15 +21,7 @@ from core.engine import EngineSettings, LiveEngine
 from core.ledger import BrokerBalances, SettlementLedger
 from core.runtime import EngineContext
 from execution.order_manager import OrderManager
-from execution.recovery_supervisor import (
-    Bracket,
-    QuoteGate,
-    RecoveryConfig,
-    RecoveryMachineState,
-    RecoverySupervisor,
-    compute_bracket,
-    ratchet,
-)
+from execution.recovery_supervisor import Bracket, QuoteGate, RecoveryConfig, compute_bracket, ratchet
 from tests.test_live_engine import FakeOrderManager, FakeStrategy, FakeSync
 
 D = Decimal

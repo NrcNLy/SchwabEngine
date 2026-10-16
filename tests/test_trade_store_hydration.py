@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 import pytz
-import pytest
 from fastapi.testclient import TestClient
 
 from api.server import build_app

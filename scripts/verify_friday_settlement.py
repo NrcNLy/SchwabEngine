@@ -19,7 +19,6 @@ import datetime
 import json
 import logging
 import os
-import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -40,7 +39,7 @@ if env_file.exists():
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 
-from core.paths import STATE_DIR, TRADES_DB_PATH
+from core.paths import STATE_DIR
 from core.runtime import load_config
 from core.auth import SecurityVault, SchwabAuthManager
 from data.rest_client import SchwabRestClient

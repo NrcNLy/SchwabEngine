@@ -16,17 +16,10 @@ Tests:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import orjson
-import pytest
 from starlette.testclient import TestClient
 
-from api.ave_telemetry import (
-    AveClientConnection,
-    AveTelemetryHub,
-    MAX_CLIENT_QUEUE,
-    MAX_RING_BUFFER,
-)
+from api.ave_telemetry import AveTelemetryHub, MAX_CLIENT_QUEUE
 from api.server import build_app
 from core.runtime import EngineContext
 

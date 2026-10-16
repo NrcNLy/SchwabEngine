@@ -23,10 +23,9 @@ Tests:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import math
 import pytest
 
-from core.envelope import AdaptiveVolatilityEnvelope, EnvelopeBounds
+from core.envelope import AdaptiveVolatilityEnvelope
 
 
 def test_squeeze_factor_endpoints_and_shaping():

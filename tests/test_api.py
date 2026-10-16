@@ -1,7 +1,6 @@
 """HTTP contract tests for the FastAPI layer (TestClient; no network, no broker)."""
 from __future__ import annotations
 
-import io
 from types import SimpleNamespace
 
 import pytest

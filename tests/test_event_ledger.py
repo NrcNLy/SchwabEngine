@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 import sqlite3
 import time
-import pytest
 
 from core.event_models import (
     SignalGeneratedEvent,

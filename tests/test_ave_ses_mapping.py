@@ -24,12 +24,7 @@ import json
 from pathlib import Path
 import pytest
 
-from core.ses_mapping import (
-    load_ses_snapshot,
-    ses_to_params,
-    DEFAULT_S_SAT,
-    DEFAULT_THETA,
-)
+from core.ses_mapping import load_ses_snapshot, ses_to_params
 
 
 def test_worked_values_table():
