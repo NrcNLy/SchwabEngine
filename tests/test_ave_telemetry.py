@@ -195,6 +195,13 @@ def test_websocket_endpoint_integration():
         assert frame_msg["frame"][2] == 105.5
 
 
+def _receive_bytes_timeout(ws, timeout: float = 5.0) -> bytes:
+    future = ws.portal.start_task_soon(ws._send_rx.receive)
+    message = future.result(timeout=timeout)
+    ws._raise_on_close(message)
+    return message["bytes"]
+
+
 def test_websocket_multi_symbol_subscription():
     ctx = EngineContext()
     app = build_app(ctx)
@@ -204,6 +211,11 @@ def test_websocket_multi_symbol_subscription():
     with client.websocket_connect("/ws/ave") as ws:
         # Subscribe dynamically to TQQQ
         ws.send_text(orjson.dumps({"action": "subscribe", "symbol": "TQQQ"}).decode("utf-8"))
+
+        # Receive SNAPSHOT first as explicit acknowledgment of subscription
+        msg1 = orjson.loads(_receive_bytes_timeout(ws, timeout=5.0))
+        assert msg1["type"] == "SNAPSHOT"
+        assert msg1["symbol"] == "TQQQ"
 
         # Ingest a tick for TQQQ
         hub = AveTelemetryHub.get_instance()
@@ -219,13 +231,8 @@ def test_websocket_multi_symbol_subscription():
             force_broadcast=True,
         )
 
-        # Receive SNAPSHOT first
-        msg1 = orjson.loads(ws.receive_bytes())
-        assert msg1["type"] == "SNAPSHOT"
-        assert msg1["symbol"] == "TQQQ"
-
         # Receive FRAME
-        msg2 = orjson.loads(ws.receive_bytes())
+        msg2 = orjson.loads(_receive_bytes_timeout(ws, timeout=5.0))
         assert msg2["type"] == "FRAME"
         assert msg2["symbol"] == "TQQQ"
         assert msg2["frame"][2] == 82.0
