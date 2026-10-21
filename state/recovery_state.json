@@ -1,0 +1,11 @@
+﻿{
+    "symbol":  "SOXL",
+    "state":  "DONE",
+    "exit_latched":  false,
+    "exit_reason":  null,
+    "exit_order_id":  null,
+    "broker_stop_order_id":  null,
+    "bracket":  null,
+    "updated_at":  "2026-10-21T15:02:52.0982718Z",
+    "note":  "Reset 2026-10-21 (#114): archived Oct 15 SOXL recovery latch to state/archive/recovery_state_SOXL_20261015.json; position closed, account flat."
+}

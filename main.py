@@ -1,4 +1,4 @@
-"""
+﻿"""
 main.py
 =======
 SchwabEngine single-process entrypoint: trading engine + REST/WebSocket API + built dashboard.
@@ -25,11 +25,19 @@ import asyncio
 import logging
 import os
 import sys
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+# Active configuration path (set from --config in run()/main); every load_config() call in this module
+# goes through load_active_config() so the CLI-selected file is the single source of truth.
+_ACTIVE_CONFIG_PATH: str = "config/config.yaml"
+
+# Minimum settled funds required before --mode live is allowed to route orders
+MIN_LIVE_SETTLED_FUNDS = Decimal("2000.00")
 
 from core.atomic_io import read_json
 from core.engine import EngineSettings, LiveEngine, SimEngine
@@ -41,6 +49,11 @@ from execution.bracket_manager import MultiTrancheBracket, MultiTrancheBracketMa
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")
 logger = logging.getLogger("main")
+
+
+def load_active_config() -> dict:
+    """Loads the YAML selected via --config (default config/config.yaml)."""
+    return load_config(_ACTIVE_CONFIG_PATH)
 
 
 class StartupError(RuntimeError):
@@ -111,7 +124,8 @@ async def handle_liquidity_event(event: Any) -> None:
 # ---------------------------------------------------------------------------
 
 def resolve_live(args: argparse.Namespace, cfg: dict) -> bool:
-    return bool(args.live or (cfg.get("engine", {}) or {}).get("live_trading", False))
+    """LIVE only when --mode live (or the legacy --live alias) was explicitly requested."""
+    return str(getattr(args, "mode", "shadow")).lower() == "live"
 
 
 def make_governor() -> Optional[Any]:
@@ -145,6 +159,13 @@ async def build_sim(ctx: EngineContext, cfg: dict, settings: EngineSettings, ign
     tasks.append(asyncio.create_task(bus._dispatch_loop(), name="bus"))
     tasks.append(asyncio.create_task(macro_liquidity_poller(bus), name="liquidity-poller"))
     tasks.append(asyncio.create_task(MockStreamer(bus, auth_manager=None).listener_loop(), name="mock-stream"))
+    if ctx.risk_manager is not None:
+        ctx.risk_manager.sync_account_state(
+            equity=float(ledger.nlv),
+            cash=float(ledger.settled_cash),
+            positions=ledger.positions,
+        )
+
     logger.warning("DRY-RUN: simulated ticks and simulated fills only. Nothing is sent to Schwab.")
     return engine
 
@@ -155,17 +176,12 @@ class LiveHandles:
     auth: Any = None
 
 
-async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, loop: asyncio.AbstractEventLoop,
-                     tasks: List[asyncio.Task], stop: asyncio.Event, handles: LiveHandles) -> LiveEngine:
-    """Fails closed: any problem raises StartupError and the process exits."""
+async def _bootstrap_auth(ctx: EngineContext, cfg: dict, handles: "LiveHandles") -> tuple:
+    """Vault decrypt -> forced OAuth refresh -> authenticated REST client. Fails closed with StartupError."""
     from dotenv import load_dotenv
     from core.auth import SchwabAuthManager, SecurityVault
-    from core.universe_mask import UniverseExclusionMask
+    from core.paths import STATE_DIR
     from data.rest_client import SchwabRestClient
-    from data.streamer import SchwabStreamer as LiveStreamer
-    from execution.order_manager import OrderManager
-    from execution.strategies import StrategyEngine
-    from services.broker_sync import BrokerSync
 
     load_dotenv()
     client_id = os.getenv("SCHWAB_CLIENT_ID")
@@ -178,7 +194,6 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
 
     auth_cfg = cfg.get("auth", {}) or {}
     vault_file_name = auth_cfg.get("vault_file", "schwab_tokens_vault.json")
-    from core.paths import STATE_DIR
     candidates = [
         PROJECT_ROOT / vault_file_name,
         STATE_DIR / vault_file_name,
@@ -208,6 +223,145 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
 
     rest = SchwabRestClient.from_config(cfg, auth)
     ctx.rest_client = rest
+    return auth, rest
+
+
+async def build_shadow(ctx: EngineContext, cfg: dict, settings: EngineSettings, loop: asyncio.AbstractEventLoop,
+                       tasks: List[asyncio.Task], stop: asyncio.Event, handles: "LiveHandles",
+                       ignore_session: bool) -> SimEngine:
+    """
+    Shadow mode: authenticated LIVE Level 1 market data, simulated execution. No order is ever submitted
+    to the broker; mock orders and rebalance sweeps are written to logs/session_telemetry_<YYMMDD>.jsonl.
+    """
+    import time as _time
+    from core.ipc import write_control_signal
+    from core.shadow import (
+        SHADOW_UNIVERSE, ShadowRebalancer, ShadowTelemetrySink, load_strategy_targets, session_telemetry_path,
+    )
+    from data.macro_client import MacroClient
+    from data.multi_rate_sync import MultiRateStateSynchronizer
+    from data.streamer import SchwabStreamer as LiveStreamer
+    from execution.order_client import SchwabOrderClient
+    from execution.risk_manager import MetaGovernorHMM
+    from execution.router import ExecutionRouter
+    from indicators.microstructure import MicrostructureHub
+
+    auth, rest = await _bootstrap_auth(ctx, cfg, handles)
+
+    ledger = build_ledger(cfg, live=False)
+    ctx.ledgers["sandbox"] = ledger
+    ctx.microstructure = MicrostructureHub.from_config(cfg, None)
+    router = ExecutionRouter(order_client=SchwabOrderClient(auth_manager=None, live_trading=False))
+    engine = SimEngine(ctx, cfg, ledger, settings, router, ignore_session=ignore_session)
+
+    # Disengage the Master Kill Switch so mock orders and rebalance sweeps are evaluated and logged
+    ctx.is_halted = False
+    (cfg.setdefault("trading", {}))["kill_switch"] = False
+    await asyncio.to_thread(write_control_signal, "RESUME", "Shadow mode startup: kill switch disengaged (no broker routing)")
+
+    # Warm plane: read-only account hot boot
+    suffix = str((cfg.get("account", {}) or {}).get("required_suffix", ""))
+    accounts = await asyncio.to_thread(rest.get_accounts, "positions")
+    target = None
+    for acct in accounts:
+        sec = acct.get("securitiesAccount", {})
+        if suffix and str(sec.get("accountNumber", "")).endswith(suffix):
+            target = acct
+            break
+    if target is None:
+        raise StartupError(f"Shadow startup: no linked account ending in '{suffix}'.")
+
+    sync = MultiRateStateSynchronizer()
+    sync.on_account_sync(target, is_hot_boot=True)
+
+    # Hot plane seed from REST snapshot (so marks and the HYG/IEF proxy exist before the first WS tick)
+    snapshot = await asyncio.to_thread(rest.get_quotes, list(SHADOW_UNIVERSE))
+    closes = {}
+    for sym in SHADOW_UNIVERSE:
+        entry = snapshot.get(sym) or {}
+        quote = entry.get("quote") or {}
+        if quote:
+            sync.on_level1_quote({"symbol": sym, "quote": quote})
+            closes[sym] = float(quote.get("closePrice") or 0.0)
+    if closes.get("HYG", 0.0) > 0.0 and closes.get("IEF", 0.0) > 0.0:
+        sync.set_credit_reference(closes["HYG"], closes["IEF"], source="PRIOR_CLOSE")
+
+    # Cold plane: FRED anchor + NLP sentiment, HMM filter. Intraday proxy comes from the live HYG/IEF ratio.
+    hmm = MetaGovernorHMM()
+    macro_client = MacroClient(sync=sync, hmm=hmm)
+    cold = await asyncio.to_thread(macro_client.run_premarket_cold_plane_pipeline)
+
+    sink = ShadowTelemetrySink(session_telemetry_path(PROJECT_ROOT))
+    ctx.shadow_sink = sink
+    state0 = sync.get_live_portfolio_state()
+    sink.write(
+        "SHADOW_SESSION_START",
+        account=f"***{str(target['securitiesAccount'].get('accountNumber', ''))[-4:]}",
+        nlv=state0.net_liquidation_value,
+        cash=state0.cash_buffer,
+        open_positions=len(state0.positions),
+        universe=list(SHADOW_UNIVERSE),
+        credit_proxy=sync.get_credit_proxy_state(),
+        hmm_posterior=list(cold.hmm_posterior_vector),
+        dominant_regime=cold.dominant_regime,
+        broker_submission="DISABLED",
+        market_data="LIVE_SCHWAB_WEBSOCKET",
+    )
+
+    rebalancer = ShadowRebalancer(sync, sink, hmm, load_strategy_targets(PROJECT_ROOT))
+    last_logged: dict = {}
+
+    def on_tick(sym: str, fields: dict) -> None:
+        update = sync.on_streamer_tick(sym, fields)
+        px = update.mid_price if update.mid_price > 0.0 else update.last
+        if px <= 0.0:
+            return
+        try:
+            ledger.mark_price(sym.upper(), Decimal(str(px)))
+        except Exception:
+            logger.debug("Sandbox ledger mark skipped for %s", sym)
+        ctx.mark_tick("LIVE")
+        now = _time.monotonic()
+        if now - last_logged.get(sym, 0.0) >= 2.0:
+            last_logged[sym] = now
+            extra = {}
+            if sym.upper() in ("HYG", "IEF"):
+                extra["credit_proxy"] = sync.get_credit_proxy_state()
+            sink.write("TICK", symbol=sym.upper(), bid=update.bid, ask=update.ask, last=update.last,
+                       mid=update.mid_price, microprice=update.microprice, bid_size=update.bid_size,
+                       ask_size=update.ask_size, volume=update.volume, source="LIVE_SCHWAB_WEBSOCKET", **extra)
+
+    streamer = LiveStreamer.from_config(cfg, rest)
+    streamer.set_symbols(list(SHADOW_UNIVERSE))
+    streamer.on_tick = on_tick
+    streamer.start()
+    handles.streamer = streamer
+
+    async def shadow_cycle() -> None:
+        await asyncio.sleep(5.0)
+        while not stop.is_set():
+            try:
+                await asyncio.to_thread(rebalancer.evaluate)
+            except Exception:
+                logger.exception("Shadow rebalance cycle failed")
+            await asyncio.sleep(30.0)
+
+    tasks.append(asyncio.create_task(shadow_cycle(), name="shadow-cycle"))
+    logger.warning("SHADOW MODE: live Schwab Level 1 stream on %d ETFs; broker order submission DISABLED; "
+                   "telemetry -> %s", len(SHADOW_UNIVERSE), sink.path)
+    return engine
+
+
+async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, loop: asyncio.AbstractEventLoop,
+                     tasks: List[asyncio.Task], stop: asyncio.Event, handles: LiveHandles) -> LiveEngine:
+    """Fails closed: any problem raises StartupError and the process exits."""
+    from core.universe_mask import UniverseExclusionMask
+    from data.streamer import SchwabStreamer as LiveStreamer
+    from execution.order_manager import OrderManager
+    from execution.strategies import StrategyEngine
+    from services.broker_sync import BrokerSync
+
+    auth, rest = await _bootstrap_auth(ctx, cfg, handles)
     ledger = build_ledger(cfg, live=True)
     ctx.ledgers["active"] = ledger
 
@@ -224,6 +378,31 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
     except Exception as exc:
         raise StartupError(f"First broker balance sync failed: {exc}") from exc
     ctx.broker_sync = sync
+
+    # LIVE confirmation gate: settled funds must cover the $2,000 minimum, verified against the broker
+    settled_funds = Decimal(str(ledger.settled_cash))
+    if settled_funds < MIN_LIVE_SETTLED_FUNDS:
+        raise StartupError(
+            f"Live confirmation gate failed: broker-verified settled funds ${settled_funds:.2f} "
+            f"< required ${MIN_LIVE_SETTLED_FUNDS:.2f}. Re-run with --mode shadow."
+        )
+    logger.info("Live confirmation gate passed: settled funds $%.2f >= $%.2f (broker verified).",
+                float(settled_funds), float(MIN_LIVE_SETTLED_FUNDS))
+
+    # FINRA Rule 4210 $2,000 Minimum Equity Check for Margin Eligibility
+    MIN_MARGIN_EQUITY = Decimal("2000.00")
+    if ledger.nlv < MIN_MARGIN_EQUITY:
+        logger.warning(
+            "Account equity ($%.2f) is below $2,000 minimum for margin eligibility. "
+            "FINRA Rule 4210 requires $2,000 minimum equity for margin borrowing.",
+            float(ledger.nlv),
+        )
+    else:
+        logger.info(
+            "Account equity ($%.2f) satisfies FINRA Rule 4210 ($2,000 minimum). "
+            "Intraday Margin Framework active (up to 4x intraday / 2x overnight leverage).",
+            float(ledger.nlv),
+        )
 
     # Adopt existing broker holdings as actively managed inventory
     rec_cfg_data = cfg.get("recovery", {}) or {}
@@ -257,8 +436,18 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
         )
     sync.set_managed_symbols(ledger.positions.keys())
 
-    # Conservative pre-check ceiling for StrategyEngine (no soft-reserve draw without a regime/posterior).
+    # Sync RiskEngine dual buying power pipeline with initial broker state
+    if ctx.risk_manager is not None:
+        ctx.risk_manager.sync_account_state(
+            equity=float(ledger.nlv),
+            cash=float(ledger.settled_cash),
+            positions=ledger.positions,
+        )
+
+    # Pre-check ceiling for StrategyEngine: incorporates real-time Intraday Margin Buying Power
     def ceiling():
+        if ctx.risk_manager is not None and ctx.risk_manager.is_margin_eligible:
+            return Decimal(str(round(ctx.risk_manager.intraday_buying_power, 2)))
         bp = ledger_buying_power(ctx, "active")
         return bp.max_order_notional if bp is not None else None
 
@@ -362,7 +551,7 @@ async def _control_signal_poller(ctx: EngineContext, engine: Any, stop: asyncio.
                         try:
                             from core.runtime import load_config
                             from execution.recovery_supervisor import RecoveryConfig
-                            fresh_cfg = load_config()
+                            fresh_cfg = load_active_config()
                             if "recovery" in fresh_cfg:
                                 engine.recovery.cfg = RecoveryConfig.from_dict(fresh_cfg["recovery"])
                                 logger.info("Recovery supervisor config updated from config.yaml: trail_pct=%.3f, u=[%.3f, %.3f]",
@@ -386,8 +575,13 @@ async def _control_signal_poller(ctx: EngineContext, engine: Any, stop: asyncio.
 async def run(args: argparse.Namespace) -> int:
     if getattr(args, "headless_trader", False):
         args.no_api = True
-    cfg = load_config()
+    cfg = load_active_config()
     live = resolve_live(args, cfg)
+    cfg.setdefault("engine", {})["live_trading"] = live
+    if live and not getattr(args, "confirm_live", False):
+        logger.critical("--mode live requires explicit confirmation: re-run with --confirm-live "
+                        "(or use --mode shadow).")
+        return 2
     if live and args.ignore_session:
         logger.critical("--ignore-session is refused in LIVE mode.")
         return 2
@@ -408,7 +602,7 @@ async def run(args: argparse.Namespace) -> int:
         if live:
             engine = await build_live(ctx, cfg, settings, loop, tasks, stop, handles)
         else:
-            engine = await build_sim(ctx, cfg, settings, args.ignore_session, tasks)
+            engine = await build_shadow(ctx, cfg, settings, loop, tasks, stop, handles, args.ignore_session)
     except StartupError as exc:
         if "AUTH_LOCKED" in str(exc):
             logger.critical("LIVE startup refused due to AUTH_LOCKED. Entering idle quarantine.")
@@ -435,7 +629,7 @@ async def run(args: argparse.Namespace) -> int:
     try:
         from core.notifier import send_alert
         send_alert(
-            title="[SYSTEM] Engine v2.4 Live - Telemetry Active",
+            title=f"[SYSTEM] Engine v2.4 {'Live' if live else 'Shadow'} - Telemetry Active",
             message="SchwabEngine Alert Pipe Active on schwab-trader VM",
             priority="default",
             tags=["rocket", "satellite"],
@@ -454,7 +648,7 @@ async def run(args: argparse.Namespace) -> int:
     if engine is not None:
         tasks.append(asyncio.create_task(_control_signal_poller(ctx, engine, stop), name="control-signal-poller"))
         if ipc_server is not None and handles.streamer is not None:
-            orig_on_tick = engine.on_tick
+            orig_on_tick = handles.streamer.on_tick
             import time
 
             def broadcast_on_tick(sym: str, f: dict) -> None:
@@ -529,7 +723,7 @@ def run_authenticate() -> int:
         logger.error("Missing environment variables: %s", ", ".join(missing))
         return 1
 
-    cfg = load_config()
+    cfg = load_active_config()
     auth_cfg = cfg.get("auth", {}) or {}
     vault_file_name = auth_cfg.get("vault_file", "schwab_tokens_vault.json")
     candidates = [
@@ -573,7 +767,7 @@ def run_authenticate() -> int:
 
 def run_self_test() -> int:
     from api.server import build_app
-    cfg = load_config()
+    cfg = load_active_config()
     ctx = EngineContext(cfg, live=False)
     ctx.ledgers["sandbox"] = build_ledger(cfg, live=False)
     ctx.risk_manager = RiskEngine()
@@ -590,7 +784,14 @@ def run_self_test() -> int:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="SchwabEngine")
-    p.add_argument("--live", action="store_true", help="Route real orders to Schwab (default: dry-run).")
+    p.add_argument("--mode", choices=["shadow", "live"], default="shadow",
+                   help="shadow (default): live market data, simulated execution, no broker orders. "
+                        "live: routes real orders (requires --confirm-live and >= $2,000 settled funds).")
+    p.add_argument("--config", type=str, default="config/config.yaml",
+                   help="Path to the engine YAML configuration (default: config/config.yaml).")
+    p.add_argument("--confirm-live", action="store_true",
+                   help="Explicit confirmation required for --mode live.")
+    p.add_argument("--live", action="store_true", help="Deprecated alias for --mode live.")
     p.add_argument("--headless-trader", action="store_true", help="Run high-priority headless execution daemon without API server.")
     p.add_argument("--ignore-session", action="store_true", help="Dry-run only: allow entries outside market hours.")
     p.add_argument("--governor", action="store_true", help="Dry-run: also run the Vertex AI governor schedule.")
@@ -599,7 +800,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--port", type=int, default=None)
     p.add_argument("--test", action="store_true", help="Build the API app and exit.")
     p.add_argument("--authenticate", action="store_true", help="Rehydrate or verify Schwab tokens from the encrypted vault.")
-    return p.parse_args(argv)
+    return _post_parse(p.parse_args(argv))
+
+
+def _post_parse(args: argparse.Namespace) -> argparse.Namespace:
+    """Normalizes the legacy --live alias and publishes the selected config path."""
+    global _ACTIVE_CONFIG_PATH
+    if args.live:
+        args.mode = "live"
+    _ACTIVE_CONFIG_PATH = args.config
+    return args
 
 
 if __name__ == "__main__":
