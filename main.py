@@ -1,4 +1,4 @@
-﻿"""
+"""
 main.py
 =======
 SchwabEngine single-process entrypoint: trading engine + REST/WebSocket API + built dashboard.
@@ -338,10 +338,23 @@ async def build_shadow(ctx: EngineContext, cfg: dict, settings: EngineSettings, 
     handles.streamer = streamer
 
     async def shadow_cycle() -> None:
+        from datetime import time as dtime
+        from core.engine import now_et
+        from core.session import TradingPhase, get_session_phase
+        from core.shadow import run_eod_digest_and_sync
+
         await asyncio.sleep(5.0)
+        eod_digest_fired = None
         while not stop.is_set():
             try:
                 await asyncio.to_thread(rebalancer.evaluate)
+                now_val = now_et()
+                today_val = now_val.date()
+                phase_val = get_session_phase(now_val, cfg)
+                if (now_val.time() >= dtime(15, 55) or phase_val in (TradingPhase.POST_CLOSE_REFLECTION, TradingPhase.OFFLINE)) and eod_digest_fired != today_val:
+                    eod_digest_fired = today_val
+                    logger.info("Automated EOD lifecycle trigger (%s, %s): executing telemetry digest and Drive sync...", now_val.time().strftime("%H:%M:%S"), phase_val)
+                    asyncio.create_task(run_eod_digest_and_sync(PROJECT_ROOT, log_path=sink.path))
             except Exception:
                 logger.exception("Shadow rebalance cycle failed")
             await asyncio.sleep(30.0)
@@ -697,6 +710,16 @@ async def run(args: argparse.Namespace) -> int:
             await asyncio.to_thread(ctx.microstructure.persist)
         if handles.auth is not None:
             handles.auth.stop()
+
+        # Automated EOD digest and Drive sync hook on transition to OFFLINE
+        try:
+            from core.shadow import run_eod_digest_and_sync
+            sink_path = getattr(ctx, "shadow_sink", None).path if getattr(ctx, "shadow_sink", None) else None
+            logger.info("Transition to OFFLINE: compiling EOD telemetry digest and replicating to Google Drive...")
+            await run_eod_digest_and_sync(PROJECT_ROOT, log_path=sink_path)
+        except Exception as exc:
+            logger.warning("EOD telemetry digest and Drive sync failed on shutdown: %s", exc)
+
         if engine is not None:
             open_positions = sorted(engine.ledger.positions.keys())
             if open_positions:

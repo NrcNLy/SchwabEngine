@@ -17,9 +17,12 @@ load_strategy_targets    Reads regime targets / routing weights from strategy_co
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -315,3 +318,76 @@ class ShadowRebalancer:
                 self._book[sym] = (held - qty, avg)
                 self._cash = float(self._cash or 0.0) + qty * px
         self._book = {s: v for s, v in self._book.items() if v[0] > 0}
+
+
+def _run_digest_and_sync_worker(
+    project_root: Optional[Path] = None,
+    log_path: Optional[Path] = None,
+    output_path: Optional[Path] = None,
+) -> bool:
+    """Synchronous worker that invokes parse_session_telemetry.py and sync_docs_bidirectional.py."""
+    if project_root is None:
+        project_root = Path(__file__).resolve().parent.parent
+
+    if log_path is None:
+        log_path = session_telemetry_path(project_root)
+        if not log_path.exists():
+            candidates = sorted((project_root / "logs").glob("session_telemetry_*.jsonl"))
+            if candidates:
+                log_path = candidates[-1]
+
+    if not log_path or not log_path.exists():
+        logger.warning("EOD Digest: active session telemetry log does not exist (%s); skipping digest.", log_path)
+        return False
+
+    parse_script = project_root / "scripts" / "parse_session_telemetry.py"
+    sync_script = project_root / "scripts" / "sync_docs_bidirectional.py"
+
+    cmd_parse = [sys.executable, str(parse_script), "--log", str(log_path)]
+    if output_path:
+        cmd_parse.extend(["--output", str(output_path)])
+
+    logger.info("Executing automated EOD telemetry digest: %s", " ".join(cmd_parse))
+    try:
+        res_parse = subprocess.run(
+            cmd_parse,
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            timeout=120,
+        )
+        if res_parse.returncode != 0:
+            logger.error("parse_session_telemetry failed (rc=%d): %s", res_parse.returncode, res_parse.stderr)
+            return False
+        logger.info("parse_session_telemetry completed: %s", res_parse.stdout.strip())
+    except Exception as exc:
+        logger.exception("Failed to execute parse_session_telemetry: %s", exc)
+        return False
+
+    cmd_sync = [sys.executable, str(sync_script)]
+    logger.info("Executing automated Drive sync pass: %s", " ".join(cmd_sync))
+    try:
+        res_sync = subprocess.run(
+            cmd_sync,
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            timeout=120,
+        )
+        if res_sync.returncode != 0:
+            logger.error("sync_docs_bidirectional failed (rc=%d): %s", res_sync.returncode, res_sync.stderr)
+            return False
+        logger.info("sync_docs_bidirectional completed: %s", res_sync.stdout.strip())
+        return True
+    except Exception as exc:
+        logger.exception("Failed to execute sync_docs_bidirectional: %s", exc)
+        return False
+
+
+async def run_eod_digest_and_sync(
+    project_root: Optional[Path] = None,
+    log_path: Optional[Path] = None,
+    output_path: Optional[Path] = None,
+) -> bool:
+    """Non-blocking async task wrapper for automated EOD digest and Drive sync."""
+    return await asyncio.to_thread(_run_digest_and_sync_worker, project_root, log_path, output_path)
