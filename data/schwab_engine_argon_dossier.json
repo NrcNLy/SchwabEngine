@@ -1,0 +1,291 @@
+{
+  "dossier_format": "ANTIGRAVITY_ARGON_REFACTOR_DOSSIER",
+  "schema_version": "2.4.0",
+  "generated_at_utc": "2026-10-19T21:31:44.713Z",
+  "target_python_modules": [
+    "risk_manager.py",
+    "sizing_governor.py",
+    "strategy_config.json"
+  ],
+  "executive_metrics": {
+    "dataset_range": {
+      "start_datetime": "2025-07-17T13:30:00.000Z",
+      "end_datetime": "2026-10-16T19:30:00.000Z",
+      "total_hourly_bars": 2195,
+      "total_trading_days": 316,
+      "sampling_granularity": "1-hour bars (6.5 hours / trading session)",
+      "detected_liquid_symbols": [
+        "EMLC",
+        "FNDA",
+        "FNDC",
+        "FNDE",
+        "FNDF",
+        "FNDX",
+        "GOVT",
+        "HAUZ",
+        "IGIB",
+        "IWM",
+        "MBB",
+        "QQQ",
+        "SCHA",
+        "SCHC",
+        "SCHE",
+        "SCHF",
+        "SCHG",
+        "SCHH",
+        "SCHI",
+        "SCHR",
+        "SCHX",
+        "SMBS",
+        "SOXL",
+        "SPEM",
+        "SPY",
+        "TNA",
+        "TQQQ",
+        "VUG"
+      ]
+    },
+    "comparative_metrics_table": {
+      "meta_governor": {
+        "strategy_name": "Meta-Governor (Dynamic Orchestrator)",
+        "cagr_pct": 40.79,
+        "max_drawdown_pct": 7.32,
+        "calmar_ratio": 5.57,
+        "sharpe_ratio": 2.49,
+        "sortino_ratio": 3.94,
+        "net_pnl_usd": 58165.46,
+        "total_rebalance_count": 155,
+        "total_friction_cost_usd": 402.66,
+        "final_portfolio_value_usd": 158165.46,
+        "hourly_win_rate_pct": 52.96,
+        "avg_satellite_weight_pct": 10.86
+      },
+      "strategy_c": {
+        "strategy_name": "Strategy C (Dual-Factor Trend & Regime Gate)",
+        "cagr_pct": 42.78,
+        "max_drawdown_pct": 5.81,
+        "calmar_ratio": 7.36,
+        "sharpe_ratio": 2.75,
+        "sortino_ratio": 4.36,
+        "net_pnl_usd": 61164.73,
+        "total_rebalance_count": 188,
+        "total_friction_cost_usd": 492.39,
+        "final_portfolio_value_usd": 161164.73,
+        "hourly_win_rate_pct": 52.96,
+        "avg_satellite_weight_pct": 10.01
+      },
+      "strategy_b": {
+        "strategy_name": "Strategy B (Leland NTZ Tolerance Bands)",
+        "cagr_pct": 21.59,
+        "max_drawdown_pct": 12.04,
+        "calmar_ratio": 1.79,
+        "sharpe_ratio": 0.94,
+        "sortino_ratio": 1.36,
+        "net_pnl_usd": 29949.45,
+        "total_rebalance_count": 8,
+        "total_friction_cost_usd": 6.27,
+        "final_portfolio_value_usd": 129949.45,
+        "hourly_win_rate_pct": 52.28,
+        "avg_satellite_weight_pct": 15.2
+      },
+      "benchmark_buy_hold": {
+        "strategy_name": "Benchmark Buy & Hold (Static 85/15)",
+        "cagr_pct": 22.16,
+        "max_drawdown_pct": 16.27,
+        "calmar_ratio": 1.36,
+        "sharpe_ratio": 0.72,
+        "sortino_ratio": 1.04,
+        "net_pnl_usd": 30769.1,
+        "total_rebalance_count": 0,
+        "total_friction_cost_usd": 0,
+        "final_portfolio_value_usd": 130769.1,
+        "hourly_win_rate_pct": 51.73,
+        "avg_satellite_weight_pct": 23.32
+      },
+      "benchmark_spy": {
+        "strategy_name": "Benchmark SPY (100% Core S&P 500)",
+        "cagr_pct": 15.5,
+        "max_drawdown_pct": 10.16,
+        "calmar_ratio": 1.52,
+        "sharpe_ratio": 0.91,
+        "sortino_ratio": 1.32,
+        "net_pnl_usd": 21294.59,
+        "total_rebalance_count": 0,
+        "total_friction_cost_usd": 0,
+        "final_portfolio_value_usd": 121294.59,
+        "hourly_win_rate_pct": 52.45,
+        "avg_satellite_weight_pct": 0
+      }
+    }
+  },
+  "hmm_empirical_calibration": {
+    "regime_duration_pct": {
+      "goldilocks": 69.7,
+      "uncertainty": 14.35,
+      "shock": 15.95
+    },
+    "regime_order": [
+      "goldilocks",
+      "uncertainty",
+      "shock"
+    ],
+    "transition_matrix_3x3": [
+      [
+        0.9993,
+        0,
+        0.0007
+      ],
+      [
+        0.0032,
+        0.9968,
+        0
+      ],
+      [
+        0.0029,
+        0,
+        0.9971
+      ]
+    ],
+    "recommended_hmm_persistence_diagonal": {
+      "T_goldilocks_persistence": 0.9993,
+      "T_uncertainty_persistence": 0.9968,
+      "T_shock_persistence": 0.9971
+    },
+    "mean_emission_vectors": {
+      "goldilocks": {
+        "mu": {
+          "Macro_Surprise_Z": 0.9946,
+          "Macro_Sentiment": 0.4803,
+          "Macro_HYSpread_Bps": 317.6
+        },
+        "sigma": {
+          "Macro_Surprise_Z": 0.2498,
+          "Macro_Sentiment": 0.1064,
+          "Macro_HYSpread_Bps": 18.8
+        }
+      },
+      "uncertainty": {
+        "mu": {
+          "Macro_Surprise_Z": -0.2989,
+          "Macro_Sentiment": -0.06,
+          "Macro_HYSpread_Bps": 406.8
+        },
+        "sigma": {
+          "Macro_Surprise_Z": 0.092,
+          "Macro_Sentiment": 0.0417,
+          "Macro_HYSpread_Bps": 6.7
+        }
+      },
+      "shock": {
+        "mu": {
+          "Macro_Surprise_Z": -1.243,
+          "Macro_Sentiment": -0.472,
+          "Macro_HYSpread_Bps": 481.9
+        },
+        "sigma": {
+          "Macro_Surprise_Z": 0.2657,
+          "Macro_Sentiment": 0.1452,
+          "Macro_HYSpread_Bps": 35.3
+        }
+      }
+    }
+  },
+  "sleeve_reallocation_telemetry": {
+    "average_satellite_weight_by_regime": {
+      "goldilocks_avg_pct": 9.11,
+      "uncertainty_avg_pct": 15.27,
+      "shock_avg_pct": 14.57,
+      "overall_avg_pct": 10.86
+    },
+    "sweep_destination_vector_w_sweep": {
+      "QQQ": 0.25,
+      "SPY": 0.35,
+      "IWM": 0.1,
+      "HYG": 0.15,
+      "IEF": 0.15,
+      "cash_buffer": 0
+    },
+    "leland_ntz_boundary_efficiency": {
+      "tau_band": 0.03,
+      "tau_band_pct": 3,
+      "observed_tolerance_rebalances": 8,
+      "estimated_unbuffered_drift_triggers": 2015,
+      "trades_avoided_count": 2007,
+      "churn_reduction_pct": 99.6,
+      "estimated_friction_saved_usd": 1204.2
+    }
+  },
+  "drawdown_healing_telemetry": {
+    "meta_governor": {
+      "max_drawdown_duration_hours": 211,
+      "longest_underwater_span_bars": 211,
+      "time_underwater_pct": 88.38
+    },
+    "strategy_d_circuit_breaker": {
+      "max_drawdown_duration_hours": 665,
+      "longest_underwater_span_bars": 665,
+      "time_underwater_pct": 92.71,
+      "emergency_trips_count": 1
+    },
+    "empirical_healing_model": {
+      "kappa_core_acceleration_factor": 0.5,
+      "lambda_0_baseline_decay": 0.03,
+      "effective_hwm_decay_formula": "lambda_hwm_eff(t) = lambda_0 + kappa_core * max(0, w_sweep^T * r_core(t)) * (W_swept(t) / w_base)",
+      "recovery_speedup_factor_vs_cash": 1.34
+    }
+  },
+  "calibrated_config_payload": {
+    "system_metadata": {
+      "engine": "schwab_execution_core",
+      "config_version": "2.4.0-argon",
+      "status": "production_ready"
+    },
+    "target_weights": {
+      "core_target": 0.85,
+      "satellite_target": 0.15,
+      "cash_sweep_target": 0
+    },
+    "leland_ntz": {
+      "tau_band": 0.03,
+      "drift_upper_cutoff": 0.18,
+      "drift_lower_cutoff": 0.12,
+      "friction_cost_rate": 0.0002
+    },
+    "circuit_breaker": {
+      "drawdown_tier1_reduction": 0.05,
+      "drawdown_tier1_exposure": 0.5,
+      "drawdown_tier2_stepout": 0.1,
+      "recovery_hysteresis": 0.03,
+      "kappa_core": 0.5,
+      "lambda_0": 0.03
+    },
+    "letf_drag_cutoffs": {
+      "volatility_drag_threshold_annualized": 0.45,
+      "rolling_vol_window_bars": 32,
+      "max_holding_period_hours": 390,
+      "trend_sma_window_bars": 50,
+      "volatility_gate_trigger": 0.15
+    },
+    "margin_thresholds": {
+      "maintenance_margin_min": 0.3,
+      "cushion_buffer": 0.15,
+      "hard_liquidation_max_drawdown": 0.15,
+      "cash_sweep_vehicle": "SWVXX"
+    },
+    "routing_sweep_vector": {
+      "SPY": 0.35,
+      "QQQ": 0.25,
+      "IWM": 0.1,
+      "HYG": 0.15,
+      "IEF": 0.15,
+      "cash": 0
+    },
+    "hmm_thresholds": {
+      "sentiment_dovish_cutoff": 0.15,
+      "sentiment_hawkish_cutoff": -0.15,
+      "credit_spread_tight_bps": 380,
+      "credit_spread_shock_bps": 440,
+      "economic_surprise_cutoff": 0
+    }
+  }
+}

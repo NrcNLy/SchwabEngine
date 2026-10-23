@@ -75,7 +75,7 @@ class MacroClient:
         Attempts HTTP retrieval from FRED, falling back to local micro-sequence telemetry.
         """
         # 1. Try local verified micro-sequence telemetry snapshot
-        local_sequence_path = Path("schwab_telemetry_micro_sequence.json")
+        local_sequence_path = Path(__file__).resolve().parent / "fixtures" / "schwab_telemetry_micro_sequence.json"
         if local_sequence_path.exists():
             try:
                 with open(local_sequence_path, "r", encoding="utf-8") as f:

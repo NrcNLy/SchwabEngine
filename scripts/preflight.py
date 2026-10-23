@@ -203,7 +203,7 @@ def engage_invariant_latch(failures: List[InvariantResult], topic: str = DEFAULT
 
     # 2. Update strategy_config.json
     strat_paths = [
-        PROJECT_ROOT / "strategy_config.json",
+        PROJECT_ROOT / "config" / "strategy_config.json",
         STATE_DIR / "strategy_config.json",
         Path("/home/nicho/schwab_state/strategy_config.json"),
     ]

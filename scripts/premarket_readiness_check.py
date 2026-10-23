@@ -141,7 +141,7 @@ class PreMarketDiagnostics:
 
         remaining_sec = auth.refresh_seconds_remaining()
         if remaining_sec is None or remaining_sec <= 0:
-            self.report.fail_gate("Auth: Refresh Token Validity", "Refresh token has expired; run manual_auth.py")
+            self.report.fail_gate("Auth: Refresh Token Validity", "Refresh token has expired; run scripts/auth/manual_auth.py")
             return
         days_rem = remaining_sec / 86400.0
         self.report.pass_gate("Auth: Refresh Token Validity", f"{days_rem:.1f} days remaining ({remaining_sec:.0f}s)")

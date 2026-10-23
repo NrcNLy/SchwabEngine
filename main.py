@@ -25,11 +25,13 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+DRIVE_SYNC_INTERVAL_S = 600.0  # shadow_cycle triggers a Local -> Drive mirror pass this often
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Active configuration path (set from --config in run()/main); every load_config() call in this module
@@ -201,7 +203,7 @@ async def _bootstrap_auth(ctx: EngineContext, cfg: dict, handles: "LiveHandles")
     ]
     vault_path = next((p for p in candidates if p.exists() and p.stat().st_size > 0), None)
     if vault_path is None:
-        raise StartupError(f"Token vault not found at {PROJECT_ROOT / vault_file_name} or {STATE_DIR / vault_file_name}. Run manual_auth.py on this machine first.")
+        raise StartupError(f"Token vault not found at {PROJECT_ROOT / vault_file_name} or {STATE_DIR / vault_file_name}. Run scripts/auth/manual_auth.py on this machine first.")
 
     vault = SecurityVault(passphrase=passphrase, iterations=int(auth_cfg.get("pbkdf2_iterations", 600000)),
                           vault_path=vault_path)
@@ -213,7 +215,7 @@ async def _bootstrap_auth(ctx: EngineContext, cfg: dict, handles: "LiveHandles")
         raise StartupError(f"Could not decrypt/read the token vault: {exc}") from exc
     remaining = auth.refresh_seconds_remaining()
     if remaining is not None and remaining <= 0:
-        raise StartupError("Refresh token has expired. Run manual_auth.py to re-authorize.")
+        raise StartupError("Refresh token has expired. Run scripts/auth/manual_auth.py to re-authorize.")
     try:
         await asyncio.to_thread(auth.force_refresh)
     except Exception as exc:
@@ -341,13 +343,19 @@ async def build_shadow(ctx: EngineContext, cfg: dict, settings: EngineSettings, 
         from datetime import time as dtime
         from core.engine import now_et
         from core.session import TradingPhase, get_session_phase
-        from core.shadow import run_eod_digest_and_sync
+        from core.shadow import run_drive_sync, run_eod_digest_and_sync
 
         await asyncio.sleep(5.0)
         eod_digest_fired = None
+        drive_sync_task: Optional[asyncio.Task] = None
+        last_drive_sync = 0.0
         while not stop.is_set():
             try:
                 await asyncio.to_thread(rebalancer.evaluate)
+                loop_now = time.monotonic()
+                if loop_now - last_drive_sync >= DRIVE_SYNC_INTERVAL_S and (drive_sync_task is None or drive_sync_task.done()):
+                    last_drive_sync = loop_now
+                    drive_sync_task = asyncio.create_task(run_drive_sync(PROJECT_ROOT))
                 now_val = now_et()
                 today_val = now_val.date()
                 phase_val = get_session_phase(now_val, cfg)
@@ -775,7 +783,7 @@ def run_authenticate() -> int:
 
     remaining = auth.refresh_seconds_remaining()
     if remaining is not None and remaining <= 0:
-        logger.error("Refresh token has expired (%.1fs remaining). Run manual_auth.py to re-authorize.", remaining)
+        logger.error("Refresh token has expired (%.1fs remaining). Run scripts/auth/manual_auth.py to re-authorize.", remaining)
         return 2
 
     logger.info("Tokens rehydrated. Refresh token valid for %.1f hours.", (remaining or 0) / 3600)

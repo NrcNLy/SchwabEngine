@@ -39,7 +39,7 @@ from typing import Any, Callable, Coroutine, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_QUOTA_FILE = Path("schwab_state/daily_quota.json")
+DEFAULT_QUOTA_FILE = Path("state/remote_vm_state/daily_quota.json")
 MAX_DAILY_CALLS = 3500
 FREEZE_THRESHOLD = 3300
 WARNING_THRESHOLD = 3000

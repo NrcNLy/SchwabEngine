@@ -775,6 +775,11 @@ class StrategyEngine:
             self._orb_rr_target, self._mr_sigma, self._mr_rsi_thresh,
         )
 
+    @property
+    def config(self) -> dict:
+        """Top-level configuration dictionary."""
+        return self._cfg
+
     # ------------------------------------------------------------------
     # Configuration
     # ------------------------------------------------------------------
@@ -1361,19 +1366,43 @@ class StrategyEngine:
             if self._signal_cb:
                 try:
                     self._signal_cb(signal)
-                    
-                    from core.notifier import send_alert
-                    import threading
-                    threading.Thread(
-                        target=send_alert,
-                        args=(
-                            f"[ROUTED] {signal.direction} {signal.quantity} {signal.symbol} @ ~${float(signal.entry_price):.2f}",
-                            f"Strategy: {signal.strategy}\nStop Distance: ${float(signal.entry_price - signal.stop_price):.2f}\nRisk Capital: ${risk_amt:.2f}\nTotal Notional: ${total_notional:.2f}",
-                            "default",
-                            "rocket,moneybag"
-                        ),
-                        daemon=True
-                    ).start()
+                    if self.config.get("trading", {}).get("engine_active", False):
+                        from core.notifier import send_alert
+                        import threading
+                        threading.Thread(
+                            target=send_alert,
+                            args=(
+                                f"[ROUTED] {signal.direction} {signal.quantity} {signal.symbol} @ ~${float(signal.entry_price):.2f}",
+                                f"Strategy: {signal.strategy}\nStop Distance: ${float(signal.entry_price - signal.stop_price):.2f}\nRisk Capital: ${risk_amt:.2f}\nTotal Notional: ${total_notional:.2f}",
+                                "default",
+                                "rocket,moneybag"
+                            ),
+                            daemon=True
+                        ).start()
+                    else:
+                        logger.info(f"SHADOW SIGNAL SUPPRESSED: {signal.symbol} candidate entry blocked by engine_active=False")
+                        try:
+                            if self._event_store is not None:
+                                store = self._event_store
+                            else:
+                                from core.telemetry import SQLiteWALEventStore
+                                store = SQLiteWALEventStore()
+                            store.record_event(
+                                aggregate_id=signal.symbol.upper(),
+                                event_type="SHADOW_SIGNAL_SUPPRESSED",
+                                payload={
+                                    "symbol": signal.symbol.upper(),
+                                    "strategy": signal.strategy,
+                                    "direction": signal.direction,
+                                    "quantity": signal.quantity,
+                                    "entry_price": float(signal.entry_price),
+                                    "stop_price": float(signal.stop_price),
+                                    "target_price": float(signal.target_price),
+                                    "reason": "engine_active=False",
+                                },
+                            )
+                        except Exception as tel_err:
+                            logger.warning("StrategyEngine: failed to persist SHADOW_SIGNAL_SUPPRESSED event: %s", tel_err)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
                         "StrategyEngine: signal_callback raised: %s", exc

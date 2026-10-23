@@ -67,7 +67,7 @@ def perform_premarket_audit():
     nlv = api_status.get("nlv", 0.0)
 
     # 4. Strategy Config AVE Mode
-    cfg_path = PROJECT_ROOT / "strategy_config.json"
+    cfg_path = PROJECT_ROOT / "config" / "strategy_config.json"
     ave_mode = "shadow"
     if cfg_path.exists():
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))

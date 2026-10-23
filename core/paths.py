@@ -27,6 +27,18 @@ def _resolve_state_dir() -> Path:
 
 STATE_DIR = _resolve_state_dir()
 
+# ---- Consolidated project layout (static assets live in the repository tree) -------------
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_DIR = PROJECT_ROOT / "config"
+DOCS_DIR = PROJECT_ROOT / "docs"
+DATA_DIR = PROJECT_ROOT / "data"
+EXPORTS_DIR = DATA_DIR / "exports"
+FIXTURES_DIR = DATA_DIR / "fixtures"
+REMOTE_VM_STATE_DIR = PROJECT_ROOT / "state" / "remote_vm_state"
+
+STRATEGY_CONFIG_FILE = CONFIG_DIR / "strategy_config.json"
+TELEMETRY_FIXTURE_FILE = FIXTURES_DIR / "schwab_telemetry_micro_sequence.json"
+
 MACRO_STATE_FILE = STATE_DIR / "macro_liquidity.json"
 POLICY_FILE = STATE_DIR / "liquidity_policy.json"
 ANCHOR_ACTIVE_FILE = STATE_DIR / "nlv_anchor_active.json"

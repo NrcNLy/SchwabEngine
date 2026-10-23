@@ -7,7 +7,8 @@
 # Engine & Trading Mode
 # ---------------------------------------------------------------------------
 trading:
-  engine_active: false
+  engine_active: true
+  kill_switch: false
 
 engine:
   # Default is dry-run. Live order routing requires a valid token vault AND either
@@ -340,6 +341,10 @@ schedule:
   eod_liquidation_time: "15:50:00"
   # Hard deadline: all engine positions must be flat and orders cancelled by this time
   flat_deadline_time: "15:55:00"
+
+  # FINRA Rule 4210 Reg T overnight excess liquidation sequence prior to 8:00 p.m. ET
+  eod_overnight_liquidation_time: "19:45:00"
+  eod_overnight_cutoff_time: "20:00:00"
 
   # Timezone for all scheduled events
   timezone: "America/New_York"

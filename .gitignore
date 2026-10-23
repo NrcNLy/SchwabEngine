@@ -62,3 +62,15 @@ schwab_state/
 
 # Runtime logs
 *.log
+
+# Generated research exports (large; mirrored to Google Drive by scripts/sync_engine_drive.py)
+data/exports/*.parquet
+data/exports/*.csv.gz
+data/exports/portfolio_hourly_bars_*.csv
+data/exports/backtest_dataset.json
+data/exports/macro_research_matrix.json
+
+# High-frequency telemetry and Google Drive upload temp artifacts
+logs/*.jsonl
+.tmp.driveupload/
+**/.tmp.driveupload/

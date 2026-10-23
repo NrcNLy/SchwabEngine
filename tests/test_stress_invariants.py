@@ -263,7 +263,7 @@ def test_dynamic_scale_invariant_equity_stripping():
     strategy_config.json and execution/risk_manager.py, and all target allocations reference
     live broker NLV exclusively.
     """
-    cfg_text = Path("strategy_config.json").read_text(encoding="utf-8")
+    cfg_text = Path("config/strategy_config.json").read_text(encoding="utf-8")
     rm_text = Path("execution/risk_manager.py").read_text(encoding="utf-8")
 
     assert "21086" not in cfg_text
@@ -622,7 +622,7 @@ def test_regime_dynamic_satellite_sizing_and_leland_bounds():
     4. allocate_from_live_nlv evaluates breaches against dynamic bounds.
     """
     # 1. Verify strategy_config.json
-    cfg_path = Path("strategy_config.json")
+    cfg_path = Path("config/strategy_config.json")
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert "regime_satellite_targets" in cfg
     rst = cfg["regime_satellite_targets"]

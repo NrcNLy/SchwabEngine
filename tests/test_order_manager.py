@@ -100,14 +100,12 @@ def test_execute_market_sell_allows_settled_funded_position(mock_rest, cfg):
     mock_rest.place_order.assert_called_once()
 
 
-def test_execute_market_sell_blocks_unsettled_funded_shares_and_raises_gfv_error(mock_rest, cfg):
+def test_execute_market_sell_allows_intraday_exit_under_margin_framework(mock_rest, cfg):
     lg = SettlementLedger(D("1000"))
     om = OrderManager(mock_rest, lg, cfg)
     om.initialize_firewall()
-    mock_telemetry = MagicMock()
-    om.telemetry = mock_telemetry
 
-    # Adopt position funded with UNSETTLED cash (settling tomorrow / next business day)
+    # Adopt position (GFV exempt under margin rules)
     from core.ledger import next_business_day, today_et
     tomorrow = next_business_day(today_et())
     lg.adopt_position(
@@ -115,38 +113,39 @@ def test_execute_market_sell_blocks_unsettled_funded_shares_and_raises_gfv_error
         funded_with_settled=False, settle_date=tomorrow,
     )
 
-    # Attempting to sell intraday MUST raise GoodFaithViolationBlockedError
-    with pytest.raises(GoodFaithViolationBlockedError, match="GFV VETO"):
-        om.execute_market_sell("TNA", 10, reason="TIER1_STOP")
-
-    # Verify no order was submitted to Schwab REST API
-    mock_rest.place_order.assert_not_called()
-
-    # Verify telemetry event was recorded
-    mock_telemetry.record_event.assert_called_once()
-    event_call = mock_telemetry.record_event.call_args
-    assert event_call[1]["aggregate_id"] == "TNA"
-    assert event_call[1]["event_type"] == "GFV_SELL_BLOCKED"
-    payload = event_call[1]["payload"]
-    assert payload["action"] == "FORCED_OVERNIGHT_HOLD"
-    assert payload["category"] == "GFV_PROTECTION"
+    # Intraday sale succeeds under FINRA 4210 margin framework without GFV blocks
+    order_id = om.execute_market_sell("TNA", 10, reason="TIER1_STOP")
+    assert order_id == "998877"
+    assert mock_rest.place_order.called
 
 
-def test_execute_market_sell_blocks_even_on_eod_mandatory_flatten(mock_rest, cfg):
+def test_execute_market_sell_allows_eod_mandatory_flatten_under_margin_framework(mock_rest, cfg):
     from core.ledger import next_business_day, today_et
     lg = SettlementLedger(D("1000"))
     om = OrderManager(mock_rest, lg, cfg)
     om.initialize_firewall()
 
-    # Unsettled position
     tomorrow = next_business_day(today_et())
     lg.adopt_position(
         "SOXL", 5, "30", simulated=False, opened_at=FRIDAY_NOON,
         funded_with_settled=False, settle_date=tomorrow,
     )
 
-    # Even with MANDATORY_FLATTEN reason (15:50 EOD sweep), GFV veto MUST hold overnight
-    with pytest.raises(GoodFaithViolationBlockedError, match="GFV VETO"):
-        om.execute_market_sell("SOXL", 5, reason="MANDATORY_FLATTEN")
+    # EOD mandatory flatten succeeds without GFV lock
+    order_id = om.execute_market_sell("SOXL", 5, reason="MANDATORY_FLATTEN")
+    assert order_id == "998877"
+    assert mock_rest.place_order.called
 
+
+def test_execute_market_sell_defensive_veto_if_ledger_blocks(mock_rest, cfg):
+    mock_ledger = MagicMock()
+    mock_ledger.can_sell_position.return_value = (False, "GFV VETO: defensive block")
+    om = OrderManager(mock_rest, mock_ledger, cfg)
+    om.initialize_firewall()
+    mock_telemetry = MagicMock()
+    om.telemetry = mock_telemetry
+
+    with pytest.raises(GoodFaithViolationBlockedError, match="GFV VETO"):
+        om.execute_market_sell("TNA", 10, reason="TIER1_STOP")
     mock_rest.place_order.assert_not_called()
+    mock_telemetry.record_event.assert_called_once()

@@ -404,10 +404,11 @@ def stage_strategy_configuration(resp: MacroRegimeResponse) -> List[Path]:
     serialized = json.dumps(config_payload, indent=2)
 
     target_paths = [
+        Path("/home/nicho/schwab_engine/config/strategy_config.json"),
         Path("/home/nicho/schwab_engine/state/strategy_config.json"),
         Path("/home/nicho/schwab_state/strategy_config.json"),
         ROOT / "state" / "strategy_config.json",
-        ROOT / "strategy_config.json",
+        ROOT / "config" / "strategy_config.json",
     ]
 
     written_paths: List[Path] = []

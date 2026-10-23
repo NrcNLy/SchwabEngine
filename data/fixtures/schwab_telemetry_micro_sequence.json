@@ -1,0 +1,1426 @@
+[
+  {
+    "sequence_id": 1,
+    "event_id": "EVT_001_SPY_SCHWAB_LEVEL1_QUOTE",
+    "timestamp": "2026-10-17T19:20:00.124Z",
+    "timestamp_epoch_ms": 1792264800124,
+    "stream_elapsed_ms": 124,
+    "schema_type": "SCHWAB_LEVEL1_QUOTE",
+    "source": "schwab_streaming_ws",
+    "symbol": "SPY",
+    "telemetry_metadata": {
+      "network_latency_ms": 14.2,
+      "jitter_ms": 10.8,
+      "simulated_arrival_ms": 138.2
+    },
+    "payload": {
+      "service": "LEVELONE_EQUITIES",
+      "command": "SUBS",
+      "timestamp": 1792264800124,
+      "content": [
+        {
+          "key": "SPY",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "ETF",
+          "cusip": "78462F103",
+          "0": "SPY",
+          "1": 585.12,
+          "2": 585.15,
+          "3": 585.14,
+          "4": 120,
+          "5": 85,
+          "8": 42158900,
+          "10": 582.4,
+          "11": 585.99,
+          "12": 581.75,
+          "13": 584.05,
+          "14": "P",
+          "24": 1792264800110,
+          "bidPrice": 585.12,
+          "askPrice": 585.15,
+          "lastPrice": 585.14,
+          "bidSize": 120,
+          "askSize": 85,
+          "totalVolume": 42158900,
+          "quoteTime": 1792264800110
+        }
+      ],
+      "schwab_rest_spec": {
+        "symbol": "SPY",
+        "assetMainType": "EQUITY",
+        "assetSubType": "ETF",
+        "quote": {
+          "bidPrice": 585.12,
+          "askPrice": 585.15,
+          "lastPrice": 585.14,
+          "bidSize": 120,
+          "askSize": 85,
+          "totalVolume": 42158900,
+          "openPrice": 582.4,
+          "highPrice": 585.99,
+          "lowPrice": 581.75,
+          "closePrice": 584.05,
+          "mark": 585.135,
+          "netChange": 1.09,
+          "netPercentChange": 0.187,
+          "quoteTime": 1792264800110,
+          "securityStatus": "Normal"
+        },
+        "reference": {
+          "cusip": "78462F103",
+          "description": "SPDR S&P 500 ETF TRUST",
+          "exchange": "P",
+          "exchangeName": "NYSE Arca",
+          "isHardToBorrow": false,
+          "isShortable": true
+        }
+      }
+    }
+  },
+  {
+    "sequence_id": 2,
+    "event_id": "EVT_002_SOXL_SCHWAB_LEVEL1_QUOTE",
+    "timestamp": "2026-10-17T19:20:00.638Z",
+    "timestamp_epoch_ms": 1792264800638,
+    "stream_elapsed_ms": 638,
+    "schema_type": "SCHWAB_LEVEL1_QUOTE",
+    "source": "schwab_streaming_ws",
+    "symbol": "SOXL",
+    "telemetry_metadata": {
+      "network_latency_ms": 28.6,
+      "jitter_ms": 3.6,
+      "simulated_arrival_ms": 666.6
+    },
+    "payload": {
+      "service": "LEVELONE_EQUITIES",
+      "command": "SUBS",
+      "timestamp": 1792264800638,
+      "content": [
+        {
+          "key": "SOXL",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "ETF",
+          "cusip": "83410S108",
+          "0": "SOXL",
+          "1": 45.62,
+          "2": 45.65,
+          "3": 45.64,
+          "4": 350,
+          "5": 210,
+          "8": 18340200,
+          "10": 45.2,
+          "11": 46.49,
+          "12": 44.55,
+          "13": 45.1,
+          "14": "P",
+          "24": 1792264800610,
+          "bidPrice": 45.62,
+          "askPrice": 45.65,
+          "lastPrice": 45.64,
+          "bidSize": 350,
+          "askSize": 210,
+          "totalVolume": 18340200,
+          "quoteTime": 1792264800610
+        }
+      ],
+      "schwab_rest_spec": {
+        "symbol": "SOXL",
+        "assetMainType": "EQUITY",
+        "assetSubType": "ETF",
+        "quote": {
+          "bidPrice": 45.62,
+          "askPrice": 45.65,
+          "lastPrice": 45.64,
+          "bidSize": 350,
+          "askSize": 210,
+          "totalVolume": 18340200,
+          "openPrice": 45.2,
+          "highPrice": 46.49,
+          "lowPrice": 44.55,
+          "closePrice": 45.1,
+          "mark": 45.635,
+          "netChange": 0.54,
+          "netPercentChange": 1.197,
+          "quoteTime": 1792264800610,
+          "securityStatus": "Normal"
+        },
+        "reference": {
+          "cusip": "83410S108",
+          "description": "DIREXION DAILY SEMICONDUCTOR BULL 3X SHARES",
+          "exchange": "P",
+          "exchangeName": "NYSE Arca",
+          "isHardToBorrow": false,
+          "isShortable": true
+        }
+      }
+    }
+  },
+  {
+    "sequence_id": 3,
+    "event_id": "EVT_003_ACCOUNT_BALANCES_SCHWAB_ACCOUNT_BALANCE",
+    "timestamp": "2026-10-17T19:20:01.182Z",
+    "timestamp_epoch_ms": 1792264801182,
+    "stream_elapsed_ms": 1182,
+    "schema_type": "SCHWAB_ACCOUNT_BALANCE",
+    "source": "schwab_trader_api",
+    "symbol": "ACCOUNT_BALANCES",
+    "telemetry_metadata": {
+      "network_latency_ms": 42.1,
+      "jitter_ms": 17.1,
+      "simulated_arrival_ms": 1224.1
+    },
+    "payload": {
+      "securitiesAccount": {
+        "type": "MARGIN",
+        "accountNumber": "987654321",
+        "roundTrips": 0,
+        "isDayTrader": true,
+        "isClosingOnlyRestricted": false,
+        "pfcbFlag": false,
+        "currentBalances": {
+          "accruedInterest": 0.0,
+          "availableFunds": 15000.0,
+          "availableFundsNonMarginableTrade": 15000.0,
+          "bondValue": 0.0,
+          "buyingPower": 30000.0,
+          "cashAvailableForTrading": 15000.0,
+          "cashBalance": 15000.0,
+          "cashReceipts": 0.0,
+          "dayTradingBuyingPower": 400000.0,
+          "dayTradingBuyingPowerCall": 0.0,
+          "dayTradingEquityCall": 0.0,
+          "equity": 100000.0,
+          "equityPercentage": 100.0,
+          "liquidationValue": 100000.0,
+          "longMarginValue": 85000.0,
+          "longMarketValue": 85000.0,
+          "maintenanceCall": 0.0,
+          "maintenanceRequirement": 25500.0,
+          "margin": 0.0,
+          "marginBalance": 0.0,
+          "marginEquity": 100000.0,
+          "moneyMarketFund": 0.0,
+          "mutualFundValue": 0.0,
+          "regTCall": 0.0,
+          "savings": 0.0,
+          "shortBalance": 0.0,
+          "shortMarginValue": 0.0,
+          "shortMarketValue": 0.0,
+          "sma": 15000.0,
+          "totalCash": 15000.0,
+          "unsettledCash": 0.0
+        },
+        "initialBalances": {
+          "accruedInterest": 0.0,
+          "availableFundsNonMarginableTrade": 15000.0,
+          "bondValue": 0.0,
+          "buyingPower": 30000.0,
+          "cashBalance": 15000.0,
+          "cashAvailableForTrading": 15000.0,
+          "dayTradingBuyingPower": 400000.0,
+          "equity": 100000.0,
+          "liquidationValue": 100000.0,
+          "longMarketValue": 85000.0,
+          "unsettledCash": 0.0
+        },
+        "projectedBalances": {
+          "availableFunds": 15000.0,
+          "availableFundsNonMarginableTrade": 15000.0,
+          "buyingPower": 30000.0,
+          "cashAvailableForTrading": 15000.0,
+          "dayTradingBuyingPower": 400000.0,
+          "maintenanceCall": 0.0,
+          "regTCall": 0.0,
+          "isInCall": false,
+          "stockBuyingPower": 30000.0
+        },
+        "positions": [
+          {
+            "shortQuantity": 0.0,
+            "averagePrice": 45.2,
+            "currentDayProfitLoss": 230.0,
+            "currentDayProfitLossPercentage": 1.02,
+            "longQuantity": 500.0,
+            "settledLongQuantity": 500.0,
+            "settledShortQuantity": 0.0,
+            "instrument": {
+              "assetType": "EQUITY",
+              "cusip": "83410S108",
+              "symbol": "SOXL",
+              "description": "DIREXION DAILY SEMICONDUCTOR BULL 3X"
+            },
+            "marketValue": 22830.0
+          },
+          {
+            "shortQuantity": 0.0,
+            "averagePrice": 78.1,
+            "currentDayProfitLoss": 204.0,
+            "currentDayProfitLossPercentage": 0.43,
+            "longQuantity": 600.0,
+            "settledLongQuantity": 600.0,
+            "settledShortQuantity": 0.0,
+            "instrument": {
+              "assetType": "EQUITY",
+              "cusip": "74347X831",
+              "symbol": "TQQQ",
+              "description": "PROSHARES ULTRAPRO QQQ"
+            },
+            "marketValue": 47064.0
+          },
+          {
+            "shortQuantity": 0.0,
+            "averagePrice": 50.35,
+            "currentDayProfitLoss": 156.0,
+            "currentDayProfitLossPercentage": 1.03,
+            "longQuantity": 300.0,
+            "settledLongQuantity": 300.0,
+            "settledShortQuantity": 0.0,
+            "instrument": {
+              "assetType": "EQUITY",
+              "cusip": "25459W847",
+              "symbol": "TNA",
+              "description": "DIREXION DAILY SMALL CAP BULL 3X"
+            },
+            "marketValue": 15261.0
+          }
+        ],
+        "telemetry_sync": {
+          "sync_epoch_ms": 1792264801182,
+          "network_latency_ms": 42.1,
+          "invariants": {
+            "settlement_model": "T+1_MARGIN",
+            "gfv_risk": 0,
+            "liquidation_value_match": true
+          }
+        }
+      }
+    }
+  },
+  {
+    "sequence_id": 4,
+    "event_id": "EVT_004_TQQQ_SCHWAB_LEVEL1_QUOTE",
+    "timestamp": "2026-10-17T19:20:01.745Z",
+    "timestamp_epoch_ms": 1792264801745,
+    "stream_elapsed_ms": 1745,
+    "schema_type": "SCHWAB_LEVEL1_QUOTE",
+    "source": "schwab_streaming_ws",
+    "symbol": "TQQQ",
+    "telemetry_metadata": {
+      "network_latency_ms": 18.5,
+      "jitter_ms": 6.5,
+      "simulated_arrival_ms": 1763.5
+    },
+    "payload": {
+      "service": "LEVELONE_EQUITIES",
+      "command": "SUBS",
+      "timestamp": 1792264801745,
+      "content": [
+        {
+          "key": "TQQQ",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "ETF",
+          "cusip": "74347X831",
+          "0": "TQQQ",
+          "1": 78.4,
+          "2": 78.43,
+          "3": 78.42,
+          "4": 180,
+          "5": 140,
+          "8": 24190500,
+          "10": 78.1,
+          "11": 79.27,
+          "12": 77.45,
+          "13": 77.85,
+          "14": "Q",
+          "24": 1792264801727,
+          "bidPrice": 78.4,
+          "askPrice": 78.43,
+          "lastPrice": 78.42,
+          "bidSize": 180,
+          "askSize": 140,
+          "totalVolume": 24190500,
+          "quoteTime": 1792264801727
+        }
+      ],
+      "schwab_rest_spec": {
+        "symbol": "TQQQ",
+        "assetMainType": "EQUITY",
+        "assetSubType": "ETF",
+        "quote": {
+          "bidPrice": 78.4,
+          "askPrice": 78.43,
+          "lastPrice": 78.42,
+          "bidSize": 180,
+          "askSize": 140,
+          "totalVolume": 24190500,
+          "openPrice": 78.1,
+          "highPrice": 79.27,
+          "lowPrice": 77.45,
+          "closePrice": 77.85,
+          "mark": 78.415,
+          "netChange": 0.57,
+          "netPercentChange": 0.732,
+          "quoteTime": 1792264801727,
+          "securityStatus": "Normal"
+        },
+        "reference": {
+          "cusip": "74347X831",
+          "description": "PROSHARES ULTRAPRO QQQ",
+          "exchange": "Q",
+          "exchangeName": "NASDAQ Global Market",
+          "isHardToBorrow": false,
+          "isShortable": true
+        }
+      }
+    }
+  },
+  {
+    "sequence_id": 5,
+    "event_id": "EVT_005_BAMLH0A0HYM2_FRED_MACRO_DATA",
+    "timestamp": "2026-10-17T19:20:02.310Z",
+    "timestamp_epoch_ms": 1792264802310,
+    "stream_elapsed_ms": 2310,
+    "schema_type": "FRED_MACRO_DATA",
+    "source": "stlouisfed_fred_api",
+    "symbol": "BAMLH0A0HYM2",
+    "telemetry_metadata": {
+      "network_latency_ms": 35.8,
+      "jitter_ms": 10.8,
+      "simulated_arrival_ms": 2345.8
+    },
+    "payload": {
+      "realtime_start": "2026-10-17",
+      "realtime_end": "2026-10-17",
+      "observation_start": "2026-10-01",
+      "observation_end": "2026-10-17",
+      "units": "Percent",
+      "output_type": 1,
+      "file_type": "json",
+      "order_by": "observation_date",
+      "sort_order": "desc",
+      "count": 1,
+      "limit": 100,
+      "offset": 0,
+      "series_id": "BAMLH0A0HYM2",
+      "series_title": "ICE BofA US High Yield Index Option-Adjusted Spread",
+      "frequency": "Daily, Close",
+      "seasonal_adjustment": "Not Seasonally Adjusted",
+      "last_updated": "2026-10-17 09:15:02-05",
+      "observations": [
+        {
+          "realtime_start": "2026-10-17",
+          "realtime_end": "2026-10-17",
+          "date": "2026-10-16",
+          "value": "3.18",
+          "spread_basis_points": 318.0,
+          "status": "BENIGN",
+          "regime_implication": "RISK_ON_ACCOMMODATIVE",
+          "threshold_breach": false,
+          "z_score_20d": -0.42
+        }
+      ]
+    }
+  },
+  {
+    "sequence_id": 6,
+    "event_id": "EVT_006_TNA_SCHWAB_LEVEL1_QUOTE",
+    "timestamp": "2026-10-17T19:20:02.895Z",
+    "timestamp_epoch_ms": 1792264802895,
+    "stream_elapsed_ms": 2895,
+    "schema_type": "SCHWAB_LEVEL1_QUOTE",
+    "source": "schwab_streaming_ws",
+    "symbol": "TNA",
+    "telemetry_metadata": {
+      "network_latency_ms": 22.4,
+      "jitter_ms": 2.6,
+      "simulated_arrival_ms": 2917.4
+    },
+    "payload": {
+      "service": "LEVELONE_EQUITIES",
+      "command": "SUBS",
+      "timestamp": 1792264802895,
+      "content": [
+        {
+          "key": "TNA",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "ETF",
+          "cusip": "25459W847",
+          "0": "TNA",
+          "1": 50.85,
+          "2": 50.88,
+          "3": 50.87,
+          "4": 290,
+          "5": 175,
+          "8": 8421000,
+          "10": 50.5,
+          "11": 51.72,
+          "12": 49.85,
+          "13": 50.4,
+          "14": "P",
+          "24": 1792264802873,
+          "bidPrice": 50.85,
+          "askPrice": 50.88,
+          "lastPrice": 50.87,
+          "bidSize": 290,
+          "askSize": 175,
+          "totalVolume": 8421000,
+          "quoteTime": 1792264802873
+        }
+      ],
+      "schwab_rest_spec": {
+        "symbol": "TNA",
+        "assetMainType": "EQUITY",
+        "assetSubType": "ETF",
+        "quote": {
+          "bidPrice": 50.85,
+          "askPrice": 50.88,
+          "lastPrice": 50.87,
+          "bidSize": 290,
+          "askSize": 175,
+          "totalVolume": 8421000,
+          "openPrice": 50.5,
+          "highPrice": 51.72,
+          "lowPrice": 49.85,
+          "closePrice": 50.4,
+          "mark": 50.865,
+          "netChange": 0.47,
+          "netPercentChange": 0.933,
+          "quoteTime": 1792264802873,
+          "securityStatus": "Normal"
+        },
+        "reference": {
+          "cusip": "25459W847",
+          "description": "DIREXION DAILY SMALL CAP BULL 3X SHARES",
+          "exchange": "P",
+          "exchangeName": "NYSE Arca",
+          "isHardToBorrow": false,
+          "isShortable": true
+        }
+      }
+    }
+  },
+  {
+    "sequence_id": 7,
+    "event_id": "EVT_007_MACRO_SENTIMENT_GEMINI_NLP_SENTIMENT",
+    "timestamp": "2026-10-17T19:20:03.441Z",
+    "timestamp_epoch_ms": 1792264803441,
+    "stream_elapsed_ms": 3441,
+    "schema_type": "GEMINI_NLP_SENTIMENT",
+    "source": "gemini_nlp_engine",
+    "symbol": "MACRO_SENTIMENT",
+    "telemetry_metadata": {
+      "network_latency_ms": 51.3,
+      "jitter_ms": 26.3,
+      "simulated_arrival_ms": 3492.3
+    },
+    "payload": {
+      "model": "gemini-2.5-flash",
+      "prompt_context": "FOMC_PRESS_BRIEFING_AND_LABOR_TELEMETRY",
+      "sentiment_classification": "DOVISH",
+      "dovish_hawkish_scoring": {
+        "dovish_score": 0.84,
+        "hawkish_score": 0.16,
+        "neutral_score": 0.0,
+        "net_dovish_polarity": 0.68,
+        "conviction": "HIGH"
+      },
+      "macro_decision_payload": {
+        "macro_regime": "REGIME_A",
+        "market_bias": "BULLISH",
+        "confidence_score": 0.94,
+        "risk_multiplier": 1.0,
+        "trade_permitted": true,
+        "inhibition_reason": null,
+        "high_impact_warning": null
+      },
+      "sector_drift_multipliers": {
+        "tech_beta": 1.15,
+        "small_cap_credit": 1.08,
+        "energy_beta": 0.92
+      },
+      "telemetry_metrics": {
+        "inference_latency_ms": 298.4,
+        "tokens_consumed": 420,
+        "thematic_drivers": [
+          "Labor market stabilization reduces recession risk; soft landing reaffirmed.",
+          "High-yield credit spreads remain compressed under 320 bps.",
+          "Core disinflation supports continuation of policy easing cycle."
+        ]
+      }
+    }
+  },
+  {
+    "sequence_id": 8,
+    "event_id": "EVT_008_SPY_SCHWAB_LEVEL1_QUOTE",
+    "timestamp": "2026-10-17T19:20:04.015Z",
+    "timestamp_epoch_ms": 1792264804015,
+    "stream_elapsed_ms": 4015,
+    "schema_type": "SCHWAB_LEVEL1_QUOTE",
+    "source": "schwab_streaming_ws",
+    "symbol": "SPY",
+    "telemetry_metadata": {
+      "network_latency_ms": 16.8,
+      "jitter_ms": 8.2,
+      "simulated_arrival_ms": 4031.8
+    },
+    "payload": {
+      "service": "LEVELONE_EQUITIES",
+      "command": "SUBS",
+      "timestamp": 1792264804015,
+      "content": [
+        {
+          "key": "SPY",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "ETF",
+          "cusip": "78462F103",
+          "0": "SPY",
+          "1": 585.14,
+          "2": 585.17,
+          "3": 585.16,
+          "4": 160,
+          "5": 95,
+          "8": 42160100,
+          "10": 582.4,
+          "11": 586.01,
+          "12": 581.75,
+          "13": 584.05,
+          "14": "P",
+          "24": 1792264803999,
+          "bidPrice": 585.14,
+          "askPrice": 585.17,
+          "lastPrice": 585.16,
+          "bidSize": 160,
+          "askSize": 95,
+          "totalVolume": 42160100,
+          "quoteTime": 1792264803999
+        }
+      ],
+      "schwab_rest_spec": {
+        "symbol": "SPY",
+        "assetMainType": "EQUITY",
+        "assetSubType": "ETF",
+        "quote": {
+          "bidPrice": 585.14,
+          "askPrice": 585.17,
+          "lastPrice": 585.16,
+          "bidSize": 160,
+          "askSize": 95,
+          "totalVolume": 42160100,
+          "openPrice": 582.4,
+          "highPrice": 586.01,
+          "lowPrice": 581.75,
+          "closePrice": 584.05,
+          "mark": 585.155,
+          "netChange": 1.11,
+          "netPercentChange": 0.19,
+          "quoteTime": 1792264803999,
+          "securityStatus": "Normal"
+        },
+        "reference": {
+          "cusip": "78462F103",
+          "description": "SPDR S&P 500 ETF TRUST",
+          "exchange": "P",
+          "exchangeName": "NYSE Arca",
+          "isHardToBorrow": false,
+          "isShortable": true
+        }
+      }
+    }
+  },
+  {
+    "sequence_id": 9,
+    "event_id": "EVT_009_SOXL_SCHWAB_LEVEL1_QUOTE",
+    "timestamp": "2026-10-17T19:20:04.628Z",
+    "timestamp_epoch_ms": 1792264804628,
+    "stream_elapsed_ms": 4628,
+    "schema_type": "SCHWAB_LEVEL1_QUOTE",
+    "source": "schwab_streaming_ws",
+    "symbol": "SOXL",
+    "telemetry_metadata": {
+      "network_latency_ms": 26.2,
+      "jitter_ms": 1.2,
+      "simulated_arrival_ms": 4654.2
+    },
+    "payload": {
+      "service": "LEVELONE_EQUITIES",
+      "command": "SUBS",
+      "timestamp": 1792264804628,
+      "content": [
+        {
+          "key": "SOXL",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "ETF",
+          "cusip": "83410S108",
+          "0": "SOXL",
+          "1": 45.65,
+          "2": 45.68,
+          "3": 45.66,
+          "4": 420,
+          "5": 190,
+          "8": 18342500,
+          "10": 45.2,
+          "11": 46.51,
+          "12": 44.55,
+          "13": 45.1,
+          "14": "P",
+          "24": 1792264804602,
+          "bidPrice": 45.65,
+          "askPrice": 45.68,
+          "lastPrice": 45.66,
+          "bidSize": 420,
+          "askSize": 190,
+          "totalVolume": 18342500,
+          "quoteTime": 1792264804602
+        }
+      ],
+      "schwab_rest_spec": {
+        "symbol": "SOXL",
+        "assetMainType": "EQUITY",
+        "assetSubType": "ETF",
+        "quote": {
+          "bidPrice": 45.65,
+          "askPrice": 45.68,
+          "lastPrice": 45.66,
+          "bidSize": 420,
+          "askSize": 190,
+          "totalVolume": 18342500,
+          "openPrice": 45.2,
+          "highPrice": 46.51,
+          "lowPrice": 44.55,
+          "closePrice": 45.1,
+          "mark": 45.665,
+          "netChange": 0.56,
+          "netPercentChange": 1.242,
+          "quoteTime": 1792264804602,
+          "securityStatus": "Normal"
+        },
+        "reference": {
+          "cusip": "83410S108",
+          "description": "DIREXION DAILY SEMICONDUCTOR BULL 3X SHARES",
+          "exchange": "P",
+          "exchangeName": "NYSE Arca",
+          "isHardToBorrow": false,
+          "isShortable": true
+        }
+      }
+    }
+  },
+  {
+    "sequence_id": 10,
+    "event_id": "EVT_010_TQQQ_SCHWAB_LEVEL1_QUOTE",
+    "timestamp": "2026-10-17T19:20:05.192Z",
+    "timestamp_epoch_ms": 1792264805192,
+    "stream_elapsed_ms": 5192,
+    "schema_type": "SCHWAB_LEVEL1_QUOTE",
+    "source": "schwab_streaming_ws",
+    "symbol": "TQQQ",
+    "telemetry_metadata": {
+      "network_latency_ms": 19.7,
+      "jitter_ms": 5.3,
+      "simulated_arrival_ms": 5211.7
+    },
+    "payload": {
+      "service": "LEVELONE_EQUITIES",
+      "command": "SUBS",
+      "timestamp": 1792264805192,
+      "content": [
+        {
+          "key": "TQQQ",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "ETF",
+          "cusip": "74347X831",
+          "0": "TQQQ",
+          "1": 78.43,
+          "2": 78.46,
+          "3": 78.44,
+          "4": 210,
+          "5": 110,
+          "8": 24192800,
+          "10": 78.1,
+          "11": 79.29,
+          "12": 77.45,
+          "13": 77.85,
+          "14": "Q",
+          "24": 1792264805173,
+          "bidPrice": 78.43,
+          "askPrice": 78.46,
+          "lastPrice": 78.44,
+          "bidSize": 210,
+          "askSize": 110,
+          "totalVolume": 24192800,
+          "quoteTime": 1792264805173
+        }
+      ],
+      "schwab_rest_spec": {
+        "symbol": "TQQQ",
+        "assetMainType": "EQUITY",
+        "assetSubType": "ETF",
+        "quote": {
+          "bidPrice": 78.43,
+          "askPrice": 78.46,
+          "lastPrice": 78.44,
+          "bidSize": 210,
+          "askSize": 110,
+          "totalVolume": 24192800,
+          "openPrice": 78.1,
+          "highPrice": 79.29,
+          "lowPrice": 77.45,
+          "closePrice": 77.85,
+          "mark": 78.445,
+          "netChange": 0.59,
+          "netPercentChange": 0.758,
+          "quoteTime": 1792264805173,
+          "securityStatus": "Normal"
+        },
+        "reference": {
+          "cusip": "74347X831",
+          "description": "PROSHARES ULTRAPRO QQQ",
+          "exchange": "Q",
+          "exchangeName": "NASDAQ Global Market",
+          "isHardToBorrow": false,
+          "isShortable": true
+        }
+      }
+    }
+  },
+  {
+    "sequence_id": 11,
+    "event_id": "EVT_011_BAMLH0A0HYM2_FRED_MACRO_DATA",
+    "timestamp": "2026-10-17T19:20:05.764Z",
+    "timestamp_epoch_ms": 1792264805764,
+    "stream_elapsed_ms": 5764,
+    "schema_type": "FRED_MACRO_DATA",
+    "source": "stlouisfed_fred_api",
+    "symbol": "BAMLH0A0HYM2",
+    "telemetry_metadata": {
+      "network_latency_ms": 38.1,
+      "jitter_ms": 13.1,
+      "simulated_arrival_ms": 5802.1
+    },
+    "payload": {
+      "realtime_start": "2026-10-17",
+      "realtime_end": "2026-10-17",
+      "observation_start": "2026-10-01",
+      "observation_end": "2026-10-17",
+      "units": "Percent",
+      "output_type": 1,
+      "file_type": "json",
+      "order_by": "observation_date",
+      "sort_order": "desc",
+      "count": 1,
+      "limit": 100,
+      "offset": 0,
+      "series_id": "BAMLH0A0HYM2",
+      "series_title": "ICE BofA US High Yield Index Option-Adjusted Spread",
+      "frequency": "Daily, Close",
+      "seasonal_adjustment": "Not Seasonally Adjusted",
+      "last_updated": "2026-10-17 09:15:02-05",
+      "observations": [
+        {
+          "realtime_start": "2026-10-17",
+          "realtime_end": "2026-10-17",
+          "date": "2026-10-16",
+          "value": "3.17",
+          "spread_basis_points": 317.0,
+          "status": "BENIGN",
+          "regime_implication": "RISK_ON_ACCOMMODATIVE",
+          "threshold_breach": false,
+          "z_score_20d": -0.42
+        }
+      ]
+    }
+  },
+  {
+    "sequence_id": 12,
+    "event_id": "EVT_012_TNA_SCHWAB_LEVEL1_QUOTE",
+    "timestamp": "2026-10-17T19:20:06.340Z",
+    "timestamp_epoch_ms": 1792264806340,
+    "stream_elapsed_ms": 6340,
+    "schema_type": "SCHWAB_LEVEL1_QUOTE",
+    "source": "schwab_streaming_ws",
+    "symbol": "TNA",
+    "telemetry_metadata": {
+      "network_latency_ms": 24.5,
+      "jitter_ms": 0.5,
+      "simulated_arrival_ms": 6364.5
+    },
+    "payload": {
+      "service": "LEVELONE_EQUITIES",
+      "command": "SUBS",
+      "timestamp": 1792264806340,
+      "content": [
+        {
+          "key": "TNA",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "ETF",
+          "cusip": "25459W847",
+          "0": "TNA",
+          "1": 50.88,
+          "2": 50.91,
+          "3": 50.89,
+          "4": 310,
+          "5": 160,
+          "8": 8422100,
+          "10": 50.5,
+          "11": 51.74,
+          "12": 49.85,
+          "13": 50.4,
+          "14": "P",
+          "24": 1792264806316,
+          "bidPrice": 50.88,
+          "askPrice": 50.91,
+          "lastPrice": 50.89,
+          "bidSize": 310,
+          "askSize": 160,
+          "totalVolume": 8422100,
+          "quoteTime": 1792264806316
+        }
+      ],
+      "schwab_rest_spec": {
+        "symbol": "TNA",
+        "assetMainType": "EQUITY",
+        "assetSubType": "ETF",
+        "quote": {
+          "bidPrice": 50.88,
+          "askPrice": 50.91,
+          "lastPrice": 50.89,
+          "bidSize": 310,
+          "askSize": 160,
+          "totalVolume": 8422100,
+          "openPrice": 50.5,
+          "highPrice": 51.74,
+          "lowPrice": 49.85,
+          "closePrice": 50.4,
+          "mark": 50.895,
+          "netChange": 0.49,
+          "netPercentChange": 0.972,
+          "quoteTime": 1792264806316,
+          "securityStatus": "Normal"
+        },
+        "reference": {
+          "cusip": "25459W847",
+          "description": "DIREXION DAILY SMALL CAP BULL 3X SHARES",
+          "exchange": "P",
+          "exchangeName": "NYSE Arca",
+          "isHardToBorrow": false,
+          "isShortable": true
+        }
+      }
+    }
+  },
+  {
+    "sequence_id": 13,
+    "event_id": "EVT_013_ACCOUNT_BALANCES_SCHWAB_ACCOUNT_BALANCE",
+    "timestamp": "2026-10-17T19:20:06.912Z",
+    "timestamp_epoch_ms": 1792264806912,
+    "stream_elapsed_ms": 6912,
+    "schema_type": "SCHWAB_ACCOUNT_BALANCE",
+    "source": "schwab_trader_api",
+    "symbol": "ACCOUNT_BALANCES",
+    "telemetry_metadata": {
+      "network_latency_ms": 40.5,
+      "jitter_ms": 15.5,
+      "simulated_arrival_ms": 6952.5
+    },
+    "payload": {
+      "securitiesAccount": {
+        "type": "MARGIN",
+        "accountNumber": "987654321",
+        "roundTrips": 0,
+        "isDayTrader": true,
+        "isClosingOnlyRestricted": false,
+        "pfcbFlag": false,
+        "currentBalances": {
+          "accruedInterest": 0.0,
+          "availableFunds": 15000.0,
+          "availableFundsNonMarginableTrade": 15000.0,
+          "bondValue": 0.0,
+          "buyingPower": 30000.0,
+          "cashAvailableForTrading": 15000.0,
+          "cashBalance": 15000.0,
+          "cashReceipts": 0.0,
+          "dayTradingBuyingPower": 400000.0,
+          "dayTradingBuyingPowerCall": 0.0,
+          "dayTradingEquityCall": 0.0,
+          "equity": 100000.0,
+          "equityPercentage": 100.0,
+          "liquidationValue": 100000.0,
+          "longMarginValue": 85000.0,
+          "longMarketValue": 85000.0,
+          "maintenanceCall": 0.0,
+          "maintenanceRequirement": 25500.0,
+          "margin": 0.0,
+          "marginBalance": 0.0,
+          "marginEquity": 100000.0,
+          "moneyMarketFund": 0.0,
+          "mutualFundValue": 0.0,
+          "regTCall": 0.0,
+          "savings": 0.0,
+          "shortBalance": 0.0,
+          "shortMarginValue": 0.0,
+          "shortMarketValue": 0.0,
+          "sma": 15000.0,
+          "totalCash": 15000.0,
+          "unsettledCash": 0.0
+        },
+        "initialBalances": {
+          "accruedInterest": 0.0,
+          "availableFundsNonMarginableTrade": 15000.0,
+          "bondValue": 0.0,
+          "buyingPower": 30000.0,
+          "cashBalance": 15000.0,
+          "cashAvailableForTrading": 15000.0,
+          "dayTradingBuyingPower": 400000.0,
+          "equity": 100000.0,
+          "liquidationValue": 100000.0,
+          "longMarketValue": 85000.0,
+          "unsettledCash": 0.0
+        },
+        "projectedBalances": {
+          "availableFunds": 15000.0,
+          "availableFundsNonMarginableTrade": 15000.0,
+          "buyingPower": 30000.0,
+          "cashAvailableForTrading": 15000.0,
+          "dayTradingBuyingPower": 400000.0,
+          "maintenanceCall": 0.0,
+          "regTCall": 0.0,
+          "isInCall": false,
+          "stockBuyingPower": 30000.0
+        },
+        "positions": [
+          {
+            "shortQuantity": 0.0,
+            "averagePrice": 45.2,
+            "currentDayProfitLoss": 230.0,
+            "currentDayProfitLossPercentage": 1.02,
+            "longQuantity": 500.0,
+            "settledLongQuantity": 500.0,
+            "settledShortQuantity": 0.0,
+            "instrument": {
+              "assetType": "EQUITY",
+              "cusip": "83410S108",
+              "symbol": "SOXL",
+              "description": "DIREXION DAILY SEMICONDUCTOR BULL 3X"
+            },
+            "marketValue": 22830.0
+          },
+          {
+            "shortQuantity": 0.0,
+            "averagePrice": 78.1,
+            "currentDayProfitLoss": 204.0,
+            "currentDayProfitLossPercentage": 0.43,
+            "longQuantity": 600.0,
+            "settledLongQuantity": 600.0,
+            "settledShortQuantity": 0.0,
+            "instrument": {
+              "assetType": "EQUITY",
+              "cusip": "74347X831",
+              "symbol": "TQQQ",
+              "description": "PROSHARES ULTRAPRO QQQ"
+            },
+            "marketValue": 47064.0
+          },
+          {
+            "shortQuantity": 0.0,
+            "averagePrice": 50.35,
+            "currentDayProfitLoss": 156.0,
+            "currentDayProfitLossPercentage": 1.03,
+            "longQuantity": 300.0,
+            "settledLongQuantity": 300.0,
+            "settledShortQuantity": 0.0,
+            "instrument": {
+              "assetType": "EQUITY",
+              "cusip": "25459W847",
+              "symbol": "TNA",
+              "description": "DIREXION DAILY SMALL CAP BULL 3X"
+            },
+            "marketValue": 15261.0
+          }
+        ],
+        "telemetry_sync": {
+          "sync_epoch_ms": 1792264806912,
+          "network_latency_ms": 40.5,
+          "invariants": {
+            "settlement_model": "T+1_MARGIN",
+            "gfv_risk": 0,
+            "liquidation_value_match": true
+          }
+        }
+      }
+    }
+  },
+  {
+    "sequence_id": 14,
+    "event_id": "EVT_014_MACRO_SENTIMENT_GEMINI_NLP_SENTIMENT",
+    "timestamp": "2026-10-17T19:20:07.489Z",
+    "timestamp_epoch_ms": 1792264807489,
+    "stream_elapsed_ms": 7489,
+    "schema_type": "GEMINI_NLP_SENTIMENT",
+    "source": "gemini_nlp_engine",
+    "symbol": "MACRO_SENTIMENT",
+    "telemetry_metadata": {
+      "network_latency_ms": 47.9,
+      "jitter_ms": 22.9,
+      "simulated_arrival_ms": 7536.9
+    },
+    "payload": {
+      "model": "gemini-2.5-flash",
+      "prompt_context": "FOMC_PRESS_BRIEFING_AND_LABOR_TELEMETRY",
+      "sentiment_classification": "DOVISH",
+      "dovish_hawkish_scoring": {
+        "dovish_score": 0.87,
+        "hawkish_score": 0.13,
+        "neutral_score": 0.0,
+        "net_dovish_polarity": 0.74,
+        "conviction": "HIGH"
+      },
+      "macro_decision_payload": {
+        "macro_regime": "REGIME_A",
+        "market_bias": "BULLISH",
+        "confidence_score": 0.96,
+        "risk_multiplier": 1.0,
+        "trade_permitted": true,
+        "inhibition_reason": null,
+        "high_impact_warning": null
+      },
+      "sector_drift_multipliers": {
+        "tech_beta": 1.15,
+        "small_cap_credit": 1.08,
+        "energy_beta": 0.92
+      },
+      "telemetry_metrics": {
+        "inference_latency_ms": 298.4,
+        "tokens_consumed": 420,
+        "thematic_drivers": [
+          "Labor market stabilization reduces recession risk; soft landing reaffirmed.",
+          "High-yield credit spreads remain compressed under 320 bps.",
+          "Core disinflation supports continuation of policy easing cycle."
+        ]
+      }
+    }
+  },
+  {
+    "sequence_id": 15,
+    "event_id": "EVT_015_SPY_SCHWAB_LEVEL1_QUOTE",
+    "timestamp": "2026-10-17T19:20:08.062Z",
+    "timestamp_epoch_ms": 1792264808062,
+    "stream_elapsed_ms": 8062,
+    "schema_type": "SCHWAB_LEVEL1_QUOTE",
+    "source": "schwab_streaming_ws",
+    "symbol": "SPY",
+    "telemetry_metadata": {
+      "network_latency_ms": 15.1,
+      "jitter_ms": 9.9,
+      "simulated_arrival_ms": 8077.1
+    },
+    "payload": {
+      "service": "LEVELONE_EQUITIES",
+      "command": "SUBS",
+      "timestamp": 1792264808062,
+      "content": [
+        {
+          "key": "SPY",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "ETF",
+          "cusip": "78462F103",
+          "0": "SPY",
+          "1": 585.16,
+          "2": 585.19,
+          "3": 585.18,
+          "4": 190,
+          "5": 75,
+          "8": 42162000,
+          "10": 582.4,
+          "11": 586.03,
+          "12": 581.75,
+          "13": 584.05,
+          "14": "P",
+          "24": 1792264808047,
+          "bidPrice": 585.16,
+          "askPrice": 585.19,
+          "lastPrice": 585.18,
+          "bidSize": 190,
+          "askSize": 75,
+          "totalVolume": 42162000,
+          "quoteTime": 1792264808047
+        }
+      ],
+      "schwab_rest_spec": {
+        "symbol": "SPY",
+        "assetMainType": "EQUITY",
+        "assetSubType": "ETF",
+        "quote": {
+          "bidPrice": 585.16,
+          "askPrice": 585.19,
+          "lastPrice": 585.18,
+          "bidSize": 190,
+          "askSize": 75,
+          "totalVolume": 42162000,
+          "openPrice": 582.4,
+          "highPrice": 586.03,
+          "lowPrice": 581.75,
+          "closePrice": 584.05,
+          "mark": 585.175,
+          "netChange": 1.13,
+          "netPercentChange": 0.193,
+          "quoteTime": 1792264808047,
+          "securityStatus": "Normal"
+        },
+        "reference": {
+          "cusip": "78462F103",
+          "description": "SPDR S&P 500 ETF TRUST",
+          "exchange": "P",
+          "exchangeName": "NYSE Arca",
+          "isHardToBorrow": false,
+          "isShortable": true
+        }
+      }
+    }
+  },
+  {
+    "sequence_id": 16,
+    "event_id": "EVT_016_SOXL_SCHWAB_LEVEL1_QUOTE",
+    "timestamp": "2026-10-17T19:20:08.634Z",
+    "timestamp_epoch_ms": 1792264808634,
+    "stream_elapsed_ms": 8634,
+    "schema_type": "SCHWAB_LEVEL1_QUOTE",
+    "source": "schwab_streaming_ws",
+    "symbol": "SOXL",
+    "telemetry_metadata": {
+      "network_latency_ms": 27.8,
+      "jitter_ms": 2.8,
+      "simulated_arrival_ms": 8661.8
+    },
+    "payload": {
+      "service": "LEVELONE_EQUITIES",
+      "command": "SUBS",
+      "timestamp": 1792264808634,
+      "content": [
+        {
+          "key": "SOXL",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "ETF",
+          "cusip": "83410S108",
+          "0": "SOXL",
+          "1": 45.68,
+          "2": 45.71,
+          "3": 45.7,
+          "4": 380,
+          "5": 150,
+          "8": 18345000,
+          "10": 45.2,
+          "11": 46.55,
+          "12": 44.55,
+          "13": 45.1,
+          "14": "P",
+          "24": 1792264808607,
+          "bidPrice": 45.68,
+          "askPrice": 45.71,
+          "lastPrice": 45.7,
+          "bidSize": 380,
+          "askSize": 150,
+          "totalVolume": 18345000,
+          "quoteTime": 1792264808607
+        }
+      ],
+      "schwab_rest_spec": {
+        "symbol": "SOXL",
+        "assetMainType": "EQUITY",
+        "assetSubType": "ETF",
+        "quote": {
+          "bidPrice": 45.68,
+          "askPrice": 45.71,
+          "lastPrice": 45.7,
+          "bidSize": 380,
+          "askSize": 150,
+          "totalVolume": 18345000,
+          "openPrice": 45.2,
+          "highPrice": 46.55,
+          "lowPrice": 44.55,
+          "closePrice": 45.1,
+          "mark": 45.695,
+          "netChange": 0.6,
+          "netPercentChange": 1.33,
+          "quoteTime": 1792264808607,
+          "securityStatus": "Normal"
+        },
+        "reference": {
+          "cusip": "83410S108",
+          "description": "DIREXION DAILY SEMICONDUCTOR BULL 3X SHARES",
+          "exchange": "P",
+          "exchangeName": "NYSE Arca",
+          "isHardToBorrow": false,
+          "isShortable": true
+        }
+      }
+    }
+  },
+  {
+    "sequence_id": 17,
+    "event_id": "EVT_017_TQQQ_SCHWAB_LEVEL1_QUOTE",
+    "timestamp": "2026-10-17T19:20:09.218Z",
+    "timestamp_epoch_ms": 1792264809218,
+    "stream_elapsed_ms": 9218,
+    "schema_type": "SCHWAB_LEVEL1_QUOTE",
+    "source": "schwab_streaming_ws",
+    "symbol": "TQQQ",
+    "telemetry_metadata": {
+      "network_latency_ms": 20.3,
+      "jitter_ms": 4.7,
+      "simulated_arrival_ms": 9238.3
+    },
+    "payload": {
+      "service": "LEVELONE_EQUITIES",
+      "command": "SUBS",
+      "timestamp": 1792264809218,
+      "content": [
+        {
+          "key": "TQQQ",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "ETF",
+          "cusip": "74347X831",
+          "0": "TQQQ",
+          "1": 78.46,
+          "2": 78.49,
+          "3": 78.48,
+          "4": 230,
+          "5": 105,
+          "8": 24195400,
+          "10": 78.1,
+          "11": 79.33,
+          "12": 77.45,
+          "13": 77.85,
+          "14": "Q",
+          "24": 1792264809198,
+          "bidPrice": 78.46,
+          "askPrice": 78.49,
+          "lastPrice": 78.48,
+          "bidSize": 230,
+          "askSize": 105,
+          "totalVolume": 24195400,
+          "quoteTime": 1792264809198
+        }
+      ],
+      "schwab_rest_spec": {
+        "symbol": "TQQQ",
+        "assetMainType": "EQUITY",
+        "assetSubType": "ETF",
+        "quote": {
+          "bidPrice": 78.46,
+          "askPrice": 78.49,
+          "lastPrice": 78.48,
+          "bidSize": 230,
+          "askSize": 105,
+          "totalVolume": 24195400,
+          "openPrice": 78.1,
+          "highPrice": 79.33,
+          "lowPrice": 77.45,
+          "closePrice": 77.85,
+          "mark": 78.475,
+          "netChange": 0.63,
+          "netPercentChange": 0.809,
+          "quoteTime": 1792264809198,
+          "securityStatus": "Normal"
+        },
+        "reference": {
+          "cusip": "74347X831",
+          "description": "PROSHARES ULTRAPRO QQQ",
+          "exchange": "Q",
+          "exchangeName": "NASDAQ Global Market",
+          "isHardToBorrow": false,
+          "isShortable": true
+        }
+      }
+    }
+  },
+  {
+    "sequence_id": 18,
+    "event_id": "EVT_018_TNA_SCHWAB_LEVEL1_QUOTE",
+    "timestamp": "2026-10-17T19:20:09.845Z",
+    "timestamp_epoch_ms": 1792264809845,
+    "stream_elapsed_ms": 9845,
+    "schema_type": "SCHWAB_LEVEL1_QUOTE",
+    "source": "schwab_streaming_ws",
+    "symbol": "TNA",
+    "telemetry_metadata": {
+      "network_latency_ms": 23.9,
+      "jitter_ms": 1.1,
+      "simulated_arrival_ms": 9868.9
+    },
+    "payload": {
+      "service": "LEVELONE_EQUITIES",
+      "command": "SUBS",
+      "timestamp": 1792264809845,
+      "content": [
+        {
+          "key": "TNA",
+          "delayed": false,
+          "assetMainType": "EQUITY",
+          "assetSubType": "ETF",
+          "cusip": "25459W847",
+          "0": "TNA",
+          "1": 50.9,
+          "2": 50.93,
+          "3": 50.92,
+          "4": 340,
+          "5": 130,
+          "8": 8423500,
+          "10": 50.5,
+          "11": 51.77,
+          "12": 49.85,
+          "13": 50.4,
+          "14": "P",
+          "24": 1792264809822,
+          "bidPrice": 50.9,
+          "askPrice": 50.93,
+          "lastPrice": 50.92,
+          "bidSize": 340,
+          "askSize": 130,
+          "totalVolume": 8423500,
+          "quoteTime": 1792264809822
+        }
+      ],
+      "schwab_rest_spec": {
+        "symbol": "TNA",
+        "assetMainType": "EQUITY",
+        "assetSubType": "ETF",
+        "quote": {
+          "bidPrice": 50.9,
+          "askPrice": 50.93,
+          "lastPrice": 50.92,
+          "bidSize": 340,
+          "askSize": 130,
+          "totalVolume": 8423500,
+          "openPrice": 50.5,
+          "highPrice": 51.77,
+          "lowPrice": 49.85,
+          "closePrice": 50.4,
+          "mark": 50.915,
+          "netChange": 0.52,
+          "netPercentChange": 1.032,
+          "quoteTime": 1792264809822,
+          "securityStatus": "Normal"
+        },
+        "reference": {
+          "cusip": "25459W847",
+          "description": "DIREXION DAILY SMALL CAP BULL 3X SHARES",
+          "exchange": "P",
+          "exchangeName": "NYSE Arca",
+          "isHardToBorrow": false,
+          "isShortable": true
+        }
+      }
+    }
+  }
+]

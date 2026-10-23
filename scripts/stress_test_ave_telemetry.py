@@ -213,7 +213,7 @@ def test_asymmetric_switch_contract():
     assert r_live.status_code == 200
     assert r_live.json() == {"success": True, "mode": "live"}
     # Verify disk persistence in strategy_config.json
-    strategy_cfg = json.loads(Path("strategy_config.json").read_text(encoding="utf-8"))
+    strategy_cfg = json.loads(Path("config/strategy_config.json").read_text(encoding="utf-8"))
     assert strategy_cfg.get("ave", {}).get("mode") == "live"
     print("[PASS] POST /api/config/ave-mode ('live'): State mutated & persisted to strategy_config.json.")
 
@@ -221,7 +221,7 @@ def test_asymmetric_switch_contract():
     r_shadow = client.post("/api/config/ave-mode", json={"mode": "shadow"})
     assert r_shadow.status_code == 200
     assert r_shadow.json() == {"success": True, "mode": "shadow"}
-    strategy_cfg = json.loads(Path("strategy_config.json").read_text(encoding="utf-8"))
+    strategy_cfg = json.loads(Path("config/strategy_config.json").read_text(encoding="utf-8"))
     assert strategy_cfg.get("ave", {}).get("mode") == "shadow"
     print("[PASS] POST /api/config/ave-mode ('shadow'): Emergency kill switch persisted to strategy_config.json.")
 

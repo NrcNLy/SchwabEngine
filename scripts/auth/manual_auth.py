@@ -1,6 +1,6 @@
 """
-manual_auth.py
-==============
+scripts/auth/manual_auth.py
+==========================
 Exchanges a Schwab authorization code (or the full redirected URL)
 for tokens, creates the encrypted vault file, and pushes it to the VM.
 Zero SSH tunnel or local server required.
@@ -16,8 +16,12 @@ import requests
 from pathlib import Path
 from dotenv import load_dotenv
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 # Load credentials from .env
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(PROJECT_ROOT / ".env")
 
 CLIENT_ID = os.getenv("SCHWAB_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SCHWAB_CLIENT_SECRET")
@@ -86,7 +90,7 @@ def exchange_and_save(raw_input_url_or_code, redirect_uri="https://127.0.0.1:555
     from core.runtime import load_config
     cfg = load_config()
     iterations = int(cfg.get("auth", {}).get("pbkdf2_iterations", 600000))
-    vault_path = Path(__file__).parent / cfg.get("auth", {}).get("vault_file", "schwab_tokens_vault.json")
+    vault_path = PROJECT_ROOT / cfg.get("auth", {}).get("vault_file", "schwab_tokens_vault.json")
     vault = SecurityVault(passphrase=PASSPHRASE, iterations=iterations, vault_path=vault_path)
     
     issued_at = time.time()
@@ -105,7 +109,7 @@ def exchange_and_save(raw_input_url_or_code, redirect_uri="https://127.0.0.1:555
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python manual_auth.py '<url_or_code>'")
+        print("Usage: python scripts/auth/manual_auth.py '<url_or_code>'")
         sys.exit(1)
     url_or_code = sys.argv[1]
     success = exchange_and_save(url_or_code)

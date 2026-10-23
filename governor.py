@@ -28,6 +28,7 @@ except ImportError:
     types = None
 
 from core.models import GovernorConfig
+from core.paths import STRATEGY_CONFIG_FILE
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("governor")
@@ -47,7 +48,7 @@ class GovernorDaemon:
         if genai is None:
             raise RuntimeError("google-genai SDK not found. Install via: pip install google-genai")
         self.client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
-        self.config_path = Path("strategy_config.json")
+        self.config_path = STRATEGY_CONFIG_FILE
         
     def _verify_model_safeguard(self, model: str):
         if model not in ALLOWED_MODELS:
@@ -69,7 +70,7 @@ class GovernorDaemon:
         json_payload = json.dumps(config, indent=2)
         
         # Write to a temporary file on the same filesystem
-        temp_fd, temp_path = tempfile.mkstemp(dir="./")
+        temp_fd, temp_path = tempfile.mkstemp(dir=str(self.config_path.parent))
         with os.fdopen(temp_fd, 'w') as f:
             f.write(json_payload)
             f.flush()
@@ -131,11 +132,14 @@ class GovernorDaemon:
                     logger.warning(f"Failed to push ntfy alert: {ntfy_exc}")
 
                 logger.info("Pre-Market Routine Completed Successfully.")
+                return response_data
             except Exception as parse_exc:
                  logger.error(f"Failed to parse or apply structured output: {parse_exc}")
+                 return None
 
         except Exception as exc:
             logger.error(f"Macro routine failed: {exc}")
+            return None
 
     async def run_smoke_test(self):
         """Verifies Vertex AI API client connectivity under the required GCP project."""

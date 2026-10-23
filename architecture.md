@@ -274,3 +274,25 @@ Google Cloud Recommender suggests downsizing instance `schwab-trader` from `e2-s
 > In leveraged ETF trading (`SOXL` 3x), an execution delay of just 2 to 3 seconds during a volatility spike can incur hundreds of dollars in slippage, completely erasing the $24.12 monthly infrastructure savings. Hardware determinism and non-burstable CPU guarantees are non-negotiable prerequisites for autonomous quantitative execution.
 >
 > **Cost Optimization Alternative:** If budget reduction is required, purchase a 1-year or 3-year Google Cloud Committed Use Discount (CUD) for `e2-standard-2`, which saves 37% to 55% ($18 to $27/month) while preserving 100% dedicated compute performance.
+
+
+## Repository Layout & Google Drive Sync (Task #120)
+
+### Root layout
+| Area | Contents |
+|---|---|
+| Core packages | `api/ config/ core/ execution/ indicators/ macro/ news/ portfolio/ reconciliation/ research/ services/ src/ strategies/ telemetry/ web/ workers/` |
+| Data & storage | `data/` (`exports/` generated datasets, `fixtures/` static test/replay inputs), `docs/` (`architecture/` holds the mathematical architecture and Argon plan), `logs/`, `state/` |
+| Tooling & tests | `scripts/` (`dev/`, `auth/`, `tools/`), `tests/` |
+| Root invariants | `architecture.md`, `research_context.md`, `main.py`, `server.py`, `governor.py`, `Dockerfile` (plus frontend/build config) |
+
+Path resolution is centralised in `core/paths.py` (`STRATEGY_CONFIG_FILE` -> `config/strategy_config.json`, `TELEMETRY_FIXTURE_FILE`, `EXPORTS_DIR`, `REMOTE_VM_STATE_DIR` -> `state/remote_vm_state/`). Do not hard-code root-relative asset paths.
+
+### Drive mirror (`scripts/sync_engine_drive.py`)
+One-way, authoritative **Local -> `G:\My Drive\Projects\SchwabEngine\`**. Mirrored: `docs/ state/ data/ config/ strategies/ indicators/`, `architecture.md`, `research_context.md`.
+
+- **Never mirrored:** `.git/ .venv/ node_modules/`, `logs/*.jsonl`, `*token*.json`, `*.vault.json`, `.env*`, `*~ *.tmp *.wal *.shm`.
+- **SQLite:** every `*.db` is snapshotted with the online backup API + `VACUUM` and published as `<name>_backup.db` (e.g. `state/trading_journal_backup.db`); live DB files are never raw-copied.
+- **Writes** go through a temp file + `os.replace`. Drive-side deletions only happen with an explicit `--prune`.
+- **Modes:** `--once` (single pass) or the daemon (15 s poll, 2 s debounce). Start/stop/status with `scripts/start_drive_sync.ps1 [-Stop|-Status]`; logs in `logs/drive_sync.log`.
+- **Engine hooks:** `main.py` `shadow_cycle` triggers a pass every 10 minutes and the shutdown handler (EOD digest) runs a final pass via `core/shadow.py::run_drive_sync`. Hosts without a Drive mount (the Linux VM) skip silently.

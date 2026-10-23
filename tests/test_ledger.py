@@ -33,11 +33,11 @@ def test_three_bucket_invariants():
     safe, msg = pos.is_gfv_safe_to_sell()
     assert safe is True
 
-    # Record sell -> proceeds $300 enter unsettled_cash (Bucket 2)
+    # Record sell -> proceeds $300 immediately credit settled_cash under FINRA 4210
     proceeds = lg.record_sell("SOXL", 2, "150", simulated=True, when=FRIDAY_NOON)
     assert proceeds == D("300.00")
-    assert lg.settled_cash == D("1220.00")
-    assert lg.unsettled_cash == D("300.00")
+    assert lg.settled_cash == D("1520.00")
+    assert lg.unsettled_cash == D("0.00")
     assert lg.locked_cash == D("0.00")
 
 
@@ -67,7 +67,8 @@ def test_strict_reconciliation_lock_live_mode():
         execution_payload=filled_doc
     )
     assert proceeds == D("260.00")
-    assert lg.unsettled_cash == D("260.00")
+    assert lg.settled_cash == D("1260.00")
+    assert lg.unsettled_cash == D("0.00")
 
 
 def test_gfv_blocked_and_overnight_hold_transition():
@@ -77,14 +78,14 @@ def test_gfv_blocked_and_overnight_hold_transition():
         funded_with_settled=False, settle_date=date(2026, 10, 5)
     )
 
-    # Intraday sale blocked
+    # Intraday sale is permitted under FINRA 4210 margin framework (GFV exempt)
     can_sell, veto = lg.can_sell_position("TNA", today=date(2026, 10, 2))
-    assert can_sell is False
-    assert "GFV VETO" in veto
+    assert can_sell is True
+    assert "GFV exempt" in veto
 
-    # Weekend / pre-settlement blocked
+    # Weekend / pre-settlement permitted
     can_sell_wk, _ = lg.can_sell_position("TNA", today=date(2026, 10, 4))
-    assert can_sell_wk is False
+    assert can_sell_wk is True
 
     # Settlement day (Monday) unlocked
     can_sell_mon, _ = lg.can_sell_position("TNA", today=date(2026, 10, 5))

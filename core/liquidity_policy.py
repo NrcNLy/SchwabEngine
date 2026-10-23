@@ -119,7 +119,7 @@ class SweepPolicy(BaseModel):
     min_idle_usd: Decimal = Field(default=Decimal("250.00"), ge=0)
     trading_float_pct_nlv: Decimal = Field(default=Decimal("0.40"), ge=0, le=1)
     redemption_lead_business_days: int = Field(default=1, ge=1, le=3)
-    min_account_equity_usd: Decimal = Field(default=Decimal("25000.00"), ge=0)
+    min_account_equity_usd: Decimal = Field(default=Decimal("2000.00"), ge=0)
     operational_float_floor_usd: Decimal = Field(default=Decimal("3500.00"), ge=0)
 
 
@@ -327,7 +327,7 @@ def _advise_sweep(
     if sw.mode == "OFF":
         return SweepAdvisory(mode=sw.mode, rationale="Sweep advisory disabled.")
 
-    # Guard 1: Sub-$25,000 cash account equity firewall
+    # Guard 1: Sub-$2,000 margin equity firewall
     if nlv < sw.min_account_equity_usd:
         return SweepAdvisory(
             action="NONE",

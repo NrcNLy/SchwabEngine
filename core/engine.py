@@ -28,7 +28,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timezone
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
@@ -53,6 +53,8 @@ class EngineSettings:
     eod: dtime
     flat_deadline: dtime
     tier2_stop_pct: Decimal
+    eod_overnight: dtime = dtime(19, 45, 0)
+    eod_overnight_cutoff: dtime = dtime(20, 0, 0)
     fill_timeout_s: float = 45.0
     fill_poll_s: float = 2.0
     max_concurrent_positions: int = 3
@@ -65,6 +67,8 @@ class EngineSettings:
             symbols=[str(s).upper() for s in (cfg.get("engine", {}) or {}).get("symbols", [])],
             eod=parse_hhmm(sched.get("eod_liquidation_time"), "15:50:00"),
             flat_deadline=parse_hhmm(sched.get("flat_deadline_time"), "15:55:00"),
+            eod_overnight=parse_hhmm(sched.get("eod_overnight_liquidation_time"), "19:45:00"),
+            eod_overnight_cutoff=parse_hhmm(sched.get("eod_overnight_cutoff_time"), "20:00:00"),
             tier2_stop_pct=Decimal(str(risk.get("tier2_stop_pct", 0.06))),
         )
 
@@ -266,6 +270,24 @@ class _EngineBase:
                             sorted(self.ledger.positions.keys()),
                         )
 
+                    # EOD Reg T Overnight Liquidation sequence prior to 8:00 p.m. ET
+                    if self.settings.eod_overnight <= t < self.settings.eod_overnight_cutoff and done.get("overnight_liquidation") != today:
+                        done["overnight_liquidation"] = today
+                        if hasattr(self, "ctx") and getattr(self.ctx, "risk_manager", None) is not None:
+                            self.ctx.risk_manager.sync_account_state(
+                                equity=float(self.ledger.nlv),
+                                cash=float(self.ledger.settled_cash),
+                                positions=self.ledger.positions,
+                            )
+                            liq_res = self.ctx.risk_manager.execute_eod_overnight_liquidation(
+                                order_manager=getattr(self, "om", None),
+                            )
+                            if liq_res.get("alert_triggered"):
+                                logger.warning(
+                                    "Reg T Overnight Liquidation executed: delta=$%.2f, orders=%d",
+                                    liq_res.get("delta", 0.0), len(liq_res.get("orders_executed", [])),
+                                )
+
                     if t >= dtime(16, 0) and done.get("micro_persist") != today:
                         done["micro_persist"] = today
                         if self.ctx.microstructure is not None:
@@ -277,10 +299,13 @@ class _EngineBase:
             except asyncio.TimeoutError:
                 pass
 
-    @staticmethod
-    async def _run_governor(governor: Any) -> None:
+    async def _run_governor(self, governor: Any) -> None:
         try:
             res = await governor.pre_market_macro()
+            if isinstance(res, dict) and hasattr(self, "ctx") and getattr(self.ctx, "risk_manager", None) is not None:
+                regime = res.get("regime") or res.get("target_regime", "NORMAL")
+                vol_mult = float(res.get("volatility_multiplier", 1.0))
+                self.ctx.risk_manager.update_governor_regime(regime, vol_mult)
             try:
                 from core.notifier import send_alert
                 msg = "Pre-market macro regime evaluated and strategy configuration updated."
@@ -342,7 +367,8 @@ class LiveEngine(_EngineBase):
         if not ave_cfg:
             try:
                 import json
-                sc_path = Path("strategy_config.json")
+                from core.paths import STRATEGY_CONFIG_FILE
+                sc_path = STRATEGY_CONFIG_FILE
                 if sc_path.exists():
                     ave_cfg = (json.loads(sc_path.read_text(encoding="utf-8")) or {}).get("ave", {})
             except Exception:
@@ -814,12 +840,7 @@ class LiveEngine(_EngineBase):
 
         qty = quantity if (quantity is not None and 0 < quantity < pos.quantity) else pos.quantity
 
-        # Pre-exit GFV veto check: hold overnight if shares were purchased with unsettled funds
-        can_sell, veto_reason = self.ledger.can_sell_position(sym, qty)
-        if not can_sell:
-            logger.warning("[%s] Exit blocked by GFV protection (%s). Position held overnight.", sym, veto_reason)
-            return False
-
+        # FINRA Rule 4210 Margin Framework: exits are instantaneous and GFV exempt
         self._exiting.add(sym)
         try:
             sid = self._stop_ids.pop(sym, None) if cancel_stop else None

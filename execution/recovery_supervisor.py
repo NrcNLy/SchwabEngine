@@ -593,10 +593,11 @@ class RecoverySupervisor:
     def _promote_config_live(self) -> None:
         """Mutates strategy_config.json ave.mode to 'live' and updates engine in memory."""
         try:
-            from core.paths import STATE_DIR
+            from core.paths import STATE_DIR, STRATEGY_CONFIG_FILE
             targets = [
-                Path("strategy_config.json"),
+                STRATEGY_CONFIG_FILE,
                 STATE_DIR / "strategy_config.json",
+                Path("/home/nicho/schwab_engine/config/strategy_config.json"),
                 Path("/home/nicho/schwab_engine/strategy_config.json"),
                 Path("/home/nicho/schwab_engine/state/strategy_config.json"),
             ]

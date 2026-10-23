@@ -110,7 +110,7 @@ def run_preflight(args: argparse.Namespace) -> int:
                 refresh_exp = float(tokens.get("refresh_token_expires_at") or (float(issued) + refresh_ttl if issued else 0))
                 remaining_h = (refresh_exp - time.time()) / 3600.0
                 if remaining_h <= 0:
-                    print(f"[FAIL] Refresh token EXPIRED! Re-auth required: manual_auth.py")
+                    print(f"[FAIL] Refresh token EXPIRED! Re-auth required: scripts/auth/manual_auth.py")
                     all_ok = False
                 elif remaining_h < 24:
                     print(f"[WARN] Refresh token expires in {remaining_h:.1f} hours.")

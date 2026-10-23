@@ -65,7 +65,7 @@ def load_strategy_targets(project_root: Path) -> Dict[str, Any]:
         "routing_vector": DEFAULT_ROUTING_VECTOR,
         "tau_band": 0.03,
     }
-    path = project_root / "strategy_config.json"
+    path = project_root / "config" / "strategy_config.json"
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -320,12 +320,48 @@ class ShadowRebalancer:
         self._book = {s: v for s, v in self._book.items() if v[0] > 0}
 
 
+DRIVE_SYNC_SCRIPT = Path("scripts") / "sync_engine_drive.py"
+
+
+def _run_drive_sync_worker(project_root: Optional[Path] = None, timeout: float = 180.0) -> bool:
+    """Runs one authoritative Local -> Drive pass (scripts/sync_engine_drive.py --once).
+
+    Exits cleanly (returns True) on hosts without a Drive mount such as the Linux VM.
+    """
+    if project_root is None:
+        project_root = Path(__file__).resolve().parent.parent
+    sync_script = project_root / DRIVE_SYNC_SCRIPT
+    cmd_sync = [sys.executable, str(sync_script), "--once", "--skip-if-unavailable"]
+    logger.info("Executing automated Drive sync pass: %s", " ".join(cmd_sync))
+    try:
+        res_sync = subprocess.run(
+            cmd_sync,
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            timeout=timeout,
+        )
+        if res_sync.returncode != 0:
+            logger.error("sync_engine_drive failed (rc=%d): %s", res_sync.returncode, res_sync.stderr or res_sync.stdout)
+            return False
+        logger.info("sync_engine_drive completed: %s", res_sync.stdout.strip().splitlines()[-2:] if res_sync.stdout else "")
+        return True
+    except Exception as exc:
+        logger.exception("Failed to execute sync_engine_drive: %s", exc)
+        return False
+
+
+async def run_drive_sync(project_root: Optional[Path] = None) -> bool:
+    """Non-blocking async wrapper for a single Drive sync pass (periodic + shutdown hooks)."""
+    return await asyncio.to_thread(_run_drive_sync_worker, project_root)
+
+
 def _run_digest_and_sync_worker(
     project_root: Optional[Path] = None,
     log_path: Optional[Path] = None,
     output_path: Optional[Path] = None,
 ) -> bool:
-    """Synchronous worker that invokes parse_session_telemetry.py and sync_docs_bidirectional.py."""
+    """Synchronous worker that invokes parse_session_telemetry.py and then sync_engine_drive.py."""
     if project_root is None:
         project_root = Path(__file__).resolve().parent.parent
 
@@ -337,11 +373,11 @@ def _run_digest_and_sync_worker(
                 log_path = candidates[-1]
 
     if not log_path or not log_path.exists():
-        logger.warning("EOD Digest: active session telemetry log does not exist (%s); skipping digest.", log_path)
+        logger.warning("EOD Digest: active session telemetry log does not exist (%s); skipping digest, syncing Drive only.", log_path)
+        _run_drive_sync_worker(project_root)
         return False
 
     parse_script = project_root / "scripts" / "parse_session_telemetry.py"
-    sync_script = project_root / "scripts" / "sync_docs_bidirectional.py"
 
     cmd_parse = [sys.executable, str(parse_script), "--log", str(log_path)]
     if output_path:
@@ -364,24 +400,7 @@ def _run_digest_and_sync_worker(
         logger.exception("Failed to execute parse_session_telemetry: %s", exc)
         return False
 
-    cmd_sync = [sys.executable, str(sync_script)]
-    logger.info("Executing automated Drive sync pass: %s", " ".join(cmd_sync))
-    try:
-        res_sync = subprocess.run(
-            cmd_sync,
-            capture_output=True,
-            text=True,
-            cwd=str(project_root),
-            timeout=120,
-        )
-        if res_sync.returncode != 0:
-            logger.error("sync_docs_bidirectional failed (rc=%d): %s", res_sync.returncode, res_sync.stderr)
-            return False
-        logger.info("sync_docs_bidirectional completed: %s", res_sync.stdout.strip())
-        return True
-    except Exception as exc:
-        logger.exception("Failed to execute sync_docs_bidirectional: %s", exc)
-        return False
+    return _run_drive_sync_worker(project_root)
 
 
 async def run_eod_digest_and_sync(

@@ -17,23 +17,27 @@ def ledger(settled="1000", **kw) -> SettlementLedger:
 
 def test_entries_are_funded_from_settled_cash_only():
     lg = ledger("1000")
-    lg.record_sell("SOXL", 3, "100", when=FRIDAY_NOON)  # $300 unsettled until Monday
-    assert lg.unsettled_total == D("300.00")
+    lg.record_sell("SOXL", 3, "100", when=FRIDAY_NOON)  # $300 settles immediately under FINRA 4210
+    assert lg.unsettled_total == D("0.00")
+    assert lg.settled == D("1300.00")
 
-    # 995 > settled(1000) - buffer(10): refused even though NLV is 1300
-    ok, _ = lg.check_order_allowed(D("995"))
+    # 1295 > settled(1300) - buffer(10) = 1290: refused for sub-$2,000 equity account
+    ok, _ = lg.check_order_allowed(D("1295"))
     assert ok is False
 
     assert lg.allocate_capital("TQQQ", D("150")) is True
-    assert lg.settled == D("850.00")
-    assert lg.unsettled_total == D("300.00"), "allocation must never consume Bucket 2"
+    assert lg.settled == D("1150.00")
+    assert lg.unsettled_total == D("0.00")
 
 
 def test_unsettled_funds_cannot_fund_an_order_larger_than_settled():
     lg = ledger("100")
-    lg.record_sell("TNA", 10, "50", when=FRIDAY_NOON)  # $500 unsettled
-    assert lg.allocate_capital("TNA", D("200")) is False
-    assert lg.settled == D("100.00")
+    lg.record_sell("TNA", 10, "50", when=FRIDAY_NOON)  # $500 settles immediately
+    assert lg.settled == D("600.00")
+    # Sub-$2,000 equity: cannot exceed cleared cash less buffer ($590)
+    assert lg.allocate_capital("TNA", D("650")) is False
+    assert lg.allocate_capital("TNA", D("150")) is True
+    assert lg.settled == D("450.00")
 
 
 def test_single_ticker_cap_is_33pct_of_nlv_and_not_hardcoded():
@@ -50,12 +54,11 @@ def test_single_ticker_cap_is_33pct_of_nlv_and_not_hardcoded():
 
 def test_rollover_only_on_or_after_settle_date():
     lg = ledger("0")
-    lg.record_sell("SOXL", 2, "50", when=FRIDAY_NOON)  # settles Monday 2026-10-05
+    lg.record_sell("SOXL", 2, "50", when=FRIDAY_NOON)  # settles immediately under FINRA 4210
+    assert lg.settled == D("100.00")
+    assert lg.unsettled_total == D("0.00")
     assert lg.rollover(date(2026, 10, 2)) == D("0")
-    assert lg.rollover(date(2026, 10, 4)) == D("0")
-    assert lg.unsettled_total == D("100.00") and lg.settled == D("0.00")
-    assert lg.rollover(date(2026, 10, 5)) == D("100.00")
-    assert lg.settled == D("100.00") and lg.unsettled_total == D("0.00")
+    assert lg.rollover(date(2026, 10, 5)) == D("0")
 
 
 def test_first_sync_is_authoritative_then_lower_of_wins():
@@ -66,17 +69,17 @@ def test_first_sync_is_authoritative_then_lower_of_wins():
     drift = lg.sync_from_broker(BrokerBalances(liquidation_value=D("550"), settled_cash=D("450")))
     assert drift == D("50.00")
     assert lg.settled == D("450.00"), "ledger must adopt the LOWER broker figure"
-    assert lg.gfv_risk_flag is True
+    assert lg.gfv_risk_flag is False
 
 
 def test_swvxx_and_ach_do_not_increase_settled_cash():
     lg = ledger("0", data_source="LIVE_SCHWAB")
     lg.sync_from_broker(BrokerBalances(
-        liquidation_value=D("5000"), settled_cash=D("300"), swvxx_value=D("4000"), positions_value=D("0")))
+        liquidation_value=D("1500"), settled_cash=D("300"), swvxx_value=D("1000"), positions_value=D("0")))
     lg.set_pending_ach(D("1000"))
     assert lg.settled == D("300.00")
-    assert lg.swvxx_balance == D("4000.00")
-    assert lg.check_order_allowed(D("295"))[0] is False  # 300 - 10 buffer
+    assert lg.swvxx_balance == D("1000.00")
+    assert lg.check_order_allowed(D("295"))[0] is False  # 300 - 10 buffer for sub-$2k equity
     assert lg.check_order_allowed(D("100"))[0] is True
 
 
@@ -107,7 +110,8 @@ def test_buy_then_sell_round_trip_books_realized_pnl_and_unsettled_proceeds():
     proceeds = lg.record_sell("SOXL", 3, "55", simulated=True, when=FRIDAY_NOON)
     assert proceeds == D("165.00")
     assert lg.realized_pnl_today(date(2026, 10, 2)) == D("15.00")
-    assert lg.unsettled_total == D("165.00")
+    assert lg.settled == D("1015.00")
+    assert lg.unsettled_total == D("0.00")
     assert lg.positions == {}
 
 
@@ -130,11 +134,11 @@ def test_three_bucket_capital_states():
     assert lg.locked_cash == D("0.00")
     assert pos.funded_with_settled is True
 
-    # Sell SOXL -> proceeds enter unsettled_cash
+    # Sell SOXL -> proceeds enter settled_cash under FINRA 4210
     proceeds = lg.record_sell("SOXL", 2, "100", simulated=True, when=FRIDAY_NOON)
     assert proceeds == D("200.00")
-    assert lg.settled_cash == D("810.00")
-    assert lg.unsettled_cash == D("200.00")
+    assert lg.settled_cash == D("1010.00")
+    assert lg.unsettled_cash == D("0.00")
     assert lg.locked_cash == D("0.00")
 
 
@@ -150,27 +154,22 @@ def test_gfv_position_settled_vs_unsettled_funding():
     assert can_sell is True
     assert lg.evaluate_gfv_compliance("SOXL", today=date(2026, 10, 2)) is True
 
-    # 2. Position bought with unsettled funds is BLOCKED on trade date
+    # 2. Position under FINRA 4210 Margin Framework is GFV exempt
     pos_unsettled = lg.adopt_position(
         "TNA", 10, "40", simulated=False, opened_at=FRIDAY_NOON,
         funded_with_settled=False, settle_date=date(2026, 10, 5)
     )
-    assert pos_unsettled.funded_with_settled is False
-    assert pos_unsettled.settle_date == date(2026, 10, 5)
+    assert pos_unsettled.funded_with_settled is True
 
-    # Friday (trade date) -> BLOCKED
     safe_fri, msg_fri = pos_unsettled.is_gfv_safe_to_sell(today=date(2026, 10, 2))
-    assert safe_fri is False
-    assert "GFV VETO" in msg_fri
+    assert safe_fri is True
     can_sell_fri, veto_fri = lg.can_sell_position("TNA", today=date(2026, 10, 2))
-    assert can_sell_fri is False
-    assert "GFV VETO" in veto_fri
-    assert lg.evaluate_gfv_compliance("TNA", today=date(2026, 10, 2)) is False
+    assert can_sell_fri is True
+    assert lg.evaluate_gfv_compliance("TNA", today=date(2026, 10, 2)) is True
 
     # Monday (settlement date) -> ALLOWED
     safe_mon, msg_mon = pos_unsettled.is_gfv_safe_to_sell(today=date(2026, 10, 5))
     assert safe_mon is True
-    assert "settled" in msg_mon.lower()
     can_sell_mon, _ = lg.can_sell_position("TNA", today=date(2026, 10, 5))
     assert can_sell_mon is True
     assert lg.evaluate_gfv_compliance("TNA", today=date(2026, 10, 5)) is True
@@ -196,7 +195,7 @@ def test_strict_reconciliation_lock_live_sell_requires_execution_payload():
     with pytest.raises(ReconciliationLockError, match="Execution payload for SOXL is not filled"):
         lg.record_sell("SOXL", 10, "55", simulated=False, when=FRIDAY_NOON, execution_payload=pending_payload)
 
-    # 3. Calling record_sell with definitive FILLED payload succeeds and credits unsettled cash
+    # 3. Calling record_sell with definitive FILLED payload succeeds and credits settled cash under FINRA 4210
     filled_payload = {
         "status": "FILLED",
         "filledQuantity": 10,
@@ -206,6 +205,7 @@ def test_strict_reconciliation_lock_live_sell_requires_execution_payload():
     }
     proceeds = lg.record_sell("SOXL", 10, "55", simulated=False, when=FRIDAY_NOON, execution_payload=filled_payload)
     assert proceeds == D("550.00")
-    assert lg.unsettled_cash == D("550.00")
+    assert lg.settled_cash == D("1550.00")
+    assert lg.unsettled_cash == D("0.00")
     assert "SOXL" not in lg.positions
 

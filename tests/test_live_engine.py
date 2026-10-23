@@ -200,7 +200,8 @@ def test_exit_cancels_stop_sells_at_market_and_books_unsettled_proceeds():
     assert om.kinds("sell") == [("sell", "SOXL", 2, "TARGET")]
     assert len(om.kinds("cancel")) == 1  # the broker stop
     assert "SOXL" not in ledger.positions
-    assert ledger.unsettled_total == D("208.00")  # proceeds are Hard Reserve until T+1
+    assert ledger.settled == D("1008.00")  # proceeds credit cash immediately under FINRA 4210
+    assert ledger.unsettled_total == D("0.00")
     assert ledger.realized_pnl_today() == D("8.00")
 
 

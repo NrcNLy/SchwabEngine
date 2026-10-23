@@ -55,7 +55,7 @@ COMPREHENSIVE_CATEGORIES: Dict[str, List[Tuple[str, str]]] = {
         ("scripts/export_research_datasets.py", "Market data packaging pipeline"),
     ],
     "Configuration & Production Metadata": [
-        ("strategy_config.json", "Production strategy and regime configuration"),
+        ("config/strategy_config.json", "Production strategy and regime configuration"),
         ("metadata.json", "Engine deployment metadata & hardened release state"),
     ],
 }
@@ -68,7 +68,7 @@ SCOPE_DEFINITIONS: Dict[str, List[str]] = {
         "core/auth.py",
         "execution/order_manager.py",
         "execution/risk_manager.py",
-        "strategy_config.json",
+        "config/strategy_config.json",
         "metadata.json",
     ],
     "execution": [
@@ -78,19 +78,19 @@ SCOPE_DEFINITIONS: Dict[str, List[str]] = {
         "core/ledger.py",
         "core/auth.py",
         "core/rate_limiter.py",
-        "strategy_config.json",
+        "config/strategy_config.json",
     ],
     "risk": [
         "execution/risk_manager.py",
         "core/synthetic_divergence.py",
         "core/liquidity_models.py",
         "governor.py",
-        "strategy_config.json",
+        "config/strategy_config.json",
     ],
     "recovery": [
         "scripts/autonomous_recovery_soxl.py",
         "execution/recovery_supervisor.py",
-        "strategy_config.json",
+        "config/strategy_config.json",
         "state/recovery_plan.json",
         "state/control_signal.json",
     ],
@@ -115,7 +115,7 @@ SCOPE_DEFINITIONS: Dict[str, List[str]] = {
         "execution/recovery_supervisor.py",
         "governor.py",
         "scripts/autonomous_recovery_soxl.py",
-        "strategy_config.json",
+        "config/strategy_config.json",
         "metadata.json",
         "state/recovery_plan.json",
         "state/control_signal.json",
@@ -302,7 +302,7 @@ def compile_research_context(
     env_status = sanitize_env_status()
 
     # Load strategy configuration
-    strat_cfg_path = ROOT_DIR / "strategy_config.json"
+    strat_cfg_path = ROOT_DIR / "config/strategy_config.json"
     strat_cfg_str = "{}"
     if strat_cfg_path.exists():
         try:

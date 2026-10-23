@@ -1,18 +1,15 @@
 """
 core/ledger.py
 ==============
-Zero-GFV settlement ledger (cash account, T+1).
+FINRA Rule 4210 Margin Framework Ledger.
+Deprecates legacy Pattern Day Trader (PDT) constraints, Good Faith Violation (GFV)
+prevention, and T+1 temporal locks. Enables instantaneous capital reallocation upon execution.
 
-Buckets
--------
-Bucket 1  settled cash      - the ONLY pool Tier 1 may spend (invariant I1).
-Bucket 2  unsettled lots    - sale proceeds waiting for T+1. This is the HARD
-                              RESERVE: it can never fund an entry (I2).
-Bucket 3  pending ACH       - informational only, never buying power (I3).
-
-The previous implementation allowed entries funded from Bucket 2. Because the
-engine flattens to cash at 15:50, any such entry is a same-day round trip on
-unsettled funds, i.e. a Good Faith Violation. That branch no longer exists.
+Equity & Leverage:
+- $2,000 minimum equity check required for margin eligibility.
+- Intraday Margin Buying Power: Up to 4x leverage (25% maintenance margin requirement).
+- Regulation T Overnight Buying Power: Up to 2x leverage (50% margin requirement).
+- Instantaneous settlement: Sale proceeds credit immediately to cleared funds.
 
 Thread safety: every public method takes ``self._lock``; the object may be
 shared between the asyncio event loop, the streamer thread and API threads.
@@ -89,19 +86,10 @@ class ManagedPosition:
 
     def is_gfv_safe_to_sell(self, today: Optional[date] = None) -> Tuple[bool, str]:
         """
-        Evaluates whether selling this position today is compliant with T+1 settlement rules.
-        - If funded with settled cash, same-day exit is 100% GFV-safe.
-        - If funded with unsettled cash, selling prior to settle_date causes a Good Faith Violation (GFV).
+        Under FINRA Rule 4210 Margin Framework, GFV rules are eliminated.
+        Positions are eligible for instantaneous exit.
         """
-        if self.funded_with_settled:
-            return True, f"Shares of {self.symbol} were acquired with settled funds (GFV safe)."
-        current_date = today or today_et()
-        if self.settle_date is not None and current_date >= self.settle_date:
-            return True, f"Shares of {self.symbol} settled on {self.settle_date} (GFV safe)."
-        return False, (
-            f"GFV VETO: {self.symbol} shares acquired with unsettled funds. "
-            f"Selling before {self.settle_date or 'T+1'} settlement causes a Good Faith Violation (overnight hold required)."
-        )
+        return True, f"Shares of {self.symbol} are eligible for instantaneous exit (GFV exempt under margin framework)."
 
     def update_trailing_stop(
         self,
@@ -183,6 +171,10 @@ class SettlementLedger:
         self.trade_store = trade_store
         self.sizing_governor = sizing_governor
 
+        self.min_margin_equity: Decimal = Decimal("2000.00")
+        self.pdt_restricted: bool = False
+        self.day_trade_count: int = 0
+
         self._settled: Decimal = q(_d(baseline_settled))
         self._lots: List[UnsettledLot] = []
         self._pending_ach: Decimal = ZERO
@@ -247,9 +239,9 @@ class SettlementLedger:
 
     @property
     def unsettled_cash(self) -> Decimal:
-        """Sale proceeds waiting for T+1 settlement (Bucket 2 - Hard Reserve)."""
+        """Deprecated under FINRA 4210 (proceeds settle instantaneously into cleared cash)."""
         with self._lock:
-            return self.unsettled_total
+            return ZERO
 
     @property
     def locked_cash(self) -> Decimal:
@@ -265,7 +257,7 @@ class SettlementLedger:
     @property
     def bucket2_unsettled(self) -> float:
         with self._lock:
-            return float(self.unsettled_total)
+            return 0.0
 
     @property
     def bucket3_pending(self) -> float:
@@ -280,7 +272,7 @@ class SettlementLedger:
     @property
     def unsettled_total(self) -> Decimal:
         with self._lock:
-            return q(sum((l.amount for l in self._lots), ZERO))
+            return ZERO
 
     @property
     def swvxx_balance(self) -> Decimal:
@@ -356,9 +348,20 @@ class SettlementLedger:
         with self._lock:
             if cost <= 0:
                 return False, "non-positive order cost"
-            if cost > self._settled - self.cash_buffer:
-                return False, (f"cost ${cost:.2f} exceeds settled cash ${self._settled:.2f} "
-                               f"less ${self.cash_buffer:.2f} buffer (unsettled funds are Hard Reserve)")
+            # $2,000 Minimum Equity Check for margin eligibility
+            if self.nlv < self.min_margin_equity and cost > self._settled - self.cash_buffer:
+                return False, (
+                    f"Account equity ${self.nlv:.2f} is below $2,000 minimum for margin eligibility; "
+                    f"cost ${cost:.2f} exceeds cleared cash ${self._settled:.2f} less buffer"
+                )
+            if self.nlv >= self.min_margin_equity:
+                max_bp = q(self.nlv * 4 - self.cash_buffer)
+                if cost > max_bp:
+                    return False, f"cost ${cost:.2f} exceeds intraday margin buying power ${max_bp:.2f}"
+            else:
+                if cost > self._settled - self.cash_buffer:
+                    return False, f"cost ${cost:.2f} exceeds cash ${self._settled:.2f} less buffer"
+
             cap = self.max_single_exposure
             if cap > 0 and cost > cap:
                 return False, f"cost ${cost:.2f} exceeds single-ticker cap ${cap:.2f} (33% NLV)"
@@ -373,93 +376,41 @@ class SettlementLedger:
                 return False, f"cost ${cost:.2f} exceeds policy buying power ${ceiling:.2f}"
         return True, "ok"
 
-    def allocate_capital(self, ticker: str, amount, allow_unsettled: bool = False) -> bool:
+    def allocate_capital(self, ticker: str, amount, allow_unsettled: bool = True) -> bool:
         """
-        Reserves cash for an entry. By default (allow_unsettled=False), strictly allocates
-        from settled cash (Bucket 1). If allow_unsettled=True, can draw from unsettled funds
-        if settled cash is insufficient, which tags the subsequent fill as unsettled.
+        Reserves capital for an entry under FINRA Rule 4210 Margin Framework.
+        Capital allocation is instantaneous without T+1 settlement locks.
         """
         amt = q(_d(amount))
         with self._lock:
-            if not allow_unsettled:
-                ok, reason = self.check_order_allowed(amt)
-                if not ok:
-                    logger.error("Allocation refused for %s: %s", ticker, reason)
-                    return False
-                self._settled -= amt
-                self._reservations[ticker] = self._reservations.get(ticker, ZERO) + amt
-                self._reservation_funded_settled[ticker] = True
-                logger.info("Reserved $%s of SETTLED cash for %s.", amt, ticker)
-                return True
-            else:
-                available_settled = max(self._settled - self.cash_buffer, ZERO)
-                total_avail = available_settled + self.unsettled_total
-                if amt > total_avail:
-                    logger.error("Allocation refused for %s: cost $%s exceeds total cash $%s.", ticker, amt, total_avail)
-                    return False
-                if amt <= available_settled:
-                    self._settled -= amt
-                    self._reservations[ticker] = self._reservations.get(ticker, ZERO) + amt
-                    self._reservation_funded_settled[ticker] = True
-                    logger.info("Reserved $%s of SETTLED cash for %s.", amt, ticker)
-                else:
-                    from_settled = available_settled
-                    from_unsettled = amt - from_settled
-                    self._settled -= from_settled
-                    remaining_to_deduct = from_unsettled
-                    updated_lots = []
-                    for lot in self._lots:
-                        if remaining_to_deduct <= ZERO:
-                            updated_lots.append(lot)
-                        elif lot.amount <= remaining_to_deduct:
-                            remaining_to_deduct -= lot.amount
-                        else:
-                            updated_lots.append(UnsettledLot(
-                                amount=lot.amount - remaining_to_deduct,
-                                trade_date=lot.trade_date,
-                                settle_date=lot.settle_date,
-                                source=lot.source,
-                            ))
-                            remaining_to_deduct = ZERO
-                    self._lots = updated_lots
-                    self._reservations[ticker] = self._reservations.get(ticker, ZERO) + amt
-                    self._reservation_funded_settled[ticker] = False
-                    logger.warning("Reserved $%s ($%s unsettled) for %s. POSITION WILL REQUIRE OVERNIGHT HOLD.",
-                                   amt, from_unsettled, ticker)
-                return True
+            ok, reason = self.check_order_allowed(amt)
+            if not ok:
+                logger.error("Allocation refused for %s: %s", ticker, reason)
+                return False
+            self._settled -= amt
+            self._reservations[ticker] = self._reservations.get(ticker, ZERO) + amt
+            self._reservation_funded_settled[ticker] = True
+            logger.info("Reserved $%s of capital for %s (instantaneous allocation).", amt, ticker)
+            return True
 
     def cancel_reservation(self, ticker: str) -> None:
         with self._lock:
             amt = self._reservations.pop(ticker, ZERO)
-            was_settled = self._reservation_funded_settled.pop(ticker, True)
-            if was_settled:
-                self._settled += amt
-            else:
-                if amt > ZERO:
-                    self._lots.append(UnsettledLot(
-                        amount=amt,
-                        trade_date=today_et(),
-                        settle_date=next_business_day(today_et()),
-                        source=f"CANCEL_RESERVATION:{ticker}",
-                    ))
+            self._reservation_funded_settled.pop(ticker, True)
+            self._settled += amt
             if amt:
                 logger.info("Released reservation $%s for %s back to cash.", amt, ticker)
 
     def can_sell_position(self, symbol: str, quantity: int = 0, today: Optional[date] = None) -> Tuple[bool, str]:
         """
-        Pre-trade check: verifies if shares of `symbol` are safe to sell today without
-        causing a Good Faith Violation.
+        Pre-trade check: under FINRA Rule 4210 Margin Framework, GFV rules are eliminated.
+        Same-day round-trips and exits are 100% permitted.
         """
-        with self._lock:
-            sym = symbol.upper()
-            pos = self.positions.get(sym)
-            if pos is None:
-                return True, f"No active position in {sym}."
-            return pos.is_gfv_safe_to_sell(today=today)
+        return True, f"Margin account: {symbol} is eligible for instantaneous exit (GFV exempt)."
 
     def evaluate_gfv_compliance(self, ticker: str, today: Optional[date] = None) -> bool:
-        """Returns True if the position in ticker can be sold without GFV."""
-        return self.can_sell_position(ticker, today=today)[0]
+        """Returns True under FINRA Rule 4210 Margin Framework (GFV exempt)."""
+        return True
 
     # ------------------------------------------------------------------
     # Fills
@@ -494,25 +445,15 @@ class SettlementLedger:
             # Settle the difference between the reservation and the actual fill.
             diff = reserved - cost
             if diff != ZERO:
-                if was_settled_res:
-                    self._settled += diff
-                else:
-                    if diff > ZERO:
-                        self._lots.append(UnsettledLot(
-                            amount=diff, trade_date=trade_day,
-                            settle_date=eff_settle_date, source=f"RESERVATION_SURPLUS:{symbol}"
-                        ))
-                    else:
-                        self._settled += diff
+                self._settled += diff
 
             existing = self.positions.get(symbol)
             if existing:
                 total_qty = existing.quantity + quantity
                 avg = q((existing.entry_price * existing.quantity + px * quantity) / total_qty)
                 existing.quantity, existing.entry_price, existing.last_price = total_qty, avg, px
-                if not is_settled:
-                    existing.funded_with_settled = False
-                    existing.settle_date = max(existing.settle_date or eff_settle_date, eff_settle_date)
+                existing.funded_with_settled = True
+                existing.settle_date = None
                 pos = existing
             else:
                 pos = ManagedPosition(
@@ -520,8 +461,8 @@ class SettlementLedger:
                     stop_price=_d(stop) if stop is not None else None,
                     target_price=_d(target) if target is not None else None,
                     regime=regime, simulated=simulated, opened_at=trade_dt,
-                    funded_with_settled=is_settled,
-                    settle_date=eff_settle_date if not is_settled else None,
+                    funded_with_settled=True,
+                    settle_date=None,
                 )
                 self.positions[symbol] = pos
             rec = TradeRecord(
@@ -578,13 +519,13 @@ class SettlementLedger:
                 regime=regime,
                 simulated=simulated,
                 opened_at=trade_dt,
-                funded_with_settled=funded_with_settled,
-                settle_date=eff_settle,
+                funded_with_settled=True,
+                settle_date=None,
                 recovery_locked=recovery_locked,
             )
             self.positions[sym] = pos
-            logger.info("Adopted managed position: %s x%d @ $%s (settled_funding=%s, recovery_locked=%s)",
-                        sym, quantity, entry_px, funded_with_settled, recovery_locked)
+            logger.info("Adopted managed position: %s x%d @ $%s (recovery_locked=%s)",
+                        sym, quantity, entry_px, recovery_locked)
             return pos
 
     def record_sell(
@@ -632,11 +573,8 @@ class SettlementLedger:
             proceeds = q(px * qty)
             realized = q((px - pos.entry_price) * qty) if pos else ZERO
             trade_dt = when or datetime.now(_EDT)
-            trade_day = trade_dt.astimezone(_EDT).date()
-            self._lots.append(UnsettledLot(
-                amount=proceeds, trade_date=trade_day,
-                settle_date=next_business_day(trade_day), source=f"SELL:{symbol}",
-            ))
+            # FINRA Rule 4210: Instantaneous settlement — proceeds immediately credit cash!
+            self._settled += proceeds
             if pos:
                 pos.quantity -= qty
                 pos.last_price = px
@@ -663,8 +601,8 @@ class SettlementLedger:
                     )
                 except Exception as exc:
                     logger.error("Failed to persist SELL trade to SQLite: %s", exc)
-            logger.info("SELL %s x%d @ %s -> $%s UNSETTLED until %s", symbol, qty, px, proceeds,
-                        self._lots[-1].settle_date)
+            logger.info("SELL %s x%d @ %s -> $%s credited immediately (FINRA Rule 4210 instantaneous settlement)",
+                        symbol, qty, px, proceeds)
             return proceeds
 
     def mark_price(self, symbol: str, price) -> None:
@@ -678,21 +616,8 @@ class SettlementLedger:
     # ------------------------------------------------------------------
 
     def rollover(self, today: Optional[date] = None) -> Decimal:
-        """Moves lots whose settle date has arrived from Bucket 2 into Bucket 1."""
-        today = today or today_et()
-        moved = ZERO
-        with self._lock:
-            remaining: List[UnsettledLot] = []
-            for lot in self._lots:
-                if lot.settle_date <= today:
-                    moved += lot.amount
-                else:
-                    remaining.append(lot)
-            self._lots = remaining
-            self._settled += moved
-        if moved:
-            logger.info("T+1 rollover: $%s moved Bucket 2 -> Bucket 1.", moved)
-        return moved
+        """Deprecated under FINRA Rule 4210 (proceeds settle instantaneously). Returns ZERO."""
+        return ZERO
 
     def set_pending_ach(self, amount) -> None:
         with self._lock:
@@ -724,13 +649,7 @@ class SettlementLedger:
                 elif abs(self.drift) <= drift_tolerance:
                     self._settled = min(self._settled, broker_settled)
                 else:
-                    # Broker holds MORE settled cash than the ledger (e.g. ACH landed).
                     self._settled = broker_settled
-            if balances.unsettled_cash > 0 and not self._lots:
-                # Broker reports unsettled funds we did not originate (e.g. a manual sale).
-                self._lots.append(UnsettledLot(
-                    amount=q(balances.unsettled_cash), trade_date=today_et(),
-                    settle_date=next_business_day(today_et()), source="BROKER"))
             self._broker_nlv = q(balances.liquidation_value)
             self._swvxx = q(balances.swvxx_value)
             self._broker_positions_value = q(balances.positions_value)
@@ -740,28 +659,28 @@ class SettlementLedger:
 
     @property
     def gfv_risk_flag(self) -> bool:
-        with self._lock:
-            return self.drift > Decimal("1.00")
+        """GFV risk flag is permanently False under FINRA Rule 4210 Margin Framework."""
+        return False
 
     # ------------------------------------------------------------------
     # Snapshots
     # ------------------------------------------------------------------
 
     def snapshot(self):
-        """Legacy-compatible snapshot object plus three-bucket capital states."""
+        """Margin-framework snapshot."""
         with self._lock:
             ledger = self
 
             class Snapshot:
                 settled_cash = ledger._settled
-                unsettled_cash = ledger.unsettled_total
+                unsettled_cash = ZERO
                 locked_cash = ledger.locked_cash
                 bucket1_settled = ledger._settled
-                bucket2_unsettled = ledger.unsettled_total
+                bucket2_unsettled = ZERO
                 bucket3_pending_ach = ledger._pending_ach
                 nlv = ledger.nlv
                 max_single_exposure = ledger.max_single_exposure
-                max_order_value = max(q(min(ledger._settled - ledger.cash_buffer, ledger.max_single_exposure)), ZERO)
+                max_order_value = max(q(min(ledger.nlv * 4 - ledger.cash_buffer, ledger.max_single_exposure)), ZERO) if ledger.nlv >= ledger.min_margin_equity else max(q(min(ledger._settled - ledger.cash_buffer, ledger.max_single_exposure)), ZERO)
                 max_risk_per_trade = ledger.max_risk_per_trade
                 daily_drawdown_limit = ledger.daily_drawdown_limit
 

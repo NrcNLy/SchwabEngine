@@ -9,14 +9,14 @@ D = Decimal
 MONDAY = date(2026, 10, 5)
 
 
-def test_sub_25k_account_sweep_disabled():
+def test_sub_2k_account_sweep_disabled():
     """
-    Verifies that cash accounts below $25,000 (such as the ~$3,770 account)
+    Verifies that accounts below $2,000 margin equity threshold (e.g. $1,770)
     never generate a SWEEP_IN recommendation, preserving 100% operational float.
     """
     pol = LiquidityPolicy()
-    nlv = D("3770.00")
-    settled = D("3776.00")
+    nlv = D("1770.00")
+    settled = D("1776.00")
 
     adv = _advise_sweep(
         policy=pol,
@@ -28,7 +28,7 @@ def test_sub_25k_account_sweep_disabled():
     )
 
     assert adv.action == "NONE"
-    assert "below the $25000.00 threshold" in adv.rationale
+    assert "below the $2000.00 threshold" in adv.rationale
     assert "overnight money market sweep disabled" in adv.rationale
 
 
