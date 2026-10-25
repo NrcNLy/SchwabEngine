@@ -28,6 +28,14 @@ from typing import Callable, Dict, List, Optional, Tuple
 import pytz
 
 from core.liquidity_policy import ZERO, add_business_days, next_business_day, q
+from core.t1_ledger import (
+    GFVRejectionError,
+    RegulatoryCashLedger,
+    T1CashLedger,
+    T1LedgerSnapshot,
+    UnsettledSaleLot,
+    quantize_usd,
+)
 
 logger = logging.getLogger("ledger")
 
@@ -250,6 +258,12 @@ class SettlementLedger:
             return q(sum(self._reservations.values(), ZERO))
 
     @property
+    def reserved_cash(self) -> Decimal:
+        """Cash locked in active, unfilled working buy orders ($C_reserved$)."""
+        with self._lock:
+            return q(sum(self._reservations.values(), ZERO))
+
+    @property
     def bucket1_settled(self) -> float:
         with self._lock:
             return float(self._settled)
@@ -411,6 +425,79 @@ class SettlementLedger:
     def evaluate_gfv_compliance(self, ticker: str, today: Optional[date] = None) -> bool:
         """Returns True under FINRA Rule 4210 Margin Framework (GFV exempt)."""
         return True
+
+    def can_submit_order(
+        self,
+        side: str,
+        notional: Decimal | float | int | str,
+        *,
+        nlv: Optional[Decimal | float | int | str] = None,
+        cash_floor_pct: Optional[Decimal | float | int | str] = None,
+        symbol: str = "",
+    ) -> Tuple[bool, str]:
+        """
+        Pre-Trade GFV Firewall (#123 Workstream 3).
+        Validates whether an order can be submitted under SEC Rule 15c6-1 T+1 cash constraints:
+            MaxAllowableBuyNotional(t) = max(0.00, C_settled(t) - C_reserved(t) - (NLV(t) * CashFloorPct))
+        """
+        side_norm = str(side or "").strip().upper()
+        notional_dec = quantize_usd(notional)
+        with self._lock:
+            if side_norm in ("SELL", "SELL_TO_CLOSE"):
+                return True, f"SELL order for {symbol or 'position'} permitted (${notional_dec:.2f})."
+            if side_norm not in ("BUY", "BUY_TO_OPEN"):
+                return False, f"GFV REJECTION: Unsupported order side '{side}'."
+            if notional_dec <= ZERO:
+                return False, f"GFV REJECTION: Non-positive BUY notional (${notional_dec:.2f})."
+
+            eff_nlv = quantize_usd(nlv) if nlv is not None else quantize_usd(self.nlv)
+            eff_floor_pct = _d(cash_floor_pct) if cash_floor_pct is not None else Decimal("0.00")
+            floor_reserve = quantize_usd(eff_nlv * eff_floor_pct)
+            c_reserved = self.reserved_cash
+            max_allowable = max(ZERO, quantize_usd(self._settled - c_reserved - floor_reserve))
+            if notional_dec > max_allowable:
+                unsettled_lots = quantize_usd(sum((lot.amount for lot in self._lots), ZERO))
+                reason = (
+                    f"GFV REJECTION: BUY {symbol + ' ' if symbol else ''}notional ${notional_dec:.2f} "
+                    f"exceeds MaxAllowableBuyNotional ${max_allowable:.2f} "
+                    f"(C_settled=${self._settled:.2f}, C_unsettled=${unsettled_lots:.2f}, "
+                    f"C_reserved=${c_reserved:.2f}, NLV=${eff_nlv:.2f}, CashFloorPct={eff_floor_pct:.4f})."
+                )
+                logger.warning(reason)
+                return False, reason
+            return (
+                True,
+                f"OK: BUY notional ${notional_dec:.2f} within MaxAllowableBuyNotional ${max_allowable:.2f}.",
+            )
+
+    def process_t1_overnight_clearing(
+        self,
+        current_dt: Optional[datetime | date] = None,
+        *,
+        force: bool = True,
+    ) -> Decimal:
+        """
+        Overnight T+1 Clearing Transition (00:00:00 EDT).
+        Sweeps matured unsettled sale lots into C_settled and resets C_unsettled.
+        """
+        with self._lock:
+            if not self._lots:
+                return ZERO
+            clear_date = (
+                current_dt.astimezone(_EDT).date()
+                if isinstance(current_dt, datetime)
+                else (current_dt or today_et())
+            )
+            cleared = ZERO
+            remaining: List[UnsettledLot] = []
+            for lot in self._lots:
+                if force or lot.settle_date <= clear_date:
+                    cleared = quantize_usd(cleared + lot.amount)
+                else:
+                    remaining.append(lot)
+            self._lots = remaining
+            self._settled = quantize_usd(self._settled + cleared)
+            return cleared
 
     # ------------------------------------------------------------------
     # Fills

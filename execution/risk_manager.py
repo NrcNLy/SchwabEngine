@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, time as dtime
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from core.t1_ledger import GFVRejectionError, T1CashLedger
+
 logger = logging.getLogger("risk_manager")
 
 # Prior used for Bayesian shrinkage and the Kelly robustness constant.
@@ -923,7 +925,35 @@ class RiskEngine:
         self.pdt_restricted: bool = False
         self.day_trade_count: int = 0
 
+        # Workstream 3 (#123): SEC Rule 15c6-1 T+1 Cash Ledger & Pre-Trade GFV Firewall
+        self.t1_ledger: T1CashLedger = T1CashLedger(
+            settled_cash=account_base,
+            nlv=account_base,
+        )
+
         self.recalculate_margin_buying_power()
+
+    def can_submit_order(
+        self,
+        side: str,
+        notional: float,
+        *,
+        symbol: str = "",
+        nlv: Optional[float] = None,
+        cash_floor_pct: Optional[float] = None,
+    ) -> Tuple[bool, str]:
+        """Pre-Trade GFV Firewall delegated to the T+1 Cash Ledger (#123)."""
+        return self.t1_ledger.can_submit_order(
+            side=side,
+            notional=notional,
+            nlv=nlv,
+            cash_floor_pct=cash_floor_pct,
+            symbol=symbol,
+        )
+
+    def process_t1_overnight_clearing(self, current_dt: Optional[datetime] = None) -> float:
+        """Executes 00:00:00 EDT T+1 overnight settlement clearing on the T1CashLedger."""
+        return float(self.t1_ledger.process_t1_overnight_clearing(current_dt=current_dt))
 
     def create_breakout_bracket(
         self,

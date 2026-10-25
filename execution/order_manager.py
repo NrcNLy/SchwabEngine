@@ -54,6 +54,7 @@ from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple
 import uuid
 import pytz
 
+from core.t1_ledger import GFVRejectionError, T1CashLedger
 from execution.sizing_governor import BayesianSizingGovernor, SizingVerdict
 
 logger = logging.getLogger(__name__)
@@ -398,6 +399,16 @@ class OrderManager:
             )
         else:
             qty = int(quantity)
+
+        # Workstream 3 (#123): Pre-Trade GFV Firewall for T+1 Cash Ledger
+        if self._ledger is not None and (
+            isinstance(self._ledger, T1CashLedger)
+            or bool(getattr(self._ledger, "enforce_t1_gfv", False))
+        ):
+            notional_cost = qty * px_float
+            allowed, reason = self._ledger.can_submit_order("BUY", notional_cost, symbol=symbol)
+            if not allowed:
+                raise GFVRejectionError(reason)
 
         price = f"{px_float:.2f}"   # 2 decimal places — HTTP 400 prevention
 
