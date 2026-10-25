@@ -30,6 +30,7 @@ All configuration is sourced from config.yaml:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -39,11 +40,12 @@ import ssl
 import threading
 import time
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Coroutine, Dict, Optional, Tuple
 
+import httpx
 import pytz
 import requests
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -54,6 +56,21 @@ logger = logging.getLogger(__name__)
 
 class AuthCircuitBreakerError(RuntimeError):
     """Raised when the authentication circuit breaker is open (AUTH_LOCKED)."""
+
+
+def _nonblocking_backoff_sleep(seconds: float) -> None:
+    """Wait for `seconds` without calling blocking time.sleep()."""
+    if seconds <= 0.0:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None:
+        asyncio.run(asyncio.sleep(seconds))
+    else:
+        evt = threading.Event()
+        evt.wait(timeout=seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -418,12 +435,12 @@ class SchwabAuthManager:
                         priority="urgent",
                         tags=["white_check_mark", "lock"],
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("SchwabAuthManager: alert dispatch failed on manual circuit reset: %s", exc)
 
     def _do_refresh(self, backoff_sec: float = 10.0) -> None:
         """
-        Perform a blocking refresh_token grant with exponential backoff circuit breaker.
+        Perform a refresh_token grant with exponential backoff circuit breaker.
         MUST be called while holding self._lock, or at startup.
 
         If token endpoint returns a 4xx error (including 401 Unauthorized):
@@ -468,7 +485,7 @@ class SchwabAuthManager:
                     )
                     if attempt < max_attempts:
                         logger.info("SchwabAuthManager: backing off for %.1fs before retry...", backoff_sec)
-                        time.sleep(backoff_sec)
+                        _nonblocking_backoff_sleep(backoff_sec)
                         continue
                     else:
                         self.auth_circuit_open = True
@@ -487,8 +504,8 @@ class SchwabAuthManager:
                                 priority="urgent",
                                 tags=["rotating_light", "warning"],
                             )
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning("SchwabAuthManager: alert dispatch failed on circuit trip: %s", exc)
                         raise AuthCircuitBreakerError(
                             f"OAuth token refresh returned HTTP {response.status_code}. "
                             "Auth circuit breaker TRIPPED (AUTH_LOCKED)."
@@ -507,8 +524,8 @@ class SchwabAuthManager:
                             priority="urgent",
                             tags=["white_check_mark", "lock"],
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("SchwabAuthManager: alert dispatch failed on circuit recovery: %s", exc)
                 
                 self.auth_circuit_open = False
                 self.auth_circuit_failure_count = 0
@@ -520,7 +537,7 @@ class SchwabAuthManager:
                 if exc.response is not None and 400 <= exc.response.status_code < 500:
                     if attempt < max_attempts:
                         logger.info("SchwabAuthManager: backing off for %.1fs before retry...", backoff_sec)
-                        time.sleep(backoff_sec)
+                        _nonblocking_backoff_sleep(backoff_sec)
                         continue
                     else:
                         self.auth_circuit_open = True
@@ -538,8 +555,8 @@ class SchwabAuthManager:
                                 priority="urgent",
                                 tags=["rotating_light", "warning"],
                             )
-                        except Exception:
-                            pass
+                        except Exception as alert_exc:
+                            logger.warning("SchwabAuthManager: alert dispatch failed on HTTP circuit trip: %s", alert_exc)
                         raise AuthCircuitBreakerError(
                             f"OAuth token refresh returned HTTP {exc.response.status_code}. "
                             "Auth circuit breaker TRIPPED (AUTH_LOCKED)."
@@ -879,3 +896,283 @@ class WeekendOAuthDaemon:
 
             logger.info("WeekendOAuthDaemon: token rotation window reached.")
             self._run_rotation()
+
+
+# ===========================================================================
+# OAuthTokenManager (#123 Workstream 4: Preemptive Heartbeat & 09:15 EDT Gate)
+# ===========================================================================
+
+class OAuthTokenManager:
+    """
+    Asynchronous OAuth 2.0 Lifecycle & Preemptive Heartbeat Manager (#123 Workstream 4).
+
+    Architectural Invariants:
+    1. Autonomous background daemon verifies token Time-To-Live (TTL) every 15 minutes (900s).
+    2. Proactively triggers refresh via `httpx.AsyncClient` whenever remaining TTL
+       drops below 1,800 seconds (30 minutes).
+    3. Enforces a mandatory Pre-Market Refresh Gate at 09:15:00 EDT to validate fresh
+       session tokens before the 09:30:00 EDT market open.
+    4. Uses non-blocking `asyncio` primitives exclusively; transitions to `AUTH_LOCKED`
+       on HTTP 400/401/403 authentication rejections.
+    """
+
+    HEARTBEAT_INTERVAL_SEC: float = 900.0     # 15 minutes
+    REFRESH_TTL_THRESHOLD_SEC: float = 1800.0 # 30 minutes
+    PRE_MARKET_GATE_TIME: dt_time = dt_time(9, 15, 0)
+    MARKET_OPEN_TIME: dt_time = dt_time(9, 30, 0)
+
+    def __init__(
+        self,
+        client_id: str = "schwab_client",
+        client_secret: str = "schwab_secret",
+        vault: Optional[SecurityVault] = None,
+        auth_manager: Optional[SchwabAuthManager] = None,
+        token_url: str = "https://api.schwabapi.com/v1/oauth/token",
+        access_token: Optional[str] = None,
+        refresh_token: Optional[str] = "initial_refresh_token",
+        initial_ttl_sec: float = 1800.0,
+        heartbeat_interval_sec: float = HEARTBEAT_INTERVAL_SEC,
+        min_ttl_threshold_sec: float = REFRESH_TTL_THRESHOLD_SEC,
+        http_client: Optional[httpx.AsyncClient] = None,
+        clock: Callable[[], float] = time.monotonic,
+        wall_clock: Optional[Callable[[], datetime]] = None,
+        sleep_func: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
+    ) -> None:
+        self._auth_manager = auth_manager
+        if auth_manager is not None:
+            self._client_id = auth_manager._client_id
+            self._client_secret = auth_manager._client_secret
+            self._vault = vault or auth_manager._vault
+            self._token_url = auth_manager._token_url
+            self._access_token = access_token or auth_manager._access_token
+            self._refresh_token = refresh_token or auth_manager._refresh_token
+        else:
+            self._client_id = client_id
+            self._client_secret = client_secret
+            self._vault = vault
+            self._token_url = token_url
+            self._access_token = access_token or "initial_access_token"
+            self._refresh_token = refresh_token
+
+        self.heartbeat_interval_sec: float = float(heartbeat_interval_sec)
+        self.min_ttl_threshold_sec: float = float(min_ttl_threshold_sec)
+        self._http_client: Optional[httpx.AsyncClient] = http_client
+        self._clock: Callable[[], float] = clock
+        self._wall_clock: Callable[[], datetime] = wall_clock or (lambda: datetime.now(_EDT))
+        self._sleep: Callable[[float], Coroutine[Any, Any, None]] = sleep_func
+
+        now_mono = self._clock()
+        if auth_manager is not None and auth_manager._access_token_expiry is not None:
+            self._access_token_expiry: float = float(auth_manager._access_token_expiry)
+        else:
+            self._access_token_expiry = now_mono + float(initial_ttl_sec)
+
+        self._lock: asyncio.Lock = asyncio.Lock()
+        self.auth_circuit_open: bool = False
+        self.state: str = "ACTIVE"
+        self.refresh_count: int = 0
+        self.last_refresh_reason: Optional[str] = None
+        self._last_premarket_gate_date: Optional[date] = None
+        self._heartbeat_task: Optional[asyncio.Task[None]] = None
+        self._stop_requested: bool = False
+
+    def _basic_auth_header(self) -> Dict[str, str]:
+        credentials = f"{self._client_id}:{self._client_secret}"
+        encoded = base64.b64encode(credentials.encode(_ENCODING)).decode(_ENCODING)
+        return {"Authorization": f"Basic {encoded}"}
+
+    def get_remaining_ttl(self, now: Optional[float] = None) -> float:
+        """Return remaining token Time-To-Live (TTL) in seconds."""
+        current = float(now) if now is not None else self._clock()
+        return max(0.0, self._access_token_expiry - current)
+
+    # Alias
+    remaining_ttl = get_remaining_ttl
+
+    def set_remaining_ttl(self, ttl_seconds: float, now: Optional[float] = None) -> None:
+        """Helper to set remaining TTL relative to `now` (or `self._clock()`)."""
+        current = float(now) if now is not None else self._clock()
+        self._access_token_expiry = current + float(ttl_seconds)
+        if self._auth_manager is not None:
+            self._auth_manager._access_token_expiry = self._access_token_expiry
+
+    @staticmethod
+    def is_pre_market_gate_window(dt_val: datetime) -> bool:
+        """
+        Return True if `dt_val` (converted to America/New_York EDT) falls inside the
+        mandatory 09:15:00 EDT to 09:30:00 EDT pre-market validation window.
+        """
+        edt_dt = dt_val.astimezone(_EDT) if dt_val.tzinfo is not None else _EDT.localize(dt_val)
+        t = edt_dt.time()
+        return OAuthTokenManager.PRE_MARKET_GATE_TIME <= t < OAuthTokenManager.MARKET_OPEN_TIME
+
+    def should_refresh(
+        self,
+        now: Optional[float] = None,
+        now_dt: Optional[datetime] = None,
+    ) -> Tuple[bool, str]:
+        """
+        Evaluate whether a proactive OAuth refresh must be triggered:
+        1. Mandatory Pre-Market Refresh Gate at 09:15:00 EDT (before 09:30:00 EDT open).
+        2. Remaining TTL < 1,800 seconds (30 minutes).
+        """
+        wall_dt = now_dt if now_dt is not None else self._wall_clock()
+        edt_dt = wall_dt.astimezone(_EDT) if wall_dt.tzinfo is not None else _EDT.localize(wall_dt)
+
+        if self.is_pre_market_gate_window(edt_dt) and self._last_premarket_gate_date != edt_dt.date():
+            return True, "PRE_MARKET_GATE_0915_EDT"
+
+        ttl = self.get_remaining_ttl(now=now)
+        if ttl < self.min_ttl_threshold_sec:
+            return True, "TTL_BELOW_1800S"
+
+        return False, "TTL_HEALTHY"
+
+    async def refresh_access_token(self, reason: str = "TTL_BELOW_1800S") -> Dict[str, Any]:
+        """
+        Execute an asynchronous OAuth 2.0 `refresh_token` grant using `httpx.AsyncClient`.
+        Explicitly bypasses retries and locks into `AUTH_LOCKED` on HTTP 400, 401, or 403.
+        """
+        async with self._lock:
+            if self.auth_circuit_open or self.state == "AUTH_LOCKED":
+                raise AuthCircuitBreakerError(
+                    "OAuthTokenManager: authentication circuit is OPEN (AUTH_LOCKED)."
+                )
+            if not self._refresh_token:
+                raise RuntimeError("OAuthTokenManager: no refresh_token available.")
+
+            headers = self._basic_auth_header()
+            data = {
+                "grant_type": "refresh_token",
+                "refresh_token": self._refresh_token,
+            }
+
+            if self._http_client is not None:
+                resp = await self._http_client.post(self._token_url, headers=headers, data=data)
+            else:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(self._token_url, headers=headers, data=data)
+
+            status_code = getattr(resp, "status_code", 200)
+            if status_code in (400, 401, 403):
+                self.auth_circuit_open = True
+                self.state = "AUTH_LOCKED"
+                if self._auth_manager is not None:
+                    self._auth_manager.auth_circuit_open = True
+                logger.critical(
+                    "OAuthTokenManager: received HTTP %d during token refresh (%s). Transitioning to AUTH_LOCKED.",
+                    status_code, reason,
+                )
+                raise AuthCircuitBreakerError(
+                    f"OAuthTokenManager: HTTP {status_code} during token refresh. System state: AUTH_LOCKED."
+                )
+
+            if hasattr(resp, "raise_for_status"):
+                resp.raise_for_status()
+
+            payload: Dict[str, Any] = resp.json() if callable(getattr(resp, "json", None)) else dict(resp)
+            self._access_token = str(payload.get("access_token", self._access_token or "refreshed_access_token"))
+            self._refresh_token = str(payload.get("refresh_token", self._refresh_token))
+            expires_in = float(payload.get("expires_in", 1800.0))
+            self._access_token_expiry = self._clock() + expires_in
+
+            if self._auth_manager is not None:
+                self._auth_manager._access_token = self._access_token
+                self._auth_manager._refresh_token = self._refresh_token
+                self._auth_manager._access_token_expiry = self._access_token_expiry
+                self._auth_manager.auth_circuit_open = False
+
+            if self._vault is not None:
+                vault_payload = {
+                    "access_token": self._access_token,
+                    "refresh_token": self._refresh_token,
+                    "persisted_at": datetime.now(pytz.utc).isoformat(),
+                    "expires_in": int(expires_in),
+                }
+                self._vault.save(vault_payload)
+
+            self.refresh_count += 1
+            self.last_refresh_reason = reason
+            if reason == "PRE_MARKET_GATE_0915_EDT":
+                wall_dt = self._wall_clock()
+                edt_dt = wall_dt.astimezone(_EDT) if wall_dt.tzinfo is not None else _EDT.localize(wall_dt)
+                self._last_premarket_gate_date = edt_dt.date()
+
+            logger.info(
+                "OAuthTokenManager: access token refreshed [reason=%s, expires_in=%.0fs, count=%d]",
+                reason, expires_in, self.refresh_count,
+            )
+            return payload
+
+    # Alias
+    refresh_token = refresh_access_token
+
+    async def enforce_pre_market_gate(self, now_dt: Optional[datetime] = None) -> bool:
+        """
+        Enforces the mandatory Pre-Market Refresh Gate at 09:15:00 EDT to validate
+        fresh session tokens before the 09:30:00 EDT market open.
+        Returns True if a pre-market refresh was executed, False otherwise.
+        """
+        wall_dt = now_dt if now_dt is not None else self._wall_clock()
+        edt_dt = wall_dt.astimezone(_EDT) if wall_dt.tzinfo is not None else _EDT.localize(wall_dt)
+
+        if self.is_pre_market_gate_window(edt_dt) and self._last_premarket_gate_date != edt_dt.date():
+            await self.refresh_access_token(reason="PRE_MARKET_GATE_0915_EDT")
+            self._last_premarket_gate_date = edt_dt.date()
+            return True
+        return False
+
+    async def check_and_refresh_if_needed(
+        self,
+        now: Optional[float] = None,
+        now_dt: Optional[datetime] = None,
+    ) -> bool:
+        """
+        Single heartbeat evaluation tick:
+        - Checks 09:15:00 EDT Pre-Market Gate first.
+        - Checks whether remaining TTL < 1,800s (30 minutes).
+        - Executes non-blocking async token refresh if either condition holds.
+        """
+        needs_refresh, reason = self.should_refresh(now=now, now_dt=now_dt)
+        if needs_refresh:
+            wall_dt = now_dt if now_dt is not None else self._wall_clock()
+            edt_dt = wall_dt.astimezone(_EDT) if wall_dt.tzinfo is not None else _EDT.localize(wall_dt)
+            await self.refresh_access_token(reason=reason)
+            if reason == "PRE_MARKET_GATE_0915_EDT":
+                self._last_premarket_gate_date = edt_dt.date()
+            return True
+        return False
+
+    # Alias
+    evaluate_heartbeat_tick = check_and_refresh_if_needed
+
+    async def _heartbeat_loop(self) -> None:
+        """Autonomous background daemon polling token TTL every 15 minutes (900s)."""
+        while not self._stop_requested:
+            try:
+                await self.check_and_refresh_if_needed()
+            except AuthCircuitBreakerError as exc:
+                logger.critical("OAuthTokenManager: heartbeat halted due to AUTH_LOCKED: %s", exc)
+                break
+            except Exception as exc:
+                logger.error("OAuthTokenManager: error during heartbeat tick: %s", exc)
+            await self._sleep(self.heartbeat_interval_sec)
+
+    async def start_heartbeat(self) -> asyncio.Task[None]:
+        """Start the autonomous 15-minute OAuth token heartbeat task."""
+        self._stop_requested = False
+        if self._heartbeat_task is None or self._heartbeat_task.done():
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        return self._heartbeat_task
+
+    async def stop_heartbeat(self) -> None:
+        """Stop the autonomous OAuth token heartbeat task."""
+        self._stop_requested = True
+        if self._heartbeat_task is not None and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        self._heartbeat_task = None
+

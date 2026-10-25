@@ -451,8 +451,11 @@ class OrderManager:
                     notional=round(qty * px_float, 2),
                 )
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "OrderManager: failed to publish OrderRoutedEvent for LIMIT_BUY %s (id=%s): %s",
+                symbol.upper(), order_id, exc,
+            )
         return order_id
 
     def place_catastrophic_hardware_stop(
@@ -554,8 +557,11 @@ class OrderManager:
                     notional=round(qty * float(stop_price), 2),
                 )
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "OrderManager: failed to publish OrderRoutedEvent for TIER2_STOP %s (id=%s): %s",
+                symbol.upper(), order_id, exc,
+            )
         return order_id
 
     def update_broker_stop(
@@ -653,8 +659,11 @@ class OrderManager:
                     floor_price=float(new_stop_price),
                 )
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "OrderManager: failed to publish SentinelRatchetEvent for %s (id=%s): %s",
+                sym, new_id, exc,
+            )
         return new_id, True
 
     replace_broker_stop = update_broker_stop
@@ -797,8 +806,11 @@ class OrderManager:
                     notional=summary.filled_shares * summary.average_fill_price,
                 )
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "OrderManager: failed to publish OrderRoutedEvent for MARKET_SELL %s (id=%s): %s",
+                sym, order_id, exc,
+            )
         return order_id
 
     def execute_marketable_limit_sell(
@@ -873,8 +885,11 @@ class OrderManager:
                     notional=round(qty * px_val, 2),
                 )
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "OrderManager: failed to publish OrderRoutedEvent for LIMIT_SELL %s (id=%s): %s",
+                sym, order_id, exc,
+            )
         return order_id
 
     def find_working_sell_stop(self, symbol: str) -> Optional[Dict[str, Any]]:
@@ -1086,8 +1101,11 @@ class OrderManager:
                     fee_usd=float(fee_usd),
                 )
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "OrderManager: failed to publish ExecutionFilledEvent for %s (id=%s): %s",
+                symbol, order_id, exc,
+            )
 
     def record_settlement_update(
         self,
@@ -1111,8 +1129,11 @@ class OrderManager:
                     gfv_count=int(gfv_count),
                 )
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "OrderManager: failed to publish SettlementUpdatedEvent: %s",
+                exc,
+            )
 
     @property
     def swap_coordinator(self) -> "DualSleeveSwapCoordinator":
@@ -1230,8 +1251,8 @@ class DualSleeveSwapCoordinator:
         self.max_queue_size: int = int(max_queue_size)
         self.cash_sweep_vehicle: str = str(cash_sweep_vehicle)
         self.jitter_max_sec: float = max(0.0, float(jitter_max_sec))
-        self._sleep_fn: Callable[[float], None] = sleep_fn or time.sleep
         self._async_sleep_fn: Callable[[float], Awaitable[None]] = async_sleep_fn or asyncio.sleep
+        self._sleep_fn: Callable[[float], None] = sleep_fn or self._default_nonblocking_sleep
         self._rng = random.Random(rng_seed)
 
         self.state: str = SwapState.IDLE.value
@@ -1243,6 +1264,19 @@ class DualSleeveSwapCoordinator:
         # Idempotency ledger: maps idempotency_key -> confirmed broker order_id
         self._idempotency_ledger: Dict[str, str] = {}
         self.duplicate_orders_prevented: int = 0
+
+    def _default_nonblocking_sleep(self, delay: float) -> None:
+        if delay <= 0.0:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            asyncio.run(self._async_sleep_fn(delay))
+        else:
+            from core.rate_limiter import _run_nonblocking_sleep
+            _run_nonblocking_sleep(delay)
 
     def _resolve_rest_and_hash(self) -> Tuple[Any, str]:
         rest = self._rest or (self.order_manager._rest if self.order_manager is not None else None)
@@ -1296,8 +1330,11 @@ class DualSleeveSwapCoordinator:
                             self._idempotency_ledger[idempotency_key] = oid
                             self.duplicate_orders_prevented += 1
                             return oid
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "DualSleeveSwapCoordinator: failed to inspect working orders for deduplication (%s): %s",
+                    idempotency_key, exc,
+                )
 
         order_body = {
             "orderType": _OT_LIMIT,

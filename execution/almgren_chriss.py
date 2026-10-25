@@ -34,17 +34,32 @@ In EMERGENCY_CATASTROPHIC mode, bypasses slicing and dispatches a single IOC blo
 
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
 EDT = ZoneInfo("America/New_York")
+
+
+def _run_coroutine_sync(coro: Coroutine[Any, Any, Any]) -> Any:
+    """Execute an async liquidation coroutine from a synchronous call site."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is None:
+        return asyncio.run(coro)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +290,7 @@ class AdaptiveExecutionRouter:
         cancel_replace_timeout: int = 3,
         account_hash: Optional[str] = None,
         telemetry: Optional[Any] = None,
+        sleep_func: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
     ) -> None:
         """
         Args:
@@ -284,6 +300,7 @@ class AdaptiveExecutionRouter:
             cancel_replace_timeout: Timeout before canceling and replacing unfilled slice (default 3).
             account_hash:           Schwab account hash value (cached or auto-resolved).
             telemetry:              Optional telemetry bus instance for WAL events.
+            sleep_func:             Non-blocking async sleep coroutine (default asyncio.sleep).
         """
         self._rest = rest_client
         self.max_slippage_bps = max_slippage_bps
@@ -291,6 +308,7 @@ class AdaptiveExecutionRouter:
         self.cancel_replace_timeout = cancel_replace_timeout
         self.account_hash = account_hash
         self.telemetry = telemetry
+        self._sleep = sleep_func
 
     # ------------------------------------------------------------------
     # Public Execution API
@@ -303,7 +321,24 @@ class AdaptiveExecutionRouter:
         urgency: str = "NORMAL",
     ) -> ExecutionSummary:
         """
-        Liquidates `total_shares` of `symbol` optimally.
+        Synchronous wrapper around `async_liquidate_optimal`.
+        """
+        return _run_coroutine_sync(
+            self.async_liquidate_optimal(
+                symbol=symbol,
+                total_shares=total_shares,
+                urgency=urgency,
+            )
+        )
+
+    async def async_liquidate_optimal(
+        self,
+        symbol: str,
+        total_shares: int,
+        urgency: str = "NORMAL",
+    ) -> ExecutionSummary:
+        """
+        Liquidates `total_shares` of `symbol` optimally using non-blocking `await asyncio.sleep()`.
 
         Urgency modes:
         - "EMERGENCY_CATASTROPHIC":
@@ -352,7 +387,7 @@ class AdaptiveExecutionRouter:
         # Branch 1: EMERGENCY_CATASTROPHIC
         # ------------------------------------------------------------------
         if urgency == "EMERGENCY_CATASTROPHIC":
-            return self._execute_emergency_ioc(
+            return await self._execute_emergency_ioc(
                 symbol=sym,
                 shares=qty,
                 account_hash=acct_hash,
@@ -396,7 +431,7 @@ class AdaptiveExecutionRouter:
                 terminal_ioc_fallback = True
                 break
 
-            filled, notional, order_ids = self._dispatch_adaptive_tranche(
+            filled, notional, order_ids = await self._dispatch_adaptive_tranche(
                 symbol=sym,
                 account_hash=acct_hash,
                 target_shares=current_target,
@@ -417,7 +452,7 @@ class AdaptiveExecutionRouter:
 
             # Slicing interval delay between tranches (if more shares remain and not terminal flush)
             if shares_remaining > 0 and urgency != "TERMINAL_FLUSH":
-                time.sleep(min(self.slice_interval_seconds, 0.5))
+                await self._sleep(min(self.slice_interval_seconds, 0.5))
 
         # If any shares remain (or if terminal flush 60s timeout elapsed), flush via IOC
         if shares_remaining > 0:
@@ -504,7 +539,7 @@ class AdaptiveExecutionRouter:
             tranches.append(base + (1 if i < rem else 0))
         return [t for t in tranches if t > 0]
 
-    def _dispatch_adaptive_tranche(
+    async def _dispatch_adaptive_tranche(
         self,
         symbol: str,
         account_hash: str,
@@ -570,7 +605,7 @@ class AdaptiveExecutionRouter:
                 break
 
             # 4. Monitor order status for 3 seconds
-            filled, notional, is_complete = self._monitor_order_status(
+            filled, notional, is_complete = await self._monitor_order_status(
                 account_hash=account_hash,
                 order_id=order_id,
                 expected_quantity=shares_needed,
@@ -606,7 +641,7 @@ class AdaptiveExecutionRouter:
 
         return tranche_filled, tranche_notional, order_ids
 
-    def _monitor_order_status(
+    async def _monitor_order_status(
         self,
         account_hash: str,
         order_id: str,
@@ -615,11 +650,11 @@ class AdaptiveExecutionRouter:
         timeout_seconds: int,
     ) -> Tuple[int, float, bool]:
         """
-        Polls Schwab order status for up to `timeout_seconds`.
+        Polls Schwab order status for up to `timeout_seconds` using non-blocking `await asyncio.sleep()`.
         Returns (filled_quantity, notional, is_fully_filled).
         """
         start = time.monotonic()
-        poll_interval = 0.5
+        poll_interval = 0.05
         last_filled = 0
         last_notional = 0.0
 
@@ -640,9 +675,9 @@ class AdaptiveExecutionRouter:
             if elapsed >= timeout_seconds:
                 return last_filled, last_notional, False
 
-            time.sleep(min(poll_interval, max(0.01, timeout_seconds - elapsed)))
+            await self._sleep(min(poll_interval, max(0.01, timeout_seconds - elapsed)))
 
-    def _execute_emergency_ioc(
+    async def _execute_emergency_ioc(
         self,
         symbol: str,
         shares: int,
@@ -699,8 +734,8 @@ class AdaptiveExecutionRouter:
                 status="FAILED",
             )
 
-        # Allow immediate execution confirmation
-        time.sleep(0.05)
+        # Allow immediate execution confirmation non-blockingly
+        await self._sleep(0.01)
         doc = self._safe_get_order(account_hash, all_order_ids[0])
         filled, notional = self._parse_fill_metrics(doc, fallback_price=ioc_price, expected_quantity=shares)
         if filled == 0 and str(self._extract_status(doc)).upper() in ("FILLED", ""):
@@ -835,8 +870,8 @@ class AdaptiveExecutionRouter:
                 if h:
                     self.account_hash = str(h)
                     return self.account_hash
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("AdaptiveExecutionRouter: failed to resolve account hash from broker: %s", exc)
         return "HASH_FIREWALL_DEFAULT"
 
     def _extract_order_id(self, resp: Any) -> str:
@@ -891,7 +926,11 @@ class AdaptiveExecutionRouter:
                     if q > 0 and p > 0:
                         total_shares += q
                         total_notional += q * p
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "AdaptiveExecutionRouter: malformed execution leg in order %s: %s",
+                        order_doc.get("orderId", "unknown"), exc,
+                    )
                     continue
 
         if total_shares > 0:
@@ -901,7 +940,11 @@ class AdaptiveExecutionRouter:
             if "price" in order_doc:
                 try:
                     px = float(order_doc["price"])
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "AdaptiveExecutionRouter: invalid price field in order %s: %s",
+                        order_doc.get("orderId", "unknown"), exc,
+                    )
                     px = fallback_price
             return filled, filled * px
 

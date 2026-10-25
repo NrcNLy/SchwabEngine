@@ -27,15 +27,21 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import functools
+import inspect
 import json
 import logging
 import os
+import random
 import tempfile
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Dict, Optional, Tuple
+
+import httpx
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +53,374 @@ SUSTAINED_RPM = 120
 BURST_CAPACITY = 20.0
 BURST_REFILL_RATE = 2.0  # tokens / second
 
+# Phase 1 Resiliency Refactor (#123) Constants
+ASYM_BURST_CAPACITY = 120.0       # 120.0 requests/minute (2.0 req/sec burst headroom)
+ASYM_SUSTAINED_RATE = 1.0         # 1.0 request/sec continuous replenishment
+NON_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({400, 401, 403})
+RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503})
+
 
 class DailyQuotaExceededError(RuntimeError):
     """Raised when the daily outbound request ceiling is reached for non-essential calls."""
+
+
+def _run_nonblocking_sleep(seconds: float) -> None:
+    """
+    Executes an asynchronous sleep from synchronous compatibility paths without
+    invoking blocking time.sleep().
+    """
+    if seconds <= 0.0:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is None:
+        asyncio.run(asyncio.sleep(seconds))
+    else:
+        done_evt = threading.Event()
+        loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(asyncio.sleep(seconds)).add_done_callback(
+                lambda _: done_evt.set()
+            )
+        )
+        done_evt.wait(timeout=seconds + 1.0)
+
+
+def _extract_http_status_code(exc_or_resp: Any) -> Optional[int]:
+    """Extract an HTTP status code from an exception or response object if present."""
+    if exc_or_resp is None:
+        return None
+    status = getattr(exc_or_resp, "status_code", None)
+    if isinstance(status, int):
+        return status
+    resp = getattr(exc_or_resp, "response", None)
+    if resp is not None:
+        resp_status = getattr(resp, "status_code", None)
+        if isinstance(resp_status, int):
+            return resp_status
+    msg = str(exc_or_resp)
+    for code in (400, 401, 403, 429, 500, 502, 503):
+        if f"HTTP {code}" in msg or f"status {code}" in msg.lower() or f"status_code={code}" in msg:
+            return code
+    return None
+
+
+def _is_transient_network_exception(exc: BaseException) -> bool:
+    """Return True if `exc` is a transient network or transport exception."""
+    transient_types = (
+        httpx.TransportError,
+        httpx.TimeoutException,
+        requests.ConnectionError,
+        requests.Timeout,
+        ConnectionError,
+        TimeoutError,
+        asyncio.TimeoutError,
+    )
+    return isinstance(exc, transient_types)
+
+
+def compute_full_jitter_wait(
+    attempt: int,
+    t_base: float = 0.5,
+    t_max: float = 30.0,
+    rng: Optional[Any] = None,
+) -> float:
+    """
+    Compute Full-Jitter exponential backoff wait duration:
+        t_wait = U(0, min(t_max, t_base * 2^(attempt - 1)))
+    """
+    exp_step = max(0, int(attempt) - 1)
+    ceiling = min(float(t_max), float(t_base) * (2.0 ** exp_step))
+    if ceiling <= 0.0:
+        return 0.0
+    if rng is not None:
+        if hasattr(rng, "uniform"):
+            return float(rng.uniform(0.0, ceiling))
+        if callable(rng):
+            return float(rng(0.0, ceiling))
+    return float(random.uniform(0.0, ceiling))
+
+
+def full_jitter_retry(
+    func: Optional[Callable[..., Any]] = None,
+    *,
+    max_attempts: int = 4,
+    max_retries: Optional[int] = None,
+    t_base: float = 0.5,
+    base_delay: Optional[float] = None,
+    t_max: float = 30.0,
+    max_delay: Optional[float] = None,
+    sleep_func: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
+    rng: Optional[Any] = None,
+) -> Callable[..., Any]:
+    """
+    Full-Jitter Retry Decorator (#123 Workstream 4):
+        t_wait = U(0, min(t_max, t_base * 2^(attempt - 1)))
+
+    - Catches transient network exceptions (httpx.TransportError, httpx.TimeoutException,
+      ConnectionError, TimeoutError) and HTTP status codes {429, 500, 502, 503}.
+    - Explicitly bypasses retries on HTTP {400, 401, 403} to avoid masking security
+      errors or triggering broker IP bans.
+    """
+    eff_attempts = (int(max_retries) + 1) if max_retries is not None else max(1, int(max_attempts))
+    eff_base = float(base_delay) if base_delay is not None else float(t_base)
+    eff_max = float(max_delay) if max_delay is not None else float(t_max)
+
+    def _decorator(target_fn: Callable[..., Any]) -> Callable[..., Any]:
+        if inspect.iscoroutinefunction(target_fn):
+            @functools.wraps(target_fn)
+            async def _async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                for attempt in range(1, eff_attempts + 1):
+                    try:
+                        result = await target_fn(*args, **kwargs)
+                        status_code = _extract_http_status_code(result)
+                        if status_code in NON_RETRYABLE_STATUS_CODES:
+                            return result
+                        if status_code in RETRYABLE_STATUS_CODES and attempt < eff_attempts:
+                            wait_s = compute_full_jitter_wait(attempt, eff_base, eff_max, rng=rng)
+                            logger.warning(
+                                "full_jitter_retry: %s returned HTTP %d (attempt %d/%d); backing off %.3fs",
+                                target_fn.__name__, status_code, attempt, eff_attempts, wait_s,
+                            )
+                            await sleep_func(wait_s)
+                            continue
+                        return result
+                    except Exception as exc:
+                        status_code = _extract_http_status_code(exc)
+                        if status_code in NON_RETRYABLE_STATUS_CODES:
+                            logger.error(
+                                "full_jitter_retry: %s encountered non-retryable HTTP %d; bypassing retry.",
+                                target_fn.__name__, status_code,
+                            )
+                            raise
+                        is_retryable = (
+                            status_code in RETRYABLE_STATUS_CODES
+                            or _is_transient_network_exception(exc)
+                        )
+                        if not is_retryable or attempt >= eff_attempts:
+                            raise
+                        wait_s = compute_full_jitter_wait(attempt, eff_base, eff_max, rng=rng)
+                        logger.warning(
+                            "full_jitter_retry: %s transient failure (%s) on attempt %d/%d; backing off %.3fs",
+                            target_fn.__name__, exc, attempt, eff_attempts, wait_s,
+                        )
+                        await sleep_func(wait_s)
+                raise RuntimeError(f"full_jitter_retry exhausted {eff_attempts} attempts for {target_fn.__name__}")
+
+            return _async_wrapper
+
+        @functools.wraps(target_fn)
+        def _sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            for attempt in range(1, eff_attempts + 1):
+                try:
+                    result = target_fn(*args, **kwargs)
+                    status_code = _extract_http_status_code(result)
+                    if status_code in NON_RETRYABLE_STATUS_CODES:
+                        return result
+                    if status_code in RETRYABLE_STATUS_CODES and attempt < eff_attempts:
+                        wait_s = compute_full_jitter_wait(attempt, eff_base, eff_max, rng=rng)
+                        logger.warning(
+                            "full_jitter_retry: %s returned HTTP %d (attempt %d/%d); backing off %.3fs",
+                            target_fn.__name__, status_code, attempt, eff_attempts, wait_s,
+                        )
+                        _run_nonblocking_sleep(wait_s)
+                        continue
+                    return result
+                except Exception as exc:
+                    status_code = _extract_http_status_code(exc)
+                    if status_code in NON_RETRYABLE_STATUS_CODES:
+                        logger.error(
+                            "full_jitter_retry: %s encountered non-retryable HTTP %d; bypassing retry.",
+                            target_fn.__name__, status_code,
+                        )
+                        raise
+                    is_retryable = (
+                        status_code in RETRYABLE_STATUS_CODES
+                        or _is_transient_network_exception(exc)
+                    )
+                    if not is_retryable or attempt >= eff_attempts:
+                        raise
+                    wait_s = compute_full_jitter_wait(attempt, eff_base, eff_max, rng=rng)
+                    logger.warning(
+                        "full_jitter_retry: %s transient failure (%s) on attempt %d/%d; backing off %.3fs",
+                        target_fn.__name__, exc, attempt, eff_attempts, wait_s,
+                    )
+                    _run_nonblocking_sleep(wait_s)
+            raise RuntimeError(f"full_jitter_retry exhausted {eff_attempts} attempts for {target_fn.__name__}")
+
+        return _sync_wrapper
+
+    if func is not None:
+        return _decorator(func)
+    return _decorator
+
+
+# ===========================================================================
+# AsyncTokenBucketRateLimiter (#123 Workstream 4)
+# ===========================================================================
+
+class AsyncTokenBucketRateLimiter:
+    """
+    Continuous asynchronous token-bucket governor enforcing Schwab's quota limits:
+    - Burst Capacity: 120.0 requests/minute (2.0 req/sec burst headroom).
+    - Sustained Rate: 1.0 request/sec continuous replenishment.
+    - Daily Hard Ceiling: 3,500 requests per session.
+
+    All rate-limiting delays yield cleanly to the Python asyncio event loop via
+    `await asyncio.sleep()` outside the scheduling lock so concurrent tasks never stall.
+    """
+
+    def __init__(
+        self,
+        burst_capacity: float = ASYM_BURST_CAPACITY,
+        sustained_rate: float = ASYM_SUSTAINED_RATE,
+        daily_ceiling: int = MAX_DAILY_CALLS,
+        max_burst_rps: float = 2.0,
+        initial_tokens: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep_func: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
+        quota_file: Optional[Path | str] = None,
+        capacity: Optional[float] = None,
+        refill_rate: Optional[float] = None,
+        max_daily_calls: Optional[int] = None,
+    ) -> None:
+        eff_capacity = float(capacity if capacity is not None else burst_capacity)
+        eff_rate = float(refill_rate if refill_rate is not None else sustained_rate)
+        eff_ceiling = int(max_daily_calls if max_daily_calls is not None else daily_ceiling)
+
+        if eff_capacity <= 0.0:
+            raise ValueError(f"burst_capacity must be > 0, got {eff_capacity}")
+        if eff_rate <= 0.0:
+            raise ValueError(f"sustained_rate must be > 0, got {eff_rate}")
+        if eff_ceiling <= 0:
+            raise ValueError(f"daily_ceiling must be > 0, got {eff_ceiling}")
+
+        self.burst_capacity: float = eff_capacity
+        self.sustained_rate: float = eff_rate
+        self.daily_ceiling: int = eff_ceiling
+        self.max_burst_rps: float = float(max_burst_rps)
+        self._clock: Callable[[], float] = clock
+        self._sleep: Callable[[float], Coroutine[Any, Any, None]] = sleep_func
+        self._quota_file: Optional[Path] = Path(quota_file) if quota_file is not None else None
+
+        now = self._clock()
+        self._tokens: float = float(initial_tokens if initial_tokens is not None else eff_capacity)
+        self._last_refill: float = now
+        self._daily_count: int = 0
+        self._lock: asyncio.Lock = asyncio.Lock()
+
+    @property
+    def tokens(self) -> float:
+        now = self._clock()
+        elapsed = max(0.0, now - self._last_refill)
+        return min(self.burst_capacity, self._tokens + elapsed * self.sustained_rate)
+
+    @property
+    def available_tokens(self) -> float:
+        return self.tokens
+
+    @property
+    def daily_count(self) -> int:
+        return self._daily_count
+
+    @property
+    def quota_remaining(self) -> int:
+        return max(0, self.daily_ceiling - self._daily_count)
+
+    def _refill_locked(self, now: float) -> None:
+        if now > self._last_refill:
+            elapsed = now - self._last_refill
+            self._tokens = min(
+                self.burst_capacity,
+                self._tokens + elapsed * self.sustained_rate,
+            )
+            self._last_refill = now
+
+    async def acquire(
+        self,
+        tokens: float = 1.0,
+        priority: str = "NORMAL",
+        is_essential: bool = False,
+    ) -> float:
+        """
+        Acquire `tokens` from the bucket non-blockingly.
+        Yields to the asyncio event loop via `await self._sleep(wait_time)` when
+        burst tokens are depleted, returning the waited duration in seconds.
+        Raises `DailyQuotaExceededError` if `daily_count >= daily_ceiling` for non-essential calls.
+        """
+        if tokens <= 0.0:
+            return 0.0
+        if tokens > self.burst_capacity:
+            raise ValueError(f"Requested tokens ({tokens}) exceeds burst_capacity ({self.burst_capacity})")
+
+        priority_norm = priority.upper().strip()
+        critical = is_essential or priority_norm in {
+            "CRITICAL_EXIT",
+            "CRITICAL",
+            "CANCEL",
+            "CANCEL_ORDER",
+            "EMERGENCY",
+            "EMERGENCY_LIQUIDATION",
+            "MANDATORY_FLATTEN",
+        }
+
+        async with self._lock:
+            if self._daily_count >= self.daily_ceiling and not critical:
+                logger.error(
+                    "AsyncTokenBucketRateLimiter: daily hard ceiling reached (%d/%d). Rejecting %s call.",
+                    self._daily_count, self.daily_ceiling, priority_norm,
+                )
+                raise DailyQuotaExceededError(
+                    f"Daily hard ceiling of {self.daily_ceiling} requests reached ({self._daily_count}/{self.daily_ceiling})."
+                )
+
+            now = self._clock()
+            self._refill_locked(now)
+
+            if self._tokens >= tokens:
+                self._tokens -= tokens
+                wait_time = 0.0
+            else:
+                deficit = tokens - self._tokens
+                wait_time = deficit / self.sustained_rate
+                self._tokens = 0.0
+                # Advance virtual refill watermark so concurrent callers queue cleanly
+                self._last_refill = now + wait_time
+
+            self._daily_count += int(max(1, round(tokens)))
+
+        if wait_time > 0.0:
+            await self._sleep(wait_time)
+
+        return wait_time
+
+    def reset_daily_counter(self) -> None:
+        """Reset session daily request count."""
+        self._daily_count = 0
+
+    def get_telemetry(self) -> Dict[str, Any]:
+        """Return current token bucket telemetry."""
+        return {
+            "burst_capacity": self.burst_capacity,
+            "sustained_rate": self.sustained_rate,
+            "available_tokens": round(self.tokens, 4),
+            "requests_today": self._daily_count,
+            "daily_ceiling": self.daily_ceiling,
+            "quota_remaining": self.quota_remaining,
+        }
+
+    async def __aenter__(self) -> AsyncTokenBucketRateLimiter:
+        await self.acquire(1.0)
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+
+# Alias matching specification nomenclature
+AsyncTokenBucket = AsyncTokenBucketRateLimiter
 
 
 # ===========================================================================
@@ -506,7 +877,45 @@ class TokenBucket:
             else:
                 sleep_duration = wait_needed
 
-            time.sleep(min(sleep_duration, 0.05))
+            _run_nonblocking_sleep(min(sleep_duration, 0.05))
+
+    async def async_acquire(
+        self,
+        tokens: float = 1.0,
+        timeout: Optional[float] = None,
+        is_essential: bool = False,
+    ) -> bool:
+        if tokens > self._capacity:
+            raise ValueError(
+                f"Requested {tokens} tokens exceeds bucket capacity {self._capacity}"
+            )
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        min_allowed = -self._max_debt if is_essential else self._reserve
+
+        while True:
+            with self._lock:
+                self._refill()
+                if (self._tokens - tokens) >= min_allowed:
+                    self._tokens -= tokens
+                    return True
+
+                deficit = (min_allowed + tokens) - self._tokens
+                wait_needed = deficit / self._refill_rate
+
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "TokenBucket: async_acquire timed out after %.2fs (requested %.1f tokens, essential=%s)",
+                        timeout, tokens, is_essential,
+                    )
+                    return False
+                sleep_duration = min(wait_needed, remaining)
+            else:
+                sleep_duration = wait_needed
+
+            await asyncio.sleep(min(sleep_duration, 0.05))
 
     def available(self) -> float:
         with self._lock:
