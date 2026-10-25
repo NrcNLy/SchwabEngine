@@ -150,6 +150,7 @@ class OrderManager:
         self._tier2_stops:    Dict[str, Dict[str, Any]] = {}
         self.telemetry:       Any = None
         self._router:         Any = None
+        self._escalated_router: Any = None
         self._swap_coordinator: Optional["DualSleeveSwapCoordinator"] = None
 
     # ------------------------------------------------------------------
@@ -243,6 +244,37 @@ class OrderManager:
             if self.telemetry and not getattr(self._router, "telemetry", None):
                 self._router.telemetry = self.telemetry
         return self._router
+
+    @property
+    def escalated_router(self) -> Any:
+        """EscalatedMicropriceRouter (#123 Workstream 2) for 15:50–15:55 EDT deleveraging."""
+        if self._escalated_router is None:
+            from execution.escalated_router import EscalatedMicropriceRouter
+            self._escalated_router = EscalatedMicropriceRouter(
+                rest_client=self._rest,
+                account_hash=self._account_hash,
+            )
+        elif self._account_hash and not getattr(self._escalated_router, "account_hash", None):
+            self._escalated_router.account_hash = self._account_hash
+        return self._escalated_router
+
+    async def execute_escalated_eod_deleveraging(
+        self,
+        symbol: str,
+        target_quantity: int,
+        quote_provider: Callable[[str, float], Any],
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Execute the 15:50–15:55 EDT Time-and-Fill Escalated Microprice Router (#123)
+        for a leveraged 3x satellite holding.
+        """
+        return await self.escalated_router.liquidate_position(
+            symbol=symbol,
+            target_quantity=target_quantity,
+            quote_provider=quote_provider,
+            **kwargs,
+        )
 
     @property
     def account_hash(self) -> Optional[str]:
