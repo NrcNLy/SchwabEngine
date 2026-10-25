@@ -21,6 +21,7 @@ from datetime import datetime, time as dtime
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from core.t1_ledger import GFVRejectionError, T1CashLedger
+from strategies.regime_governor import AsymmetricHMMGovernor, ObservationVector4D, SizingGovernorTranslation
 
 logger = logging.getLogger("risk_manager")
 
@@ -907,8 +908,9 @@ class RiskEngine:
         self.is_margin_eligible: bool = False
         self.enforce_letf_house_margin: bool = enforce_letf_house_margin
 
-        # Dual-Sleeve Meta-Governor & Router State (#91 / #98 / #111)
+        # Dual-Sleeve Meta-Governor & Router State (#91 / #98 / #111 / #123)
         self.hmm = MetaGovernorHMM()
+        self.asymmetric_hmm: AsymmetricHMMGovernor = AsymmetricHMMGovernor()
         self.router = DualSleeveRouter(hmm=self.hmm)
         self.satellite_peak_equity: float = float(account_base)
         self.cumulative_core_heal: float = 0.0
@@ -954,6 +956,32 @@ class RiskEngine:
     def process_t1_overnight_clearing(self, current_dt: Optional[datetime] = None) -> float:
         """Executes 00:00:00 EDT T+1 overnight settlement clearing on the T1CashLedger."""
         return float(self.t1_ledger.process_t1_overnight_clearing(current_dt=current_dt))
+
+    def update_asymmetric_regime(
+        self,
+        macro_surprise_z: float = 0.0,
+        macro_sentiment: float = 0.0,
+        macro_hy_spread_bps: float = 317.6,
+        tech_velocity_15m: float = 0.0,
+        *,
+        delta_cs_1h_bps: float = 0.0,
+        credit_spread_z: float = 0.0,
+        spy_velocity_15m: Optional[float] = None,
+    ) -> SizingGovernorTranslation:
+        """
+        Update the 4D AsymmetricHMMGovernor (#123 Workstream 1) and return its
+        SizingGovernorTranslation verdict.
+        """
+        self.asymmetric_hmm.update(
+            macro_surprise_z=macro_surprise_z,
+            macro_sentiment=macro_sentiment,
+            macro_hy_spread_bps=macro_hy_spread_bps,
+            tech_velocity_15m=tech_velocity_15m,
+            delta_cs_1h_bps=delta_cs_1h_bps,
+            credit_spread_z=credit_spread_z,
+            spy_velocity_15m=spy_velocity_15m,
+        )
+        return self.asymmetric_hmm.translate_sizing_governor(regime_targets=self.router.regime_targets)
 
     def create_breakout_bracket(
         self,
