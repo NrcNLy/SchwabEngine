@@ -435,7 +435,7 @@ class OrderManager:
         # Workstream 3 (#123): Pre-Trade GFV Firewall for T+1 Cash Ledger
         if self._ledger is not None and (
             isinstance(self._ledger, T1CashLedger)
-            or bool(getattr(self._ledger, "enforce_t1_gfv", False))
+            or getattr(self._ledger, "enforce_t1_gfv", False) is True
         ):
             notional_cost = qty * px_float
             allowed, reason = self._ledger.can_submit_order("BUY", notional_cost, symbol=symbol)
