@@ -1,0 +1,27 @@
+{
+  "timestamp_utc": "2026-10-25T22:16:47Z",
+  "dry_run": true,
+  "overall_passed": true,
+  "checks": {
+    "t1_ledger_invariants": {
+      "passed": true,
+      "detail": "Settled=$4400.00, Unsettled=$0.00, Reserved=$0.00, Total=$4400.00"
+    },
+    "zero_stranded_satellites": {
+      "passed": true,
+      "detail": "Zero stranded 3x satellite holdings (SOXL, TQQQ, TNA are 0)"
+    },
+    "oauth_pre_market_gate": {
+      "passed": true,
+      "detail": "OAuth active, simulated dry-run TTL healthy (1800.0s >= 1800.0s)"
+    },
+    "rate_limiter_headroom": {
+      "passed": true,
+      "detail": "Burst capacity=120.0, daily ceiling=3500, current count=0 (<100)"
+    },
+    "sqlite_journal_and_state_dir": {
+      "passed": true,
+      "detail": "Directories writable; SQLite journal open with journal_mode=WAL"
+    }
+  }
+}

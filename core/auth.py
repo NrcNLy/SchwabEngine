@@ -976,6 +976,11 @@ class OAuthTokenManager:
         self._heartbeat_task: Optional[asyncio.Task[None]] = None
         self._stop_requested: bool = False
 
+    @property
+    def is_auth_locked(self) -> bool:
+        """Return True if OAuth authentication circuit breaker is open or locked."""
+        return self.auth_circuit_open or self.state == "AUTH_LOCKED"
+
     def _basic_auth_header(self) -> Dict[str, str]:
         credentials = f"{self._client_id}:{self._client_secret}"
         encoded = base64.b64encode(credentials.encode(_ENCODING)).decode(_ENCODING)

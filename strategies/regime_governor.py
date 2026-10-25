@@ -41,7 +41,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from core.paths import TRADING_JOURNAL_DB_PATH
+from core.cold_plane_worker import ControlSignalPayload, read_control_signal
+from core.paths import CONTROL_SIGNAL_PATH, TRADING_JOURNAL_DB_PATH
 
 logger = logging.getLogger("regime_governor")
 
@@ -599,3 +600,77 @@ class AsymmetricHMMGovernor:
                 (int(limit),),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def ingest_cold_plane_signal(
+        self,
+        signal_path: Path = CONTROL_SIGNAL_PATH,
+        max_age_seconds: float = 3600.0,
+        blend_weight: float = 0.35,
+        now_utc: Optional[datetime] = None,
+    ) -> Optional[ControlSignalPayload]:
+        """
+        Ingest external macroeconomic prior signal from the cold plane (#124 Workstream 1).
+        Decoupled atomic file-drop reader blends LLM macroeconomic priors with HMM hot state
+        or triggers tail-risk circuit breaker overrides.
+        """
+        payload = read_control_signal(
+            target_path=signal_path,
+            max_age_seconds=max_age_seconds,
+            now_utc=now_utc,
+        )
+        if payload is None:
+            return None
+
+        with self._lock:
+            prev_regime = self.get_dominant_regime()
+
+            if payload.circuit_breaker_override:
+                self.tail_risk_override_active = True
+                self.pi = [0.0, 0.0, 1.0]
+                new_regime = "Macro Shock"
+                self._record_transition_telemetry(
+                    previous_regime=prev_regime,
+                    new_regime=new_regime,
+                    obs_payload={
+                        "trigger": "COLD_PLANE_CIRCUIT_BREAKER_OVERRIDE",
+                        "model_version": payload.model_version,
+                        "dominant_prior": payload.dominant_prior,
+                        "timestamp_utc": payload.timestamp_utc,
+                        "credit_spread_z_score": payload.credit_spread_z_score,
+                    },
+                )
+                self._last_dominant_regime = new_regime
+                return payload
+
+            # Blending mode
+            w = max(0.0, min(1.0, float(blend_weight)))
+            prior_g = float(payload.prior_probabilities.get("goldilocks", 0.0))
+            prior_u = float(payload.prior_probabilities.get("uncertainty", 0.0))
+            prior_s = float(payload.prior_probabilities.get("macro_shock", 0.0))
+
+            blended_g = (1.0 - w) * self.pi[0] + w * prior_g
+            blended_u = (1.0 - w) * self.pi[1] + w * prior_u
+            blended_s = (1.0 - w) * self.pi[2] + w * prior_s
+
+            total = blended_g + blended_u + blended_s
+            if total > 0.0:
+                self.pi = [blended_g / total, blended_u / total, blended_s / total]
+            else:
+                self.pi = [prior_g, prior_u, prior_s]
+
+            new_regime = self.get_dominant_regime()
+            if new_regime != prev_regime:
+                self._record_transition_telemetry(
+                    previous_regime=prev_regime,
+                    new_regime=new_regime,
+                    obs_payload={
+                        "trigger": "COLD_PLANE_PRIOR_BLEND",
+                        "model_version": payload.model_version,
+                        "dominant_prior": payload.dominant_prior,
+                        "blend_weight": w,
+                        "timestamp_utc": payload.timestamp_utc,
+                    },
+                )
+                self._last_dominant_regime = new_regime
+
+            return payload
