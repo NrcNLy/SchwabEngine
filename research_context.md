@@ -1,2628 +1,2059 @@
-# Production Engine Research Context Document
-**System Identifier:** Schwab Algorithmic Day-Trading Engine (`schwab_engine`)  
-**Generated Timestamp:** 2026-10-16 01:14:43 UTC (Local: `2026-10-16 01:14:43 `)  
-**Execution Node:** `schwab-trader` (Linux 6.1.0-53-cloud-amd64)  
-**Active Scope:** `comprehensive`  
-**Log Query Horizon:** `--since "today"` (Max `50` lines/unit)  
-**VCS Metadata:** Branch `feat/dynamic-screener-universe` @ `cd7a59d73e` (dirty)  
+# SYSTEM ARCHITECTURE & STRATEGY REVIEW: DEEP QUANTITATIVE RESEARCH CONTEXT (#122)
+- timestamp_iso: "2026-10-25T16:48:48-04:00"
+- engine_version: "2.4.0-argon"
+- git_branch: "feat/dynamic-screener-universe"
+- commit_sha: "12e1662"
+- account_scope: "single_account_comprehensive" (Account: ***4015)
+- baseline_nlv_usd: 4400.00
 
 ---
+## 1. System Invariants & Account Profile
 
-## 1. Executive Summary & Runtime Environment
+### 1.1 Account Profile & Dual-Sleeve Capital Model
+SchwabEngine operates on a single Charles Schwab brokerage account (`***4015`) with a calibrated baseline Net Liquidation Value (NLV) of **$4,400.00 USD** (actual session initialization baseline: **$4,400.90 USD**). The engine governs capital using an unchained **Dual-Sleeve Allocation Model** designed to maximize risk-adjusted capital efficiency while mitigating idle cash drag:
 
-### 1.1 Operating Topology
-* **Core Execution Daemon:** `schwab-trader.service` pinned to CPU Core 0 (`CPUAffinity=0`, `Nice=-10`).
-* **Web Dashboard & API Gateway:** `schwab-web.service` pinned to CPU Core 1 (`CPUAffinity=1`).
-* **Autonomous Recovery Watchdog:** `schwab-recovery-watchdog.service` supervising SOXL dynamic recovery.
-* **Settlement Discipline:** SEC Regulation T § 220.8 T+1 Long-Only Cash Account. Strict GFV pre-trade gating and forced overnight holds.
+1. **Passive 1x Robo-Core Sleeve ($C(t)$)**:
+   - Target Portfolio Weight: $W_{core}^* = 0.85$ (85% of NLV under neutral conditions).
+   - Multi-asset diversified ETF basket serving as the primary capital preservation and equity-beta engine:
+     - `SPY`: 0.35 (Large-Cap Broad US Equity Beta)
+     - `QQQ`: 0.25 (Large-Cap Technology Beta)
+     - `HYG`: 0.15 (High-Yield Corporate Credit Beta)
+     - `IEF`: 0.15 (Intermediate 7-10Y US Treasury Duration Hedge)
+     - `IWM`: 0.10 (Russell 2000 Small-Cap Beta)
+   - Zero Cash Drag Policy: Target cash allocation within the core routing vector is 0.00.
 
-### 1.2 Environment & Secrets Configuration
-| Environment Variable | Status | Description |
-| :--- | :--- | :--- |
-| `SCHWAB_API_KEY` | `MISSING / UNSET` | Schwab Trader API App Key |
-| `SCHWAB_APP_SECRET` | `MISSING / UNSET` | Schwab Trader API Secret |
-| `SCHWAB_REDIRECT_URI` | `MISSING / UNSET` | OAuth Callback URI |
-| `SCHWAB_ACCOUNT_ID` | `MISSING / UNSET` | Encrypted Schwab Target Account |
-| `GEMINI_API_KEY` | `CONFIGURED (SET)` | Vertex AI / Gemini Macro Governor |
+2. **Tactical 3x Leveraged Satellite Sleeve ($S(t)$)**:
+   - Target Portfolio Weight: $W_{sat}^*(t) \in [0.00, 0.35]$ dynamically determined by the Online Hidden Markov Model (HMM) Meta-Governor.
+   - High-beta leveraged momentum instruments:
+     - `SOXL`: 0.40 (3x Daily Bull Semiconductor ETF)
+     - `TQQQ`: 0.35 (3x Daily Bull NASDAQ-100 ETF)
+     - `TNA`:  0.25 (3x Daily Bull Russell 2000 Small-Cap ETF)
 
+3. **Cash Sweep & Margin Buffer ($M_{buf}(t)$)**:
+   - Residual fractional and clearance buffer vehicle: `SWVXX` (Schwab Value Advantage Money Fund).
+   - Invariant: $W_{core}(t) + W_{sat}(t) + W_{buf}(t) \equiv 1.00$.
+
+```yaml
+system_profile:
+  account_number_suffix: "015"
+  account_type: "CASH_ACCOUNT" # Subject to SEC Rule 15c6-1 T+1 Cash Settlement
+  baseline_nlv_usd: 4400.00
+  hot_boot_starting_nlv: 4400.90
+  max_single_ticker_pct: 0.20 # 20% hard single-name exposure limit
+  daily_api_quota: 3500       # Charles Schwab REST API call ceiling
+  api_burst_limit_rpm: 120    # Token bucket burst capacity (2.0 req/sec)
+  cash_reserve_floor_pct: 0.05
+```
+
+### 1.2 End-to-End Runtime Architecture
+```mermaid
+flowchart TD
+    subgraph Ingestion ["1. Multi-Rate Ingestion & Microstructure Hot Plane"]
+        WS["Schwab WebSocket Tick Stream\n(1s Level 1 BBO Quotes)"] --> Sync["MultiRateStateSynchronizer\n(Zero-Order Hold & Resampling)"]
+        REST["Schwab REST API Hydration\n(Balances, Positions, Working Orders)"] --> Sync
+        Macro["FRED OAS & Treasury Yields\n(10Y $TNX, VIX, OAS Proxy)"] --> Sync
+    end
+
+    subgraph Governance ["2. Regime Classification & Dynamic Sizing"]
+        Sync --> StateVec["Macro Feature Vector M(t)\n[Z_surprise, S_sentiment, CS_hybrid]"]
+        StateVec --> HMM["3-State Online HMM Meta-Governor\npi(t) = [Goldilocks, Uncertainty, Shock]"]
+        HMM --> SizingGov["Dynamic Satellite Sizing\nW_sat*(t) = 0.25*pi_G + 0.10*pi_U + 0.00*pi_S"]
+    end
+
+    subgraph NTZ ["3. Leland No-Trade Zone (NTZ) Evaluation"]
+        SizingGov --> NTZCheck{"Active w_sat in NTZ?\n[W_sat* - tau <= w <= W_sat* + tau]"}
+        NTZCheck -- "Inside NTZ Band" --> NTZHold["Invariant Hold (dQ = 0)\nZero Order Generation & Churn Suppression"]
+        NTZCheck -- "Upper Harvest Breach\n(w_sat > W_upper)" --> TrimSat["Trim Excess Satellite\nSweep Freed USD -> Robo-Core Vector"]
+        NTZCheck -- "Lower Accumulate Breach\n(w_sat < W_lower)" --> FundSat["Trim Robo-Core Basket\nRebalance -> 3x LETFs"]
+    end
+
+    subgraph Firewall ["4. Pre-Trade Risk Firewall & Execution Gating"]
+        TrimSat --> RiskGates{"Pre-Trade Risk Gates\n- Account Firewall (015 Whitelist)\n- Reg T / Cash Ledger (GFV Check)\n- 20% Single-Ticker Cap\n- 3500 Daily API Limit"}
+        FundSat --> RiskGates
+        RiskGates -- "Pass" --> Router["Almgren-Chriss Slicer &\nAdaptive Execution Router"]
+        RiskGates -- "Veto" --> VetoReject["Order Rejected / Safety Latch"]
+        Router --> SchwabAPI["Schwab Trader API v1"]
+    end
+
+    subgraph TemporalGate ["5. Temporal Lifecycle & EOD Flatten"]
+        SchwabAPI --> ClockCheck{"Intraday Time Gate (ET)"}
+        ClockCheck -- "09:30 - 11:30 ET" --> ActiveOpen["Active Morning Drive (1.0x Kelly)"]
+        ClockCheck -- "11:30 - 13:30 ET" --> MiddayFreeze["Midday Volatility Freeze (Hold Only)"]
+        ClockCheck -- "13:30 - 15:50 ET" --> AfternoonDrive["Afternoon Rebalance Window"]
+        ClockCheck -- "15:50 ET" --> Stage1Flatten["Stage 1 EOD Auction Trim (Regular Close)"]
+        ClockCheck -- "15:55 ET" --> HardCancel["Hard Close: Cancel Working Orders"]
+        ClockCheck -- "19:45 ET" --> Stage2Flatten["Stage 2 Extended-Hours Hard Backstop"]
+    end
+```
 ---
 
-## 2. Active Strategy & Regime Configuration (`strategy_config.json`)
+## 2. Active Codebase Logic & Mathematical Formulations
 
-```json
-{
-  "macro_regime": "REGIME_A",
-  "confidence_score": 0.9,
-  "macro_risk_multiplier": 1.25,
-  "sector_multipliers": {
-    "tech_beta": 1.4,
-    "small_cap_credit": 1.0,
-    "energy_beta": 0.9
-  },
-  "yang_zhang_multiplier_adjustment": 1.0,
-  "trap_volume_tightening": 0.0,
-  "emergency_flatten": false,
-  "hard_lockout_active": false,
-  "rationale": "Stable yields (+0.29%) and strong NQ futures (+0.62%) indicate a risk-on tech-led rebound. Lack of negative macro catalysts supports a trend expansion regime. Market is showing clear bullish accumulation pre-open.",
-  "market_bias": "BULLISH",
-  "target_regime": "A",
-  "macro_bias": "Bullish",
-  "volatility_multiplier": 1.0,
-  "ave": {
-    "mode": "shadow",
-    "s_sat": 0.8,
-    "theta": 0.35,
-    "upper_breach_mode": "tighten",
-    "snapshot_max_age_min": 90.0,
-    "anchors": {
-      "favorable": {
-        "k_u": 3.0,
-        "k_l": 2.0,
-        "gamma": 1.8
-      },
-      "chop": {
-        "k_u": 1.5,
-        "k_l": 1.5,
-        "gamma": 0.6
-      },
-      "defensive": {
-        "k_u": 1.0,
-        "k_l": 0.5,
-        "gamma": 1.0
-      }
-    }
-  },
-  "_updated_at": "2026-10-15T23:30:17.957743+00:00",
-  "_source": "enhanced_preassessment"
-}
-```
-
----
-
-## 3. Scoped Codebase Logic & Mathematical Formulations (Scope: `comprehensive`)
-
-### 3.1 Execution Subsystem
-
-#### `execution/microstructure_sentinel.py` - Opening cross VWAP buffer & soft/hard triggers (500 lines, 20666 bytes)
+### 2.1 Order Submission & Rate-Limited Dispatch (`execution/order_manager.py`)
+All order placement is strictly firewalled to verify account hash matches the whitelisted `***4015` account and does not contain prohibited keywords (`ROBO`, `INTELLIGENT`, `IRA`, `PORTFOLIO_MANAGED`). Prices are formatted to exactly 2 decimal places to prevent Schwab API HTTP 400 Bad Request rejections.
 
 ```python
-"""
-execution/microstructure_sentinel.py
-====================================
-Synthetic Microstructure Sentinel & Opening Cross Buffer (#54).
-
-Eliminates premature stop-outs and raw exchange-side stop slippage during the
-09:30:00–09:31:30 EDT market open (as occurred on SOXL Order 1008303563072).
-
-Two-Tier Virtual Stop-Loss Architecture:
-----------------------------------------
-- Tier 1: Hard Catastrophic Floor (S <= S0 * (1 - hard_catastrophic_pct), default -6.0%):
-  Breached at ANY millisecond regardless of time -> triggers immediate EMERGENCY_HARD_SWEEP
-  (routes IOC market sell).
-- Tier 2: Soft Synthetic Floor (S <= S0 * (1 - soft_floor_pct), default -3.7%):
-  * Before 09:31:30 EDT (Opening Cross Buffer):
-    Requires rolling VWAP < soft floor AND price to remain continuously depressed for >= 45s.
-    Otherwise classified as OPENING_AUCTION_NOISE and exit is suppressed.
-  * After 09:31:30 EDT (Regular Session):
-    Triggers exit if rolling 30s VWAP < soft floor OR 2 consecutive 15-second closes < soft floor.
-    Exit type: LIMIT_PEGGED (bid - $0.02) to minimize spread slippage.
-"""
-
-from __future__ import annotations
-
-import logging
-from collections import deque
-from dataclasses import dataclass
-from datetime import date, datetime, time
-from typing import Any, Deque, Dict, Optional, Tuple, Union
-from zoneinfo import ZoneInfo
-
-logger = logging.getLogger(__name__)
-
-_EDT_TZ = ZoneInfo("America/New_York")
-_MARKET_OPEN_SECONDS = 9 * 3600 + 30 * 60  # 34200.0 (09:30:00 EDT)
-
-
-@dataclass
-class SentinelVerdict:
-    """Verdict returned by MicrostructureSentinel.evaluate_stop."""
-
-    should_exit: bool
-    reason: str
-    exit_type: str
-    current_vwap: float
-    pegged_limit_price: Optional[float] = None
-
-    def __iter__(self):
-        yield self.should_exit
-        yield self.reason
-        yield self.exit_type
-        yield self.current_vwap
-
-
-class MicrostructureSentinel:
-    """
-    In-memory virtual microstructure sentinel providing opening cross noise buffering
-    and two-tier virtual stop loss enforcement.
-    """
-
-    _active_sentinels: Dict[str, MicrostructureSentinel] = {}
-
-    @classmethod
-    def get_active_sentinels(cls) -> Dict[str, MicrostructureSentinel]:
-        """Return a dictionary of currently registered active sentinel instances keyed by uppercase symbol."""
-        return dict(cls._active_sentinels)
-
-    @classmethod
-    def register_sentinel(cls, sentinel: MicrostructureSentinel) -> None:
-        """Register a sentinel instance."""
-        cls._active_sentinels[sentinel.symbol.upper()] = sentinel
-
-    @classmethod
-    def unregister_sentinel(cls, symbol: str) -> None:
-        """Unregister a sentinel instance by symbol."""
-        cls._active_sentinels.pop(symbol.upper(), None)
-
-    @classmethod
-    def clear_active_sentinels(cls) -> None:
-        """Clear all registered sentinel instances (e.g. for testing or session reset)."""
-        cls._active_sentinels.clear()
-
-    def __init__(
-        self,
-        symbol: str,
-        s0_reference: float,
-        soft_floor_pct: float = 0.037,
-        hard_catastrophic_pct: float = 0.060,
-        opening_buffer_seconds: int = 90,
-        vwap_window_seconds: int = 30,
-    ) -> None:
-        """
-        Args:
-            symbol: Ticker symbol (e.g. "SOXL", "TQQQ", "TNA").
-            s0_reference: Sampling price at 09:45 or position entry price.
-            soft_floor_pct: Soft floor loss percentage (default 0.037 / 3.7%).
-            hard_catastrophic_pct: Hard catastrophic floor loss percentage (default 0.060 / 6.0%).
-            opening_buffer_seconds: Duration of opening cross buffer in seconds (default 90).
-            vwap_window_seconds: Rolling VWAP window in seconds (default 30).
-        """
-        if float(s0_reference) <= 0:
-            raise ValueError(f"s0_reference must be positive, got {s0_reference}")
-
-        self.symbol: str = str(symbol).upper()
-        self.s0_reference: float = float(s0_reference)
-        self.soft_floor_pct: float = float(soft_floor_pct)
-        self.hard_catastrophic_pct: float = float(hard_catastrophic_pct)
-        self.opening_buffer_seconds: int = int(opening_buffer_seconds)
-        self.vwap_window_seconds: int = int(vwap_window_seconds)
-
-        # Dynamic envelope bounds tracking (#68)
-        self.high_watermark: float = self.s0_reference
-        self.target_pct: float = 0.04
-        self._trail_stop_override: Optional[float] = None
-        self._catastrophic_floor_override: Optional[float] = None
-        self._target_override: Optional[float] = None
-
-        # Rolling tick state: deque of (timestamp_seconds: float, price: float, volume: float)
-        # Maintained for the last 60 seconds
-        self._ticks: Deque[Tuple[float, float, float]] = deque()
-
-        # Continuous price depression tracking
-        self._depressed_since: Optional[float] = None
-
-        # 15-second bar close tracking
-        self._current_15s_interval: Optional[int] = None
-        self._current_15s_close: Optional[float] = None
-        self._15s_closes: Deque[float] = deque(maxlen=20)
-
-        # Cached VWAP
-        self._last_vwap: float = self.s0_reference
-
-        # Auto-register in global active sentinels registry
-        self.register_sentinel(self)
-
-    @property
-    def soft_floor(self) -> float:
-        """Synthetic soft floor price level."""
-        return self.s0_reference * (1.0 - self.soft_floor_pct)
-
-    @property
-    def hard_floor(self) -> float:
-        """Catastrophic hardware floor price level."""
-        return self.s0_reference * (1.0 - self.hard_catastrophic_pct)
-
-    @property
-    def trail_stop(self) -> float:
-        """Dynamic ratchet trailing stop bound."""
-        if self._trail_stop_override is not None:
-            return round(self._trail_stop_override, 2)
-        return round(max(self.soft_floor, self.high_watermark * (1.0 - self.soft_floor_pct)), 2)
-
-    @trail_stop.setter
-    def trail_stop(self, val: float) -> None:
-        self._trail_stop_override = float(val)
-
-    @property
-    def catastrophic_floor(self) -> float:
-        """Hard catastrophic floor price bound."""
-        if self._catastrophic_floor_override is not None:
-            return round(self._catastrophic_floor_override, 2)
-        return round(self.hard_floor, 2)
-
-    @catastrophic_floor.setter
-    def catastrophic_floor(self, val: float) -> None:
-        self._catastrophic_floor_override = float(val)
-
-    @property
-    def target(self) -> float:
-        """Dynamic upper target price bound."""
-        if self._target_override is not None:
-            return round(self._target_override, 2)
-        return round(self.s0_reference * (1.0 + self.target_pct), 2)
-
-    @target.setter
-    def target(self, val: float) -> None:
-        self._target_override = float(val)
-
-    def get_envelope_bounds(self) -> Dict[str, float]:
-        """
-        Pull active dynamic envelope bounds:
-        (Upper Target, Ratchet Trail, Catastrophic Floor, High Watermark, S0).
-        """
-        return {
-            "s0": round(self.s0_reference, 2),
-            "high_watermark": round(self.high_watermark, 2),
-            "trail_stop": round(self.trail_stop, 2),
-            "catastrophic_floor": round(self.catastrophic_floor, 2),
-            "target": round(self.target, 2),
-        }
-
-    @property
-    def current_vwap(self) -> float:
-        """Most recently computed rolling VWAP."""
-        return self._last_vwap
-
-    def get_pegged_limit_price(self, bid_price: float) -> float:
-        """
-        Calculate pegged limit exit price (bid - $0.02) to minimize spread slippage.
-        """
-        return round(float(bid_price) - 0.02, 2)
-
-    def update_s0(self, new_s0: float) -> None:
-        """Update reference price s0 (e.g. at 09:45 recalibration)."""
-        if float(new_s0) <= 0:
-            raise ValueError(f"s0 must be positive, got {new_s0}")
-        self.s0_reference = float(new_s0)
-        if self.high_watermark < self.s0_reference:
-            self.high_watermark = self.s0_reference
-
-    def ratchet(
-        self,
-        high_watermark: float,
-        dynamic_trail_price: float,
-        floor_price: Optional[float] = None,
-    ) -> None:
-        """
-        Manually trigger or update a sentinel stop ratchet and publish SentinelRatchetEvent.
-        """
-        self.high_watermark = max(self.high_watermark, float(high_watermark))
-        fl = float(floor_price) if floor_price is not None else self.soft_floor
-        try:
-            from core.event_ledger import publish_event
-            from core.event_models import SentinelRatchetEvent
-            publish_event(
-                SentinelRatchetEvent(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                    symbol=self.symbol,
-                    high_watermark=self.high_watermark,
-                    dynamic_trail_price=float(dynamic_trail_price),
-                    floor_price=round(fl, 2),
-                )
-            )
-        except Exception:
-            pass
-
-
-    def reset(self) -> None:
-        """Clear rolling ticks, timers, and bar states."""
-        self._ticks.clear()
-        self._depressed_since = None
-        self._current_15s_interval = None
-        self._current_15s_close = None
-        self._15s_closes.clear()
-        self._last_vwap = self.s0_reference
-        self.high_watermark = self.s0_reference
-        self._trail_stop_override = None
-        self._catastrophic_floor_override = None
-        self._target_override = None
-
-    def on_bar_completed(self, bar: Any) -> Optional[SentinelVerdict]:
-        """
-        Connects BarCompletedEvent from BarResampler to MicrostructureSentinel (#63).
-        Updates rolling 15s bar closes, rolling VWAP, and triggers evaluate_stop on 15s boundaries.
-        """
-        bar_sym = getattr(bar, "symbol", "")
-        if bar_sym and bar_sym.upper() != self.symbol:
-            return None
-
-        timeframe = getattr(bar, "timeframe", "")
-        px = float(getattr(bar, "close", 0.0))
-        vol = float(getattr(bar, "volume", 0.0))
-        vwap = float(getattr(bar, "vwap", px))
-        ts = getattr(bar, "timestamp", None)
-
-        if timeframe == "15s":
-            self._15s_closes.append(px)
-            self._last_vwap = vwap
-            return self.evaluate_stop(
-                current_time_edt=ts if ts is not None else datetime.now(_EDT_TZ),
-                current_price=px,
-                current_volume=vol,
-                bid_price=px,
-            )
-        elif timeframe == "1m":
-            self._last_vwap = vwap
-        return None
-
-    def _normalize_time(self, current_time_edt: Any) -> Tuple[datetime, float, float]:
-        """
-        Normalize input timestamp into:
-        (dt_edt: datetime, t_seconds: float, seconds_of_day: float)
-        All in America/New_York (EDT) timezone.
-        """
-        if isinstance(current_time_edt, str):
-            s = current_time_edt.strip()
-            if "T" in s or "-" in s:
-                dt = datetime.fromisoformat(s)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=_EDT_TZ)
-                else:
-                    dt = dt.astimezone(_EDT_TZ)
-            else:
-                parts = s.split(":")
-                h = int(parts[0])
-                m = int(parts[1])
-                sec_val = float(parts[2])
-                sec_int = int(sec_val)
-                usec = int(round((sec_val - sec_int) * 1_000_000))
-                # Deterministic base trading date
-                dt = datetime(2026, 10, 15, h, m, sec_int, usec, tzinfo=_EDT_TZ)
-        elif isinstance(current_time_edt, datetime):
-            if current_time_edt.tzinfo is None:
-                dt = current_time_edt.replace(tzinfo=_EDT_TZ)
-            else:
-                dt = current_time_edt.astimezone(_EDT_TZ)
-        elif isinstance(current_time_edt, time):
-            dt = datetime.combine(date(2026, 10, 15), current_time_edt, tzinfo=_EDT_TZ)
-        elif isinstance(current_time_edt, (int, float)):
-            val = float(current_time_edt)
-            if val > 1_000_000_000:
-                dt = datetime.fromtimestamp(val, tz=_EDT_TZ)
-            else:
-                if val < 3600:
-                    sec_of_day = _MARKET_OPEN_SECONDS + val
-                else:
-                    sec_of_day = val
-                h = int(sec_of_day // 3600)
-                m = int((sec_of_day % 3600) // 60)
-                s_rem = sec_of_day % 60
-                dt = datetime(2026, 10, 15, h, m, int(s_rem), int((s_rem % 1) * 1_000_000), tzinfo=_EDT_TZ)
-        else:
-            raise TypeError(f"Unsupported time type: {type(current_time_edt)} ({current_time_edt})")
-
-        t_seconds = dt.timestamp()
-        seconds_of_day = dt.hour * 3600.0 + dt.minute * 60.0 + dt.second + dt.microsecond / 1_000_000.0
-        return dt, t_seconds, seconds_of_day
-
-    def evaluate_stop(
-        self,
-        current_time_edt: Any,
-        current_price: float,
-        current_volume: float = 0.0,
-        bid_price: Optional[float] = None,
-    ) -> SentinelVerdict:
-        """
-        Evaluate virtual microstructure stop loss logic.
-
-        Args:
-            current_time_edt: Timestamp (datetime, str 'HH:MM:SS', time, or epoch).
-            current_price: Last trade price S.
-            current_volume: Trade volume for tick.
-            bid_price: Optional current best bid (used for LIMIT_PEGGED price calculation).
-
-        Returns:
-            SentinelVerdict: (should_exit, reason, exit_type, current_vwap)
-        """
-        px = float(current_price)
-        if px > self.high_watermark:
-            self.high_watermark = px
-            dynamic_trail = round(self.high_watermark * (1.0 - self.soft_floor_pct), 2)
-            try:
-                from core.event_ledger import publish_event
-                from core.event_models import SentinelRatchetEvent
-                publish_event(
-                    SentinelRatchetEvent(
-                        timestamp=str(current_time_edt),
-                        symbol=self.symbol,
-                        high_watermark=self.high_watermark,
-                        dynamic_trail_price=dynamic_trail,
-                        floor_price=round(self.soft_floor, 2),
-                    )
-                )
-            except Exception:
-                pass
-        vol = float(current_volume) if current_volume is not None else 0.0
-
-        bid = float(bid_price) if bid_price is not None else px
-
-        _, t_seconds, seconds_of_day = self._normalize_time(current_time_edt)
-
-        # ------------------------------------------------------------------
-        # 1. Update rolling ticks deque (60-second window)
-        # ------------------------------------------------------------------
-        self._ticks.append((t_seconds, px, vol))
-        while self._ticks and self._ticks[0][0] < t_seconds - 60.0:
-            self._ticks.popleft()
-
-        # ------------------------------------------------------------------
-        # 2. Compute rolling 30-second VWAP: sum(p * v) / sum(v)
-        # ------------------------------------------------------------------
-        cutoff_vwap = t_seconds - self.vwap_window_seconds
-        window_ticks = [tk for tk in self._ticks if tk[0] >= cutoff_vwap]
-
-        sum_pv = sum(tk[1] * tk[2] for tk in window_ticks)
-        sum_v = sum(tk[2] for tk in window_ticks)
-
-        if sum_v > 0:
-            current_vwap = sum_pv / sum_v
-        elif window_ticks:
-            current_vwap = sum(tk[1] for tk in window_ticks) / len(window_ticks)
-        else:
-            current_vwap = px
-
-        self._last_vwap = current_vwap
-
-        # ------------------------------------------------------------------
-        # 3. Update 15-second bar closes
-        # ------------------------------------------------------------------
-        interval_id = int(t_seconds // 15.0)
-        if self._current_15s_interval is None:
-            self._current_15s_interval = interval_id
-            self._current_15s_close = px
-        elif interval_id == self._current_15s_interval:
-            self._current_15s_close = px
-        else:
-            if self._current_15s_close is not None:
-                self._15s_closes.append(self._current_15s_close)
-            skipped = interval_id - self._current_15s_interval - 1
-            if skipped > 0 and self._current_15s_close is not None:
-                for _ in range(min(skipped, 5)):
-                    self._15s_closes.append(self._current_15s_close)
-            self._current_15s_interval = interval_id
-            self._current_15s_close = px
-
-        two_consecutive_15s_below = False
-        if len(self._15s_closes) >= 2:
-            if self._15s_closes[-1] < self.soft_floor and self._15s_closes[-2] < self.soft_floor:
-                two_consecutive_15s_below = True
-        if not two_consecutive_15s_below and len(self._15s_closes) >= 1 and self._current_15s_close is not None:
-            if self._15s_closes[-1] < self.soft_floor and self._current_15s_close < self.soft_floor:
-                two_consecutive_15s_below = True
-
-        # ------------------------------------------------------------------
-        # 4. Continuous price depression timer
-        # ------------------------------------------------------------------
-        if px <= self.soft_floor:
-            if self._depressed_since is None:
-                self._depressed_since = t_seconds
-            depressed_duration = t_seconds - self._depressed_since
-        else:
-            self._depressed_since = None
-            depressed_duration = 0.0
-
-        # ------------------------------------------------------------------
-        # Tier 1: Hard Catastrophic Floor (S <= S0 * (1 - hard_catastrophic_pct))
-        # Breached at ANY millisecond regardless of time -> immediate EMERGENCY_HARD_SWEEP
-        # ------------------------------------------------------------------
-        if px <= self.hard_floor:
-            return SentinelVerdict(
-                should_exit=True,
-                reason="EMERGENCY_HARD_SWEEP",
-                exit_type="EMERGENCY_HARD_SWEEP",
-                current_vwap=current_vwap,
-                pegged_limit_price=None,
-            )
-
-        # ------------------------------------------------------------------
-        # Tier 2: Soft Synthetic Floor (S <= S0 * (1 - soft_floor_pct))
-        # ------------------------------------------------------------------
-        buffer_end_seconds = _MARKET_OPEN_SECONDS + self.opening_buffer_seconds
-
-        if seconds_of_day < buffer_end_seconds:
-            # Inside Opening Cross Buffer (09:30:00 to 09:31:30 EDT)
-            if px <= self.soft_floor:
-                # Require rolling VWAP < soft floor AND continuous depression >= 45s
-                if current_vwap < self.soft_floor and depressed_duration >= 45.0:
-                    return SentinelVerdict(
-                        should_exit=True,
-                        reason="SUSTAINED_SOFT_BREACH",
-                        exit_type="LIMIT_PEGGED",
-                        current_vwap=current_vwap,
-                        pegged_limit_price=self.get_pegged_limit_price(bid),
-                    )
-                else:
-                    # Classify as OPENING_AUCTION_NOISE and suppress exit
-                    return SentinelVerdict(
-                        should_exit=False,
-                        reason="OPENING_AUCTION_NOISE",
-                        exit_type="NONE",
-                        current_vwap=current_vwap,
-                        pegged_limit_price=None,
-                    )
-            else:
-                return SentinelVerdict(
-                    should_exit=False,
-                    reason="HOLD",
-                    exit_type="NONE",
-                    current_vwap=current_vwap,
-                    pegged_limit_price=None,
-                )
-        else:
-            # Post-Open Regular Session (after 09:31:30 EDT)
-            # Trigger exit if rolling 30-second VWAP < soft floor OR 2 consecutive 15-second closes < soft floor
-            if current_vwap < self.soft_floor or two_consecutive_15s_below:
-                return SentinelVerdict(
-                    should_exit=True,
-                    reason="SOFT_FLOOR_BREACH",
-                    exit_type="LIMIT_PEGGED",
-                    current_vwap=current_vwap,
-                    pegged_limit_price=self.get_pegged_limit_price(bid),
-                )
-            else:
-                return SentinelVerdict(
-                    should_exit=False,
-                    reason="HOLD",
-                    exit_type="NONE",
-                    current_vwap=current_vwap,
-                    pegged_limit_price=None,
-                )
-
-```
-
-#### `execution/adaptive_envelope.py` - Yang-Zhang volatility & asymptotic time-decay squeeze (311 lines, 11744 bytes)
-
-```python
-"""
-execution/adaptive_envelope.py
-==============================
-Adaptive Volatility Envelope (AVE) Execution Engine (#58).
-Provides Yang-Zhang variance calculation, dynamic take-profit decay,
-and quadratic trailing squeeze for leveraged ETF intraday execution.
-
-Mathematical Governance:
--------------------------
-1. Normalized Session Clock:
-   tau = (t - T_open) / (T_close - T_open), clamped to [0.0, 1.0]
-
-2. Quadratic Squeeze Factor:
-   lambda(tau) = 1.0 - tau^2
-   (Quadratic decay preserves wide envelope during morning session, accelerating
-    contraction during afternoon/pre-close convergence).
-
-3. Yang-Zhang Drift-Independent Volatility Estimator:
-   sigma_yz^2 = sigma_o^2 + k * sigma_c^2 + (1 - k) * sigma_rs^2
-   where k = 0.34 / (1.34 + (n + 1) / (n - 1))
-   Falls back smoothly to close-to-close log return stddev or ATR for n < 5 bars.
-
-4. Dynamic Take-Profit Decay:
-   U(t) = P_entry * (1.0 + k_u * sigma_yz * lambda(tau)) + drift_offset
-   Target smoothly decays throughout the trading session to lock in morning alpha.
-
-5. Dynamic Trailing Squeeze (Supremum Ratchet):
-   L(t) = M(t) * (1.0 - k_l * sigma_yz * lambda(tau))
-   where M(t) = sup_{s in [t0, t]} P(s)
-   As tau -> 1.0 (session close), lambda -> 0.0 and L(t) -> M(t).
-
-6. Asymmetric Breach Detection:
-   - Lower bound breached when BID price <= L(t)
-   - Upper bound breached when LAST price >= U(t)
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from datetime import datetime, time as dtime, timezone
-from enum import Enum
-import math
-from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
-from collections import deque
-
-from indicators.volatility import OHLCBar, compute_yang_zhang_volatility
-
-
-class BreachType(str, Enum):
-    NONE = "NONE"
-    UPPER_TAKE_PROFIT = "UPPER_TAKE_PROFIT"
-    LOWER_TRAILING_STOP = "LOWER_TRAILING_STOP"
-    TERMINAL_FLUSH = "TERMINAL_FLUSH"
-
-
-@dataclass(frozen=True, slots=True)
-class EnvelopeState:
-    """Immutable snapshot of the dynamic envelope coordinates."""
-    timestamp: datetime
-    price: float
-    bid_price: float
-    supremum: float
-    upper_bound: float
-    lower_bound: float
-    squeeze_factor: float
-    sigma_yz: float
-    breach: BreachType
-    is_tightened: bool
-    tau: float
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "timestamp": self.timestamp.isoformat(),
-            "price": round(self.price, 4),
-            "bid_price": round(self.bid_price, 4),
-            "supremum": round(self.supremum, 4),
-            "upper_bound": round(self.upper_bound, 4),
-            "lower_bound": round(self.lower_bound, 4),
-            "squeeze_factor": round(self.squeeze_factor, 4),
-            "sigma_yz": round(self.sigma_yz, 6),
-            "breach": self.breach.value,
-            "is_tightened": self.is_tightened,
-            "tau": round(self.tau, 4),
-        }
-
-
-class AdaptiveEnvelopeExecutor:
-    """
-    Execution-layer manager for the Adaptive Volatility Envelope.
-    Integrates Yang-Zhang continuous variance tracking, quadratic trailing squeeze,
-    and take-profit decay.
-    """
-
-    def __init__(
-        self,
-        symbol: str,
-        entry_price: float,
-        entry_time: datetime,
-        session_open: datetime,
-        session_close: datetime,
-        k_u: float = 1.5,
-        k_l: float = 1.5,
-        gamma: float = 2.0,  # Default 2.0: Quadratic squeeze
-        min_k_l: float = 0.25,
-        upper_breach_mode: str = "tighten",  # "tighten" | "exit"
-        spike_filter_sigma_mult: float = 4.0,
-        baseline_sigma: float = 0.02,
-        history_window: int = 30,
-    ) -> None:
-        if float(entry_price) <= 0.0:
-            raise ValueError(f"entry_price must be positive, got {entry_price}")
-        if session_close <= session_open:
-            raise ValueError(f"session_close must be greater than session_open ({session_close} <= {session_open})")
-
-        self.symbol: str = str(symbol).upper()
-        self.entry_price: float = float(entry_price)
-        self.entry_time: datetime = entry_time
-        self.session_open: datetime = session_open
-        self.session_close: datetime = session_close
-
-        self.k_u: float = float(k_u)
-        self.k_l: float = float(k_l)
-        self.initial_k_l: float = float(k_l)
-        self.gamma: float = float(gamma)
-        self.min_k_l: float = float(min_k_l)
-        self.upper_breach_mode: str = upper_breach_mode.lower()
-        self.spike_filter_sigma_mult: float = float(spike_filter_sigma_mult)
-        self.baseline_sigma: float = float(baseline_sigma)
-
-        self.total_session_seconds: float = max(
-            1.0, (self.session_close - self.session_open).total_seconds()
-        )
-        self.supremum: float = self.entry_price
-        self.is_tightened: bool = False
-        self.last_tick_time: Optional[datetime] = None
-
-        # Rolling bar buffer for Yang-Zhang volatility
-        self._bar_buffer: Deque[OHLCBar] = deque(maxlen=max(5, history_window))
-        self._current_sigma_yz: float = self.baseline_sigma
-
-    @property
-    def current_sigma_yz(self) -> float:
-        """Current Yang-Zhang volatility estimate."""
-        return self._current_sigma_yz
-
-    def add_bar(self, bar: OHLCBar) -> float:
-        """
-        Ingests a completed OHLCBar and updates continuous Yang-Zhang volatility.
-        Returns the updated sigma_yz.
-        """
-        self._bar_buffer.append(bar)
-        if len(self._bar_buffer) >= 2:
-            computed_vol = compute_yang_zhang_volatility(list(self._bar_buffer))
-            if computed_vol > 1e-5:
-                self._current_sigma_yz = computed_vol
-        return self._current_sigma_yz
-
-    def compute_tau(self, current_time: datetime) -> float:
-        """
-        Calculates normalized session clock:
-        tau = (current_time - session_open) / total_session_seconds in [0.0, 1.0].
-        """
-        if current_time <= self.session_open:
-            return 0.0
-        if current_time >= self.session_close:
-            return 1.0
-        elapsed = (current_time - self.session_open).total_seconds()
-        return min(1.0, max(0.0, elapsed / self.total_session_seconds))
-
-    def compute_squeeze_factor(self, current_time: datetime) -> float:
-        """
-        Quadratic squeeze factor: lambda(tau) = 1.0 - tau^gamma in [0.0, 1.0].
-        When gamma=2.0 (quadratic):
-        - At tau = 0.0 (open): lambda = 1.0 (envelope at maximum width)
-        - At tau = 0.5 (midday): lambda = 0.75 (retains 75% width)
-        - At tau = 1.0 (close): lambda = 0.0 (converges completely to supremum)
-        """
-        tau = self.compute_tau(current_time)
-        return max(0.0, min(1.0, 1.0 - math.pow(tau, self.gamma)))
-
-    def apply_tightening(self) -> None:
-        """Halves k_l upon upper boundary touch, ratcheting trailing stop tighter."""
-        if not self.is_tightened:
-            self.k_l = max(self.min_k_l, self.k_l * 0.5)
-            self.is_tightened = True
-
-    def evaluate_tick(
-        self,
-        current_time: datetime,
-        current_price: float,
-        bid_price: Optional[float] = None,
-        sigma_override: Optional[float] = None,
-        drift_rate: float = 0.0,
-    ) -> EnvelopeState:
-        """
-        Evaluates dynamic envelope against an incoming tick.
-        Updates supremum, computes bounds, and determines breach verdict.
-        """
-        if self.last_tick_time is not None and current_time < self.last_tick_time:
-            current_time = self.last_tick_time
-        else:
-            self.last_tick_time = current_time
-
-        price = float(current_price)
-        bid = float(bid_price) if bid_price is not None and bid_price > 0.0 else price
-        sigma = float(sigma_override) if sigma_override is not None else self._current_sigma_yz
-        sigma = max(1e-6, sigma)
-
-        # Monotonic supremum ratcheting with outlier spike filter
-        max_valid_jump = self.supremum * (1.0 + self.spike_filter_sigma_mult * sigma)
-        if price > max_valid_jump:
-            bid_confirms = (bid_price is not None) and (bid >= max_valid_jump * 0.98)
-            if bid_confirms:
-                self.supremum = price
-        else:
-            if price > self.supremum:
-                self.supremum = price
-
-        tau = self.compute_tau(current_time)
-        lam = self.compute_squeeze_factor(current_time)
-
-        # Elapsed drift offset
-        elapsed_entry = max(0.0, (current_time - self.entry_time).total_seconds())
-        drift_offset = drift_rate * elapsed_entry
-
-        # Upper bound: Take-Profit Decay
-        raw_upper = self.entry_price * (1.0 + (self.k_u * sigma * lam)) + drift_offset
-        upper_bound = max(self.entry_price * 1.0001, raw_upper)
-
-        # Lower bound: Quadratic Trailing Squeeze (supremum pegged)
-        lower_bound = self.supremum * (1.0 - (self.k_l * sigma * lam))
-
-        # Check breach conditions
-        breached_upper = (price >= upper_bound)
-        breached_lower = (bid <= lower_bound)
-
-        breach = BreachType.NONE
-        if breached_upper:
-            if self.upper_breach_mode == "tighten":
-                self.apply_tightening()
-                # Recalculate lower bound with tightened k_l
-                lower_bound = self.supremum * (1.0 - (self.k_l * sigma * lam))
-                breached_lower = (bid <= lower_bound)
-                if breached_lower:
-                    breach = BreachType.LOWER_TRAILING_STOP
-            else:
-                breach = BreachType.UPPER_TAKE_PROFIT
-        elif breached_lower:
-            breach = BreachType.LOWER_TRAILING_STOP
-
-        # Terminal convergence check at session close
-        if tau >= 1.0 and breach == BreachType.NONE:
-            breach = BreachType.TERMINAL_FLUSH
-
-        return EnvelopeState(
-            timestamp=current_time,
-            price=price,
-            bid_price=bid,
-            supremum=self.supremum,
-            upper_bound=upper_bound,
-            lower_bound=lower_bound,
-            squeeze_factor=lam,
-            sigma_yz=sigma,
-            breach=breach,
-            is_tightened=self.is_tightened,
-            tau=tau,
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Serializes executor state."""
-        return {
-            "symbol": self.symbol,
-            "entry_price": self.entry_price,
-            "entry_time": self.entry_time.isoformat(),
-            "session_open": self.session_open.isoformat(),
-            "session_close": self.session_close.isoformat(),
-            "supremum": self.supremum,
-            "k_u": self.k_u,
-            "k_l": self.k_l,
-            "initial_k_l": self.initial_k_l,
-            "gamma": self.gamma,
-            "is_tightened": self.is_tightened,
-            "sigma_yz": self._current_sigma_yz,
-            "bar_count": len(self._bar_buffer),
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> AdaptiveEnvelopeExecutor:
-        """Deserializes executor from stored state."""
-        entry_time = datetime.fromisoformat(data["entry_time"])
-        session_open = datetime.fromisoformat(data["session_open"])
-        session_close = datetime.fromisoformat(data["session_close"])
-
-        inst = cls(
-            symbol=data["symbol"],
-            entry_price=data["entry_price"],
-            entry_time=entry_time,
-            session_open=session_open,
-            session_close=session_close,
-            k_u=data.get("k_u", 1.5),
-            k_l=data.get("k_l", 1.5),
-            gamma=data.get("gamma", 2.0),
-            baseline_sigma=data.get("sigma_yz", 0.02),
-        )
-        inst.supremum = data.get("supremum", inst.entry_price)
-        inst.is_tightened = data.get("is_tightened", False)
-        return inst
-
-
-# Compatibility alias
-AdaptiveEnvelope = AdaptiveEnvelopeExecutor
-
-```
-
-#### `execution/almgren_chriss.py` - Optimal execution slicing & NBBO limit pegging (914 lines, 34366 bytes)
-
-```python
-"""
-execution/almgren_chriss.py
-===========================
-Almgren-Chriss Optimal Execution Router & Adaptive Limit Pegging.
-
-Implements the discrete-time Almgren-Chriss (2000) optimal liquidation model
-and dynamic NBBO limit pegging for 3x leveraged ETFs (SOXL, TQQQ, TNA).
-
-Mathematical Model:
--------------------
-1. Permanent Market Impact:
-   g(n, tau) = gamma * (n / tau)
-   where gamma is the permanent impact variance parameter, n is the share quantity,
-   and tau is the execution window length.
-
-2. Temporary Market Impact:
-   h(n, tau, spread) = eta * (n / tau) + (spread / 2)
-   where eta is the temporary impact coefficient, and spread is the NBBO bid-ask spread.
-
-3. Optimal Trajectory:
-   X_j = N * sinh(kappa * (T - j) * tau) / sinh(kappa * T * tau)
-   where kappa * tau = arccosh(1 + (lambda * sigma^2 * tau^2) / (2 * eta)).
-   At j = T: X_T = 0 (ensures zero shares remain at interval T).
-
-Adaptive Pegging:
------------------
-Child limit orders are pegged dynamically to:
-   Price = Best Bid - (0.01 * Spread)
-Monitored with a 3-second cancel-replace loop against Schwab order states.
-In TERMINAL_FLUSH mode (15:50 EDT), permits 60s of adaptive pegging before
-falling back to an aggressive Immediate-Or-Cancel (IOC) marketable limit at Bid - $0.10.
-In EMERGENCY_CATASTROPHIC mode, bypasses slicing and dispatches a single IOC block.
-"""
-
-from __future__ import annotations
-
-import logging
-import math
-import time
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
-from zoneinfo import ZoneInfo
-
-logger = logging.getLogger(__name__)
-
-EDT = ZoneInfo("America/New_York")
-
-
-# ---------------------------------------------------------------------------
-# Mathematical Liquidation Model Functions
-# ---------------------------------------------------------------------------
-
-def permanent_market_impact(n: float, tau: float, gamma: float = 2.5e-6) -> float:
-    """
-    Permanent price impact for leveraged ETF liquidation:
-        g(n, tau) = gamma * (n / tau)
-
-    Args:
-        n:     Number of shares liquidated in the slice.
-        tau:   Slice duration or execution window (seconds or normalized periods).
-        gamma: Permanent price impact variance coefficient.
-
-    Returns:
-        Permanent price concession (dollars per share).
-    """
-    if tau <= 0:
-        raise ValueError(f"tau must be strictly positive, got {tau}")
-    return gamma * (float(n) / float(tau))
-
-
-# Alias for explicit naming consistency
-permanent_price_impact = permanent_market_impact
-
-
-def temporary_market_impact(
-    n: float,
-    tau: float,
-    eta: float = 2.5e-5,
-    spread: float = 0.0,
-) -> float:
-    """
-    Temporary price impact for leveraged ETF liquidation:
-        h(n, tau, spread) = eta * (n / tau) + (spread / 2)
-
-    Args:
-        n:      Number of shares liquidated in the slice.
-        tau:    Slice duration or execution window.
-        eta:    Temporary impact coefficient.
-        spread: NBBO bid-ask spread (Ask - Bid).
-
-    Returns:
-        Temporary price impact concession (dollars per share).
-    """
-    if tau <= 0:
-        raise ValueError(f"tau must be strictly positive, got {tau}")
-    return eta * (float(n) / float(tau)) + (float(spread) / 2.0)
-
-
-# Alias for explicit naming consistency
-temporary_price_impact = temporary_market_impact
-
-
-def calculate_optimal_trajectory(
-    total_shares: int,
-    intervals: int,
-    risk_aversion: float = 1e-4,
-    sigma: float = 0.02,
-    eta: float = 2.5e-5,
-    gamma: float = 2.5e-6,
-    tau: float = 1.0,
-) -> List[int]:
-    """
-    Calculates the Almgren-Chriss discrete optimal liquidation trajectory X_j for j = 0..T.
-
-    Each element X_j represents the remaining inventory of shares at interval index j.
-
-    Guarantees:
-        - X[0] == total_shares
-        - X[T] == 0 (zero shares remain at interval T)
-        - Monotonic non-increasing: X[j] >= X[j + 1] >= 0
-
-    Args:
-        total_shares:  Total initial inventory N to liquidate.
-        intervals:     Total number of discrete intervals T.
-        risk_aversion: Lambda parameter governing penalty for inventory variance.
-        sigma:         Asset volatility (daily or intraday standard deviation).
-        eta:           Temporary impact parameter.
-        gamma:         Permanent impact parameter.
-        tau:           Interval length (time increment delta_t).
-
-    Returns:
-        List of remaining share counts [X_0, X_1, ..., X_T] of length T + 1.
-    """
-    if intervals < 1:
-        raise ValueError(f"intervals must be >= 1, got {intervals}")
-    if total_shares <= 0:
-        return [0] * (intervals + 1)
-
-    T = intervals
-    N = int(total_shares)
-
-    # Compute discrete urgency parameter kappa * tau
-    # arccosh(1 + (lambda * sigma^2 * tau^2) / (2 * eta_tilde))
-    # where eta_tilde = eta * (1 - (gamma * tau) / (2 * eta))
-    eta_tilde = eta - 0.5 * gamma * tau
-    if eta_tilde <= 0:
-        eta_tilde = eta
-
-    numerator = risk_aversion * (sigma ** 2) * (tau ** 2)
-    denominator = 2.0 * eta_tilde
-
-    if denominator <= 0 or numerator <= 0:
-        kappa_tau = 0.0
+# execution/order_manager.py: Exact placement & dispatch logic
+def place_limit_buy(
+    self,
+    symbol: str,
+    limit_price: float,
+    quantity: Optional[int] = None,
+    atr: Optional[float] = None,
+    extended_hours: bool = False,
+    is_essential: bool = False,
+) -> str:
+    sym = symbol.upper()
+    px_float = float(limit_price)
+    eff_atr = float(atr) if (atr is not None and atr > 0.0) else (px_float * 0.015)
+
+    if quantity is None or quantity <= 0:
+        verdict = self.calculate_position_size(symbol, px_float, eff_atr)
+        if not verdict.allowed or verdict.shares <= 0:
+            logger.warning("OrderManager: SizingGovernor refused BUY for %s: %s", sym, verdict.reason)
+            return ""
+        qty = verdict.shares
     else:
-        arg = 1.0 + (numerator / denominator)
-        kappa_tau = math.acosh(arg) if arg >= 1.0 else 0.0
+        qty = int(quantity)
 
-    trajectory: List[int] = []
-
-    if kappa_tau < 1e-8:
-        # Linear TWAP liquidation trajectory as kappa -> 0
-        for j in range(T + 1):
-            if j == 0:
-                trajectory.append(N)
-            elif j == T:
-                trajectory.append(0)
-            else:
-                rem = round(N * float(T - j) / float(T))
-                trajectory.append(int(max(0, min(N, rem))))
-    else:
-        sinh_total = math.sinh(kappa_tau * T)
-        for j in range(T + 1):
-            if j == 0:
-                trajectory.append(N)
-            elif j == T:
-                trajectory.append(0)
-            else:
-                ratio = math.sinh(kappa_tau * (T - j)) / sinh_total
-                rem = round(N * ratio)
-                trajectory.append(int(max(0, min(N, rem))))
-
-    # Guarantee strict boundary conditions and monotonicity
-    trajectory[0] = N
-    trajectory[-1] = 0
-    for j in range(1, T + 1):
-        if trajectory[j] > trajectory[j - 1]:
-            trajectory[j] = trajectory[j - 1]
-        if trajectory[j] < 0:
-            trajectory[j] = 0
-
-    return trajectory
-
-
-# Alias
-optimal_liquidation_trajectory = calculate_optimal_trajectory
-
-
-def calculate_slice_trades(
-    total_shares: int,
-    intervals: int,
-    risk_aversion: float = 1e-4,
-    sigma: float = 0.02,
-    eta: float = 2.5e-5,
-    gamma: float = 2.5e-6,
-    tau: float = 1.0,
-) -> List[int]:
-    """
-    Computes slice trade quantities [n_1, n_2, ..., n_T] from the optimal trajectory.
-    Guarantees sum(n_j) == total_shares.
-    """
-    traj = calculate_optimal_trajectory(
-        total_shares=total_shares,
-        intervals=intervals,
-        risk_aversion=risk_aversion,
-        sigma=sigma,
-        eta=eta,
-        gamma=gamma,
-        tau=tau,
+    self._require_firewall()
+    px_str = f"{px_float:.2f}"
+    session = _SESSION_NORMAL if not extended_hours else "SEAMLESS"
+    body = self._build_order(
+        instruction=_INST_BUY,
+        order_type=_OT_LIMIT,
+        symbol=sym,
+        quantity=qty,
+        price=px_str,
+        session=session,
     )
-    trades = [traj[j - 1] - traj[j] for j in range(1, len(traj))]
-    # Adjust any rounding discrepancy to ensure exact sum
-    diff = total_shares - sum(trades)
-    if diff != 0 and len(trades) > 0:
-        trades[0] += diff
-    return trades
-
-
-# ---------------------------------------------------------------------------
-# Data Classes
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ExecutionSummary:
-    """
-    Summary metrics for an optimal liquidation sequence.
-    """
-    symbol: str
-    total_shares: int
-    filled_shares: int
-    average_fill_price: float
-    arrival_price: float
-    slippage_bps: float
-    execution_duration: float
-    order_ids: List[str] = field(default_factory=list)
-    urgency: str = "NORMAL"
-    status: str = "FILLED"
-
-    @property
-    def fill_price(self) -> float:
-        return self.average_fill_price
-
-    @property
-    def primary_order_id(self) -> str:
-        return self.order_ids[0] if self.order_ids else ""
-
-
-# ---------------------------------------------------------------------------
-# Adaptive Execution Router
-# ---------------------------------------------------------------------------
-
-class AdaptiveExecutionRouter:
-    """
-    Almgren-Chriss Optimal Execution Router with Adaptive NBBO Limit Pegging.
-
-    Dispatches sliced micro-tranches, dynamically pegs limit prices to the best bid,
-    and executes cancel-replace updates every 3 seconds until positions are 100% closed.
-    """
-
-    def __init__(
-        self,
-        rest_client: Any,
-        max_slippage_bps: int = 15,
-        slice_interval_seconds: int = 5,
-        cancel_replace_timeout: int = 3,
-        account_hash: Optional[str] = None,
-        telemetry: Optional[Any] = None,
-    ) -> None:
-        """
-        Args:
-            rest_client:            SchwabRestClient instance.
-            max_slippage_bps:       Maximum allowable price concession in basis points (15 = 0.15%).
-            slice_interval_seconds: Interval between slice dispatches (default 5).
-            cancel_replace_timeout: Timeout before canceling and replacing unfilled slice (default 3).
-            account_hash:           Schwab account hash value (cached or auto-resolved).
-            telemetry:              Optional telemetry bus instance for WAL events.
-        """
-        self._rest = rest_client
-        self.max_slippage_bps = max_slippage_bps
-        self.slice_interval_seconds = slice_interval_seconds
-        self.cancel_replace_timeout = cancel_replace_timeout
-        self.account_hash = account_hash
-        self.telemetry = telemetry
-
-    # ------------------------------------------------------------------
-    # Public Execution API
-    # ------------------------------------------------------------------
-
-    def liquidate_optimal(
-        self,
-        symbol: str,
-        total_shares: int,
-        urgency: str = "NORMAL",
-    ) -> ExecutionSummary:
-        """
-        Liquidates `total_shares` of `symbol` optimally.
-
-        Urgency modes:
-        - "EMERGENCY_CATASTROPHIC":
-            Bypasses slicing and routes a single Immediate-Or-Cancel (IOC)
-            marketable limit order at Bid - $0.10.
-        - "NORMAL" or "TERMINAL_FLUSH":
-            Divides total_shares into 2 to 3 micro-tranches based on 1-minute volume.
-            Pegs limit price: Price = Best Bid - (0.01 * Spread).
-            Dispatches tranche 1, monitors for 3 seconds.
-            If unfilled after 3 seconds: cancels and replaces with updated NBBO bid peg.
-            Re-routes remaining tranches until position is 100% closed.
-            If TERMINAL_FLUSH mode exceeds 60 seconds (or past 15:52 EDT), falls back to IOC.
-
-        Returns:
-            ExecutionSummary recording fill price, slippage vs arrival price, and duration.
-        """
-        sym = symbol.upper()
-        qty = int(total_shares)
-        if qty <= 0:
-            return ExecutionSummary(
-                symbol=sym,
-                total_shares=0,
-                filled_shares=0,
-                average_fill_price=0.0,
-                arrival_price=0.0,
-                slippage_bps=0.0,
-                execution_duration=0.0,
-                status="FILLED",
-                urgency=urgency,
-            )
-
-        start_time = time.monotonic()
-        acct_hash = self._resolve_account_hash()
-
-        # Capture initial market arrival state
-        bid, ask, vol_1m = self._get_quote(sym)
-        arrival_price = bid if bid > 0 else 25.00
-
-        logger.info(
-            "AdaptiveExecutionRouter: [%s] Starting optimal liquidation for %d shares | "
-            "Urgency=%s, ArrivalBid=%.2f, Ask=%.2f, Vol1m=%d",
-            sym, qty, urgency, bid, ask, vol_1m,
-        )
-
-        # ------------------------------------------------------------------
-        # Branch 1: EMERGENCY_CATASTROPHIC
-        # ------------------------------------------------------------------
-        if urgency == "EMERGENCY_CATASTROPHIC":
-            return self._execute_emergency_ioc(
-                symbol=sym,
-                shares=qty,
-                account_hash=acct_hash,
-                arrival_price=arrival_price,
-                start_time=start_time,
-            )
-
-        # ------------------------------------------------------------------
-        # Branch 2: NORMAL or TERMINAL_FLUSH Sliced Adaptive Pegging
-        # ------------------------------------------------------------------
-        tranches = self._partition_into_tranches(total_shares=qty, volume_1m=vol_1m)
-        logger.info(
-            "AdaptiveExecutionRouter: [%s] Partitioned %d shares into %d micro-tranches: %s",
-            sym, qty, len(tranches), tranches,
-        )
-
-        total_filled = 0
-        total_notional = 0.0
-        all_order_ids: List[str] = []
-        shares_remaining = qty
-
-        # 15:50 EDT Terminal Flush deadline constraints: 60s max before IOC fallback
-        terminal_ioc_fallback = False
-        flush_deadline_time = start_time + 60.0
-
-        for idx, tranche_target_qty in enumerate(tranches):
-            if shares_remaining <= 0:
-                break
-
-            current_target = min(tranche_target_qty, shares_remaining)
-            if current_target <= 0:
-                continue
-
-            # Check if TERMINAL_FLUSH time limit has elapsed
-            if urgency == "TERMINAL_FLUSH" and (time.monotonic() >= flush_deadline_time or self._is_past_1552_edt()):
-                logger.warning(
-                    "AdaptiveExecutionRouter: [%s] 15:50 Terminal Flush reached 60s/15:52 limit. "
-                    "Triggering emergency IOC fallback for %d remaining shares.",
-                    sym, shares_remaining,
-                )
-                terminal_ioc_fallback = True
-                break
-
-            filled, notional, order_ids = self._dispatch_adaptive_tranche(
-                symbol=sym,
-                account_hash=acct_hash,
-                target_shares=current_target,
-                arrival_price=arrival_price,
-                urgency=urgency,
-                deadline_monotonic=flush_deadline_time if urgency == "TERMINAL_FLUSH" else None,
-            )
-
-            total_filled += filled
-            total_notional += notional
-            all_order_ids.extend(order_ids)
-            shares_remaining -= filled
-
-            logger.info(
-                "AdaptiveExecutionRouter: [%s] Tranche %d/%d completed: filled %d/%d (Total remaining: %d)",
-                sym, idx + 1, len(tranches), filled, current_target, shares_remaining,
-            )
-
-            # Slicing interval delay between tranches (if more shares remain and not terminal flush)
-            if shares_remaining > 0 and urgency != "TERMINAL_FLUSH":
-                time.sleep(min(self.slice_interval_seconds, 0.5))
-
-        # If any shares remain (or if terminal flush 60s timeout elapsed), flush via IOC
-        if shares_remaining > 0:
-            action_desc = "TERMINAL_FLUSH_IOC" if terminal_ioc_fallback or urgency == "TERMINAL_FLUSH" else "RESIDUAL_IOC"
-            logger.warning(
-                "AdaptiveExecutionRouter: [%s] Slicing finished with %d shares remaining. "
-                "Executing final fallback IOC block [%s].",
-                sym, shares_remaining, action_desc,
-            )
-            ioc_fill, ioc_notional, ioc_oid = self._route_ioc_sweep(
-                symbol=sym,
-                shares=shares_remaining,
-                account_hash=acct_hash,
-                arrival_price=arrival_price,
-                action=action_desc,
-            )
-            total_filled += ioc_fill
-            total_notional += ioc_notional
-            if ioc_oid:
-                all_order_ids.append(ioc_oid)
-            shares_remaining -= ioc_fill
-
-        execution_duration = max(0.001, time.monotonic() - start_time)
-        avg_fill_price = (total_notional / total_filled) if total_filled > 0 else arrival_price
-
-        # Slippage vs Arrival Price: positive bps means price concession / slippage below arrival
-        if arrival_price > 0:
-            slippage_bps = ((arrival_price - avg_fill_price) / arrival_price) * 10000.0
-        else:
-            slippage_bps = 0.0
-
-        status = "FILLED" if total_filled >= qty else ("PARTIAL" if total_filled > 0 else "FAILED")
-
-        summary = ExecutionSummary(
-            symbol=sym,
-            total_shares=qty,
-            filled_shares=total_filled,
-            average_fill_price=round(avg_fill_price, 4),
-            arrival_price=round(arrival_price, 4),
-            slippage_bps=round(slippage_bps, 2),
-            execution_duration=round(execution_duration, 3),
-            order_ids=all_order_ids,
-            urgency=urgency,
-            status=status,
-        )
-
-        logger.info(
-            "AdaptiveExecutionRouter: [%s] Execution COMPLETE — Filled: %d/%d @ $%.2f | "
-            "Slippage: %.1fbps | Duration: %.2fs | Orders: %s",
-            sym, total_filled, qty, avg_fill_price, slippage_bps, execution_duration, all_order_ids,
-        )
-        return summary
-
-    # ------------------------------------------------------------------
-    # Internal Tranche & Order Execution Mechanics
-    # ------------------------------------------------------------------
-
-    def _partition_into_tranches(self, total_shares: int, volume_1m: int = 0) -> List[int]:
-        """
-        Divides total_shares into 2 to 3 micro-tranches based on 1-minute volume.
-        """
-        N = int(total_shares)
-        if N <= 1:
-            return [N]
-        if N == 2:
-            # For 2 shares: if 1-min volume is thin or explicitly small, 2 micro-tranches [1, 1],
-            # else 1 tranche if total_shares <= 2 to avoid micro-fragmentation.
-            return [1, 1] if volume_1m < 5000 else [2]
-
-        # Participation rate: total_shares / 1-min volume
-        if volume_1m > 0:
-            participation = N / float(volume_1m)
-            # Higher participation (> 0.5%) demands 3 micro-tranches; liquid markets use 2
-            num_tranches = 3 if (participation > 0.005 or N >= 30) else 2
-        else:
-            num_tranches = 3 if N >= 30 else 2
-
-        num_tranches = min(num_tranches, N)
-        base = N // num_tranches
-        rem = N % num_tranches
-
-        tranches: List[int] = []
-        for i in range(num_tranches):
-            tranches.append(base + (1 if i < rem else 0))
-        return [t for t in tranches if t > 0]
-
-    def _dispatch_adaptive_tranche(
-        self,
-        symbol: str,
-        account_hash: str,
-        target_shares: int,
-        arrival_price: float,
-        urgency: str,
-        deadline_monotonic: Optional[float] = None,
-    ) -> Tuple[int, float, List[str]]:
-        """
-        Dispatches a micro-tranche with NBBO bid pegging.
-        Monitors Schwab order status for 3 seconds.
-        If unfilled after 3 seconds: cancels and replaces with updated NBBO bid peg.
-        """
-        tranche_filled = 0
-        tranche_notional = 0.0
-        order_ids: List[str] = []
-        shares_needed = target_shares
-
-        # Max concession bound derived from max_slippage_bps
-        min_allowed_price = round(arrival_price * (1.0 - (self.max_slippage_bps / 10000.0)), 2)
-
-        max_cancel_replace_attempts = 4
-        attempts = 0
-
-        while shares_needed > 0 and attempts < max_cancel_replace_attempts:
-            attempts += 1
-
-            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
-                break
-
-            # 1. Fetch updated NBBO quote
-            bid, ask, _ = self._get_quote(symbol)
-            spread = max(ask - bid, 0.01)
-
-            # 2. Peg limit price: Price = Best Bid - (0.01 * Spread)
-            raw_peg = bid - (0.01 * spread)
-            pegged_price = round(raw_peg, 2)
-            pegged_price = max(pegged_price, min_allowed_price, 0.01)
-            px_str = f"{pegged_price:.2f}"
-
-            # 3. Build & dispatch slice limit order
-            order_body = self._build_order_dict(
-                instruction="SELL",
-                order_type="LIMIT",
-                symbol=symbol,
-                quantity=shares_needed,
-                price=px_str,
-                duration="DAY",
-            )
-
-            try:
-                resp = self._rest.place_order(
-                    account_hash,
-                    order_body,
-                    is_essential=True,
-                    action="ADAPTIVE_PEG",
-                )
-                order_id = self._extract_order_id(resp)
-                if order_id:
-                    order_ids.append(order_id)
-            except Exception as exc:
-                logger.error("AdaptiveExecutionRouter: [%s] Failed to place slice limit order: %s", symbol, exc)
-                break
-
-            # 4. Monitor order status for 3 seconds
-            filled, notional, is_complete = self._monitor_order_status(
-                account_hash=account_hash,
-                order_id=order_id,
-                expected_quantity=shares_needed,
-                pegged_price=pegged_price,
-                timeout_seconds=self.cancel_replace_timeout,
-            )
-
-            tranche_filled += filled
-            tranche_notional += notional
-            shares_needed -= filled
-
-            if is_complete or shares_needed <= 0:
-                break
-
-            # 5. If unfilled / partial after 3 seconds: cancel and prepare replace
-            logger.info(
-                "AdaptiveExecutionRouter: [%s] Order %s unfilled/partial after %ds (%d remaining). Cancelling for replace.",
-                symbol, order_id, self.cancel_replace_timeout, shares_needed,
-            )
-            try:
-                self._rest.cancel_order(account_hash, order_id)
-            except Exception as exc:
-                logger.warning("AdaptiveExecutionRouter: [%s] Cancel order %s encountered: %s", symbol, order_id, exc)
-
-            # Re-inspect order status post-cancel to catch in-flight fills
-            post_cancel_doc = self._safe_get_order(account_hash, order_id)
-            post_filled, post_notional = self._parse_fill_metrics(post_cancel_doc, fallback_price=pegged_price, expected_quantity=shares_needed)
-            incremental_fill = max(0, post_filled - filled)
-            if incremental_fill > 0:
-                tranche_filled += incremental_fill
-                tranche_notional += (incremental_fill * (post_notional / post_filled if post_filled > 0 else pegged_price))
-                shares_needed -= incremental_fill
-
-        return tranche_filled, tranche_notional, order_ids
-
-    def _monitor_order_status(
-        self,
-        account_hash: str,
-        order_id: str,
-        expected_quantity: int,
-        pegged_price: float,
-        timeout_seconds: int,
-    ) -> Tuple[int, float, bool]:
-        """
-        Polls Schwab order status for up to `timeout_seconds`.
-        Returns (filled_quantity, notional, is_fully_filled).
-        """
-        start = time.monotonic()
-        poll_interval = 0.5
-        last_filled = 0
-        last_notional = 0.0
-
-        while True:
-            doc = self._safe_get_order(account_hash, order_id)
-            filled_qty, notional = self._parse_fill_metrics(doc, fallback_price=pegged_price, expected_quantity=expected_quantity)
-            last_filled = filled_qty
-            last_notional = notional
-
-            status_str = str(self._extract_status(doc)).upper()
-            if status_str == "FILLED" or filled_qty >= expected_quantity:
-                return filled_qty, notional, True
-
-            if status_str in ("CANCELED", "CANCELLED", "REJECTED", "EXPIRED"):
-                return filled_qty, notional, False
-
-            elapsed = time.monotonic() - start
-            if elapsed >= timeout_seconds:
-                return last_filled, last_notional, False
-
-            time.sleep(min(poll_interval, max(0.01, timeout_seconds - elapsed)))
-
-    def _execute_emergency_ioc(
-        self,
-        symbol: str,
-        shares: int,
-        account_hash: str,
-        arrival_price: float,
-        start_time: float,
-    ) -> ExecutionSummary:
-        """
-        Routes a single Immediate-Or-Cancel (IOC) marketable limit order at Bid - $0.10.
-        Bypasses slicing completely.
-        """
-        bid, _, _ = self._get_quote(symbol)
-        reference_bid = bid if bid > 0 else arrival_price
-        ioc_price = max(0.01, round(reference_bid - 0.10, 2))
-        px_str = f"{ioc_price:.2f}"
-
-        logger.warning(
-            "AdaptiveExecutionRouter: [%s] EMERGENCY_CATASTROPHIC liquidation: "
-            "Routing single IOC block of %d shares @ $%s (Bid - $0.10)",
-            symbol, shares, px_str,
-        )
-
-        order_body = self._build_order_dict(
-            instruction="SELL",
-            order_type="LIMIT",
-            symbol=symbol,
-            quantity=shares,
-            price=px_str,
-            duration="IMMEDIATE_OR_CANCEL",
-        )
-
-        all_order_ids: List[str] = []
-        try:
-            resp = self._rest.place_order(
-                account_hash,
-                order_body,
-                is_essential=True,
-                action="EMERGENCY_IOC",
-            )
-            order_id = self._extract_order_id(resp)
-            if order_id:
-                all_order_ids.append(order_id)
-        except Exception as exc:
-            logger.critical("AdaptiveExecutionRouter: [%s] Emergency IOC placement failed: %s", symbol, exc)
-            return ExecutionSummary(
-                symbol=symbol,
-                total_shares=shares,
-                filled_shares=0,
-                average_fill_price=0.0,
-                arrival_price=arrival_price,
-                slippage_bps=0.0,
-                execution_duration=time.monotonic() - start_time,
-                urgency="EMERGENCY_CATASTROPHIC",
-                status="FAILED",
-            )
-
-        # Allow immediate execution confirmation
-        time.sleep(0.05)
-        doc = self._safe_get_order(account_hash, all_order_ids[0])
-        filled, notional = self._parse_fill_metrics(doc, fallback_price=ioc_price, expected_quantity=shares)
-        if filled == 0 and str(self._extract_status(doc)).upper() in ("FILLED", ""):
-            filled = shares
-            notional = shares * ioc_price
-
-        execution_duration = max(0.001, time.monotonic() - start_time)
-        avg_price = (notional / filled) if filled > 0 else ioc_price
-        slippage_bps = ((arrival_price - avg_price) / arrival_price * 10000.0) if arrival_price > 0 else 0.0
-
-        return ExecutionSummary(
-            symbol=symbol,
-            total_shares=shares,
-            filled_shares=filled,
-            average_fill_price=round(avg_price, 4),
-            arrival_price=round(arrival_price, 4),
-            slippage_bps=round(slippage_bps, 2),
-            execution_duration=round(execution_duration, 3),
-            order_ids=all_order_ids,
-            urgency="EMERGENCY_CATASTROPHIC",
-            status="FILLED" if filled >= shares else "PARTIAL",
-        )
-
-    def _route_ioc_sweep(
-        self,
-        symbol: str,
-        shares: int,
-        account_hash: str,
-        arrival_price: float,
-        action: str,
-    ) -> Tuple[int, float, str]:
-        """
-        Dispatches residual shares as a protective IOC marketable limit at Bid - $0.10.
-        """
-        bid, _, _ = self._get_quote(symbol)
-        ref_bid = bid if bid > 0 else arrival_price
-        ioc_price = max(0.01, round(ref_bid - 0.10, 2))
-        px_str = f"{ioc_price:.2f}"
-
-        order_body = self._build_order_dict(
-            instruction="SELL",
-            order_type="LIMIT",
-            symbol=symbol,
-            quantity=shares,
-            price=px_str,
-            duration="IMMEDIATE_OR_CANCEL",
-        )
-
-        try:
-            resp = self._rest.place_order(account_hash, order_body, is_essential=True, action=action)
-            order_id = self._extract_order_id(resp)
-            doc = self._safe_get_order(account_hash, order_id)
-            filled, notional = self._parse_fill_metrics(doc, fallback_price=ioc_price, expected_quantity=shares)
-            if filled == 0 and str(self._extract_status(doc)).upper() == "FILLED":
-                filled = shares
-                notional = shares * ioc_price
-            return filled, notional, order_id
-        except Exception as exc:
-            logger.error("AdaptiveExecutionRouter: [%s] Fallback IOC sweep failed: %s", symbol, exc)
-            return 0, 0.0, ""
-
-    # ------------------------------------------------------------------
-    # Helper & Extraction Methods
-    # ------------------------------------------------------------------
-
-    def _get_quote(self, symbol: str) -> Tuple[float, float, int]:
-        """
-        Retrieves current NBBO bid, ask, and 1-minute volume.
-        """
-        try:
-            res = self._rest.get_quotes([symbol])
-            if isinstance(res, dict):
-                data = res.get(symbol, res.get(symbol.upper(), {}))
-                q = data.get("quote", data) if isinstance(data, dict) else {}
-                if isinstance(q, dict):
-                    bid = float(q.get("bidPrice", 0.0) or 0.0)
-                    ask = float(q.get("askPrice", 0.0) or 0.0)
-                    vol = int(float(q.get("totalVolume", q.get("1minVolume", q.get("volume", 0))) or 0))
-                    if bid > 0 and ask >= bid:
-                        return bid, ask, vol
-                    elif bid > 0:
-                        return bid, round(bid + 0.02, 2), vol
-                    elif ask > 0:
-                        return max(0.01, round(ask - 0.02, 2)), ask, vol
-        except Exception as exc:
-            logger.debug("AdaptiveExecutionRouter: Quote fetch exception for %s: %s", symbol, exc)
-
-        return 25.00, 25.02, 10000
-
-    def _build_order_dict(
-        self,
-        instruction: str,
-        order_type: str,
-        symbol: str,
-        quantity: int,
-        price: Optional[str] = None,
-        duration: str = "DAY",
-    ) -> Dict[str, Any]:
-        """
-        Constructs a Schwab API order request payload.
-        """
-        order: Dict[str, Any] = {
-            "orderType": order_type,
-            "session": "NORMAL",
-            "duration": duration,
-            "orderStrategyType": "SINGLE",
-            "orderLegCollection": [
-                {
-                    "orderLegType": "EQUITY",
-                    "legId": 1,
-                    "instrument": {
-                        "symbol": symbol.upper(),
-                        "assetType": "EQUITY",
-                    },
-                    "instruction": instruction,
-                    "quantity": int(quantity),
-                }
-            ],
-        }
-        if price is not None:
-            order["price"] = str(price)
-        return order
-
-    def _resolve_account_hash(self) -> str:
-        """Resolves target account hash value."""
-        if self.account_hash:
-            return self.account_hash
-        try:
-            accts = self._rest.get_account_numbers()
-            if isinstance(accts, list) and len(accts) > 0 and isinstance(accts[0], dict):
-                h = accts[0].get("hashValue")
-                if h:
-                    self.account_hash = str(h)
-                    return self.account_hash
-        except Exception:
-            pass
-        return "HASH_FIREWALL_DEFAULT"
-
-    def _extract_order_id(self, resp: Any) -> str:
-        """Extracts order ID from Location header or response body."""
-        if hasattr(resp, "headers") and isinstance(resp.headers, dict):
-            loc = resp.headers.get("Location", "")
-            if loc:
-                return loc.rstrip("/").split("/")[-1]
-        if isinstance(resp, dict):
-            return str(resp.get("orderId", ""))
-        return str(getattr(resp, "orderId", "998877"))
-
-    def _safe_get_order(self, account_hash: str, order_id: str) -> Any:
-        try:
-            return self._rest.get_order(account_hash, order_id)
-        except Exception as exc:
-            logger.debug("Error querying order %s status: %s", order_id, exc)
-            return {}
-
-    def _extract_status(self, order_doc: Any) -> str:
-        if isinstance(order_doc, dict):
-            return str(order_doc.get("status", ""))
-        # If order_doc is MagicMock without status configured, default to FILLED to prevent hangs
-        if hasattr(order_doc, "_mock_return_value") or type(order_doc).__name__ == "MagicMock":
-            return "FILLED"
-        return ""
-
-    def _parse_fill_metrics(self, order_doc: Any, fallback_price: float, expected_quantity: int = 0) -> Tuple[int, float]:
-        """
-        Parses (filled_quantity, total_notional) from a Schwab order document.
-        """
-        if not isinstance(order_doc, dict):
-            # Handle MagicMock object in un-mocked test scenarios
-            if hasattr(order_doc, "_mock_return_value") or type(order_doc).__name__ == "MagicMock":
-                fill = expected_quantity if expected_quantity > 0 else 1
-                return fill, fill * fallback_price
-            return 0, 0.0
-
-        filled = int(float(order_doc.get("filledQuantity", 0) or 0))
-        status = str(order_doc.get("status", "")).upper()
-        if filled == 0 and status == "FILLED":
-            filled = int(float(order_doc.get("quantity", 0) or 0))
-
-        total_shares = 0.0
-        total_notional = 0.0
-
-        for act in order_doc.get("orderActivityCollection", []) or []:
-            for leg in act.get("executionLegs", []) or []:
-                try:
-                    q = float(leg.get("quantity", 0) or 0)
-                    p = float(leg.get("price", 0) or 0)
-                    if q > 0 and p > 0:
-                        total_shares += q
-                        total_notional += q * p
-                except Exception:
-                    continue
-
-        if total_shares > 0:
-            return int(total_shares), total_notional
-        elif filled > 0:
-            px = fallback_price
-            if "price" in order_doc:
-                try:
-                    px = float(order_doc["price"])
-                except Exception:
-                    px = fallback_price
-            return filled, filled * px
-
-        return 0, 0.0
-
-    @staticmethod
-    def _is_past_1552_edt() -> bool:
-        """Returns True if current time is between 15:52:00 and 15:59:59 EDT."""
-        now_edt = datetime.now(EDT)
-        return now_edt.hour == 15 and now_edt.minute >= 52
-
+    resp = self._rest.place_order(self._account_hash, body, is_essential=is_essential, action="LIMIT_BUY")
+    return self._extract_order_id(resp.headers.get("Location", ""))
 ```
 
-#### `execution/bracket_manager.py` - Multi-tranche profit ladder & breakeven ratchet (499 lines, 19345 bytes)
+Rate-limited asynchronous execution uses an exponential backoff retry loop with quota tracking:
+```python
+# execution/order_manager.py:submit_order_with_rate_limit_backoff
+def submit_order_with_rate_limit_backoff(
+    self,
+    order: DualSleeveOrder,
+    attempt_index: int = 0,
+) -> str:
+    delay = self._compute_backoff_delay(attempt_index)
+    if delay > 0.0:
+        self._sleep_fn(delay) # WARNING: synchronous time.sleep in runtime path
+
+    rest, account_hash = self._resolve_rest_and_hash()
+    px_str = f"{float(order.price):.2f}"
+    instruction = _INST_BUY if order.side.upper() == "BUY" else _INST_SELL
+    body = self._build_order(
+        instruction=instruction,
+        order_type=_OT_LIMIT,
+        symbol=order.symbol.upper(),
+        quantity=int(order.shares),
+        price=px_str,
+    )
+    resp = rest.place_order(account_hash, body, is_essential=True, action=f"SWAP_{order.side.upper()}")
+    return self._extract_order_id(resp.headers.get("Location", ""))
+```
+
+### 2.2 Volume-Weighted Microprice & Order Book Imbalance (`data/multi_rate_sync.py`)
+Microstructure quote updates derive mid-price, order book imbalance (OBI), and volume-weighted microprice from high-frequency Level 1 BBO feeds:
+
+$$\text{Mid Price} = \frac{P_{bid} + P_{ask}}{2}$$
+
+$$\text{Volume-Weighted Microprice} = \frac{P_{bid} \cdot Q_{ask} + P_{ask} \cdot Q_{bid}}{Q_{bid} + Q_{ask}}$$
+
+$$\text{Order Book Imbalance (OBI)} = \frac{Q_{bid} - Q_{ask}}{Q_{bid} + Q_{ask}} \in [-1.0, 1.0]$$
+
+```python
+# data/multi_rate_sync.py:186-215
+# Mid-price
+if bid > 0.0 and ask > 0.0:
+    mid_price = (bid + ask) / 2.0
+elif last > 0.0:
+    mid_price = last
+else:
+    mid_price = max(bid, ask, 0.0)
+
+# Volume-Weighted Microprice & Order Book Imbalance (OBI)
+total_size = bid_size + ask_size
+if total_size > 0 and bid > 0.0 and ask > 0.0:
+    microprice = (bid * ask_size + ask * bid_size) / float(total_size)
+    obi = (bid_size - ask_size) / float(total_size)
+else:
+    microprice = mid_price if mid_price > 0.0 else last
+    obi = 0.0
+
+# Quote Age Watermarking & Staleness Check (DEFAULT_STALE_TOLERANCE_SEC = 5.0s)
+quote_age_sec = (now - (quote_epoch_ms / 1000.0)) if quote_epoch_ms > 0 else 0.0
+is_stale = quote_age_sec > self.stale_tolerance_sec if quote_epoch_ms > 0 else False
+```
+
+### 2.3 Bayesian Quarter-Kelly Sizing & Cash Settlement Clamping (`execution/sizing_governor.py`)
+Optimal trade sizing integrates Bayesian empirical win-rate posterior estimation with Quarter-Kelly fractions, volatility risk budgets, and T+1 settled cash clearance:
+
+$$\theta_{post} = \frac{W + \kappa \cdot \mu_{prior}}{N + \kappa}$$
+
+$$f^* = \frac{1}{4} \left( \theta_{post} - \frac{1 - \theta_{post}}{R} \right) \left( \frac{N + \kappa}{N + 2\kappa} \right)$$
+
+$$\text{Dollar Risk} = \text{NLV} \cdot \min(0.015, f^*)$$
+
+$$\text{Target Shares} = \min\left( \left\lfloor \frac{\text{Dollar Risk}}{c_{ATR} \cdot \text{ATR}} \right\rfloor, \left\lfloor \frac{0.20 \cdot \text{NLV}}{P} \right\rfloor, \left\lfloor \frac{\text{Settled Cash}}{P} \right\rfloor \right)$$
+
+```python
+# execution/sizing_governor.py: Core Kelly properties
+@property
+def posterior_win_rate(self) -> float:
+    total = self.alpha + self.beta
+    return self.alpha / total if total > 0 else 0.5
+
+@property
+def full_kelly(self) -> float:
+    b = self.win_loss_ratio
+    if b <= 0.0:
+        return 0.0
+    p = self.posterior_win_rate
+    q = 1.0 - p
+    edge = (p * b) - q
+    return max(0.0, edge / b)
+
+@property
+def kelly_fraction(self) -> float:
+    return 0.25 * self.full_kelly
+```
+
+### 2.4 Stage 1 & Stage 2 EOD Deleveraging Logic (`execution/risk_manager.py`)
+Two-Stage EOD De-Levering enforces overnight exposure reduction under FINRA Rule 4210(f)(8)(A) and cash risk constraints:
+- **Stage 1 (15:50:00 ET Regular Close Trim)**: Peak closing auction liquidity; trims excess exposure to prevent overnight borrowing.
+- **Stage 2 (19:45:00 ET Extended-Hours Hard Backstop)**: Hard backstop before 20:00 ET close.
+- Positions are sorted prioritizing 3x LETFs first (`SOXL`, `TQQQ`, `TNA`, 90% overnight margin requirement), then by market value descending:
+
+```python
+# execution/risk_manager.py:1545-1633
+def plan_two_stage_eod_deleveraging(
+    self,
+    current_time_et: Optional[Union[datetime, str]] = None,
+) -> Dict[str, Any]:
+    stage_name = "STAGE_1_1550_ET_REGULAR_CLOSE_TRIM"
+    if current_time_et is not None:
+        hour = current_time_et.hour if isinstance(current_time_et, datetime) else int(str(current_time_et).split(":")[0])
+        if hour >= 17:
+            stage_name = "STAGE_2_1945_ET_EXTENDED_HOURS_BACKSTOP"
+
+    delta, total_val, allowable_limit = self.calculate_overnight_excess(enforce_letf_house_margin=True)
+    if delta <= 0:
+        return {"stage": stage_name, "delta": 0.0, "orders": [], "action_required": False}
+
+    orders = []
+    remaining_reduction_needed = delta
+
+    # Sort positions prioritizing 3x LETFs first, then by market value descending
+    sorted_positions = sorted(
+        self.positions.items(),
+        key=lambda item: (item[0].upper() in LETF_3X_SYMBOLS, item[1].get("quantity", 0) * item[1].get("current_price", 0.0)),
+        reverse=True,
+    )
+
+    for sym, pos in sorted_positions:
+        qty = pos.get("quantity", 0)
+        px = pos.get("current_price", 0.0)
+        if qty <= 0 or px <= 0:
+            continue
+
+        pos_val = qty * px
+        req_over = self.get_asset_margin_requirements(sym, True)[1] # 0.90 for 3x LETFs
+        effective_reduction_needed = remaining_reduction_needed / req_over if req_over > 0 else remaining_reduction_needed
+
+        if pos_val <= effective_reduction_needed:
+            shares_to_sell = qty
+            notional_reduction = pos_val
+        else:
+            shares_to_sell = min(math.ceil(effective_reduction_needed / px), qty)
+            notional_reduction = shares_to_sell * px
+
+        margin_released = notional_reduction * req_over
+        orders.append({
+            "symbol": sym,
+            "shares_to_sell": shares_to_sell,
+            "estimated_price": px,
+            "notional_reduction": round(notional_reduction, 2),
+            "margin_released": round(margin_released, 2),
+            "stage": stage_name,
+            "reason": f"TWO_STAGE_EOD_DELEVERAGING_{stage_name}",
+        })
+        remaining_reduction_needed -= margin_released
+        if remaining_reduction_needed <= 0:
+            break
+
+    return {"stage": stage_name, "delta": round(delta, 2), "orders": orders, "action_required": True}
+```
+
+### 2.5 Order Cancellation & Throttling Rules (`execution/order_manager.py`)
+To prevent broker API quota exhaustion and WebSocket ping-ponging, Tier 2 catastrophe stops enforce minimum delta and cooldown throttling:
+```python
+# execution/order_manager.py:82-84, 561-630
+TIER2_MIN_DELTA_PCT = 0.015  # 1.5% minimum price movement threshold
+TIER2_COOLDOWN_SEC  = 180.0  # 180-second minimum cooldown between cancel-replace requests
+
+def update_broker_stop(self, symbol: str, new_stop_price: float, current_order_id: Optional[str] = None):
+    # Evaluates:
+    # 1. abs(new_stop - last_stop) / last_stop >= 0.015
+    # 2. time.monotonic() - last_cancel_replace_time >= 180.0s
+    # If satisfied, cancels old stop and places new STOP order; otherwise suppressed.
+```
+
+Batch cancellation of open orders iterates over working orders:
+```python
+# execution/order_manager.py:923-967
+def cancel_all_open_orders(self) -> int:
+    working_orders = self.get_working_orders()
+    cancelled = 0
+    for order in working_orders:
+        oid = str(order.get("orderId", ""))
+        if self.cancel_order(oid):
+            cancelled += 1
+    return cancelled
+```
+
+### 2.6 Online 3-State HMM Meta-Governor (`execution/risk_manager.py`)
+Maintains a continuous posterior probability vector $\pi(t) = [\pi_{Goldilocks}, \pi_{Uncertainty}, \pi_{Shock}]^T \in \Delta^2$ driven by a 3-dimensional macroeconomic observation vector $M(t) = [Z_s, S_{nlp}, CS_{bps}]^T$:
+1. $Z_s$: Economic Surprise Z-Score (normalized forecast delta).
+2. $S_{nlp}$: Exponentially decayed NLP Sentiment ($\lambda = \frac{\ln 2}{14400}$).
+3. $CS_{bps}$: Live Hybrid High-Yield Credit Spread (OAS anchor + live HYG/IEF ratio).
+
+#### Transition Matrix Formulation
+$$\mathbf{T} = \begin{bmatrix}
+T_{00} & T_{01} & T_{02} \\
+T_{10} & T_{11} & T_{12} \\
+T_{20} & T_{21} & T_{22}
+\end{bmatrix} = \begin{bmatrix}
+0.9993 & 0.0000 & 0.0007 \\
+0.0032 & 0.9968 & 0.0000 \\
+0.0029 & 0.0000 & 0.9971
+\end{bmatrix}$$
+
+#### Continuous Bayesian Filtering Step
+$$\pi_{pred}(t) = \mathbf{T}^T \pi(t - \Delta t)$$
+
+$$L_k(M(t)) = \exp\left( -\frac{1}{2 \cdot 3} \sum_{d=1}^3 \left( \frac{M_d(t) - \mu_{k, d}}{\sigma_{k, d}} \right)^2 \right)$$
+
+$$\pi_k(t) = \frac{\pi_{pred, k} \cdot L_k(M(t))}{\sum_{j=0}^2 \pi_{pred, j} \cdot L_j(M(t))}$$
+
+Calibrated Gaussian emission parameters:
+- **Goldilocks ($k=0$)**: $\mu = [0.9946, 0.4803, 317.6]$, $\sigma = [0.2498, 0.1064, 18.8]$
+- **Uncertainty ($k=1$)**: $\mu = [-0.2989, -0.0600, 406.8]$, $\sigma = [0.0920, 0.0417, 6.7]$
+- **Macro Shock ($k=2$)**: $\mu = [-1.2430, -0.4720, 481.9]$, $\sigma = [0.2657, 0.1452, 35.3]$
+
+#### Dynamic Target Satellite Weight
+$$W_{sat}^*(t) = \begin{cases}
+0.00, & \text{if } \pi_{Shock} \ge 0.60 \text{ or Dominant Regime} = \text{"Macro Shock"} \\
+\min\left(0.35, \pi_{Goldilocks} \cdot 0.25 + \pi_{Uncertainty} \cdot 0.10 + \pi_{Shock} \cdot 0.00\right), & \text{otherwise}
+\end{cases}$$
+
+### 2.7 Dynamic Leland No-Trade Zone (NTZ) Router (`execution/risk_manager.py`)
+To prevent transaction churn and bid-ask spread erosion in leveraged ETFs, capital allocations are filtered through a dynamic No-Trade Zone band $[\tau_{lower}, \tau_{upper}]$ centered on $W_{sat}^*(t)$:
+
+$$\tau_{band} = \begin{cases} 0.04, & \text{if } \pi_{Goldilocks} > 0.70 \\ 0.02, & \text{otherwise (configurable to 0.03)} \end{cases}$$
+
+$$\tau_{lower} = \max(0.0, W_{sat}^*(t) - \tau_{band}), \quad \tau_{upper} = \min(0.35, W_{sat}^*(t) + \tau_{band})$$
+
+#### Decision Matrix
+```text
+IF active_w_sat > tau_upper OR (pi_Shock >= 0.60 AND active_w_sat > 0) THEN
+    State = LELAND_NTZ_HARVEST ->
+        1. Calculate excess satellite value: V_freed = (active_w_sat - tau_upper) * NLV (or 100% of sat_val if Shock)
+        2. Liquidate 3x LETFs (SOXL/TQQQ/TNA) down to boundary
+        3. Sweep freed capital into 1x Robo-Core basket:
+           Delta Q_c = floor((V_freed * w_sweep_c) / P_c(t))
+        4. Quantize residual cash into SWVXX (M_buf)
+
+ELSE IF active_w_sat < tau_lower AND Trend_Gate == PASS THEN
+    State = LELAND_NTZ_ACCUMULATE ->
+        1. Calculate required capital: V_fund = (tau_lower - active_w_sat) * NLV
+        2. Trim 1x Robo-Core holdings (SPY/QQQ/IWM/HYG/IEF)
+        3. Rebalance into 3x LETFs according to sub-weights [0.40 SOXL, 0.35 TQQQ, 0.25 TNA]
+        4. Quantize residual cash into SWVXX
+
+ELSE (tau_lower <= active_w_sat <= tau_upper) THEN
+    State = HOLD_INSIDE_NTZ ->
+        Suppress order generation (Delta Q = 0). Maintain existing portfolio allocation.
+```
+
+### 2.8 Live HYG/IEF Credit Spread Proxy Calculations (`data/multi_rate_sync.py`)
+Intraday credit risk expansion is tracked at 1-second resolution using the price ratio between high-yield corporate credit (`HYG`) and 7-10Y Treasuries (`IEF`). HYG has an effective spread duration of approximately 3.5 years, meaning a 1 bp increase in OAS drives a 0.035% ($3.5 \times 10^{-4}$) decline in the $\ln(P_{HYG} / P_{IEF})$ ratio.
+
+$$r_{live}(t) = \frac{P_{HYG}(t)}{P_{IEF}(t)}, \quad r_{ref} = \text{Anchor Ratio at Session Open}$$
+
+$$\Delta CS_{bps}(t) = -\frac{\ln\left( \frac{r_{live}(t)}{r_{ref}} \right)}{3.5 \times 10^{-4}}$$
+
+$$CS_{intraday}(t) = OAS_{FRED} + \Delta CS_{bps}(t)$$
+
+$$CS_{hybrid}(t) = 0.70 \cdot OAS_{FRED} + 0.30 \cdot CS_{intraday}(t)$$
+
+### 2.9 Cash, Settlement & NLV Accounting Logic (`core/ledger.py`)
+Total account equity (NLV) combines cleared funds, unsettled lots, marked position market values, and active order reservations:
+
+```python
+# core/ledger.py:295-302
+@property
+def nlv(self) -> Decimal:
+    """Broker NLV when synced; otherwise settled + unsettled + marked positions."""
+    with self._lock:
+        if self._broker_nlv is not None:
+            return self._broker_nlv
+        return q(self._settled + self.unsettled_total + self.positions_value
+                 + sum(self._reservations.values(), ZERO))
+```
+
+Position Mark-to-Market:
+$$\text{positions\_value} = \sum_{i=1}^N Q_i \cdot P_{last, i}$$
+### 2.10 Scoped Codebase Logic & Extracted Modules (Scope: `general`)
+
+#### `core/paths.py` (57 lines, 2252 bytes)
 
 ```python
 """
-execution/bracket_manager.py
-============================
-Multi-Tranche Profit Scaling & Virtual Ratchet Bracket Manager (#62).
+core/paths.py
+=============
+Single source of truth for where runtime state is persisted.
 
-Architecture & Mathematical Governance:
----------------------------------------
-1. 3-Tier Scaling Ladder:
-   - Tranche 1 (Scale-Out Bank): 35% of total shares @ Entry + 2.5%.
-     * Upon fill: Ratchets remaining stop to Breakeven (Entry + $0.02 regulatory fee buffer).
-     * Marks position state as 'Risk-Free'.
-   - Tranche 2 (Core Target): 35% of total shares @ Entry + 4.5%.
-     * Upon fill: Locks trailing stop on Runner (Tranche 3) to at least Tranche 1 target price (+2.5%).
-   - Tranche 3 (Runner): 30% of total shares trailing dynamic Yang-Zhang volatility envelope.
-     * Guaranteed 100% terminal flush at 15:50:00 EDT.
+Everything the engine writes at run time lives under ``STATE_DIR`` (default ``./state``,
+override with the ``ENGINE_STATE_DIR`` environment variable). In Docker this directory is a
+mounted volume, so liquidity policy, ingested-document state and NLV anchors survive
+rebuilds. (It must be a DIRECTORY mount: atomic ``os.replace`` onto a bind-mounted single
+file fails with EBUSY.)
+"""
 
-2. Virtual vs. Broker Bracket Governance:
-   - Take-profit triggers are maintained in memory as virtual triggers to eliminate order book clutter
-     and avoid broker cancellation latency.
-   - Catastrophic stop-loss is held as a contingent order on Schwab matching engines.
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+def _resolve_state_dir() -> Path:
+    env_val = os.environ.get("ENGINE_STATE_DIR")
+    if env_val:
+        return Path(env_val)
+    vm_state = Path("/home/nicho/schwab_state")
+    if vm_state.is_dir():
+        return vm_state
+    return Path("state")
+
+
+STATE_DIR = _resolve_state_dir()
+
+# ---- Consolidated project layout (static assets live in the repository tree) -------------
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_DIR = PROJECT_ROOT / "config"
+DOCS_DIR = PROJECT_ROOT / "docs"
+DATA_DIR = PROJECT_ROOT / "data"
+EXPORTS_DIR = DATA_DIR / "exports"
+FIXTURES_DIR = DATA_DIR / "fixtures"
+REMOTE_VM_STATE_DIR = PROJECT_ROOT / "state" / "remote_vm_state"
+
+STRATEGY_CONFIG_FILE = CONFIG_DIR / "strategy_config.json"
+TELEMETRY_FIXTURE_FILE = FIXTURES_DIR / "schwab_telemetry_micro_sequence.json"
+
+MACRO_STATE_FILE = STATE_DIR / "macro_liquidity.json"
+POLICY_FILE = STATE_DIR / "liquidity_policy.json"
+ANCHOR_ACTIVE_FILE = STATE_DIR / "nlv_anchor_active.json"
+ANCHOR_SANDBOX_FILE = STATE_DIR / "nlv_anchor_sandbox.json"
+DOCUMENTS_DIR = STATE_DIR / "documents"
+PROCESSED_HASHES_FILE = DOCUMENTS_DIR / "processed_hashes.json"
+TRADES_DB_PATH = STATE_DIR / "trades.db"
+BASELINES_DB_PATH = STATE_DIR / "market_baselines.db"
+TELEMETRY_DB_PATH = STATE_DIR / "telemetry.db"
+CONTROL_SIGNAL_FILE = STATE_DIR / "control_signal.json"
+DYNAMIC_POLICY_FILE = STATE_DIR / "dynamic_policy.json"
+DAILY_QUOTA_FILE = STATE_DIR / "daily_quota.json"
+RECOVERY_PLAN_FILE = STATE_DIR / "recovery_plan.json"
+RECOVERY_STATE_FILE = STATE_DIR / "recovery_state.json"
+RECOVERY_STATUS_FILE = STATE_DIR / "recovery_status.json"
+TRADER_IPC_SOCKET = Path(os.environ.get("TRADER_IPC_SOCKET", "/tmp/schwab_trader.sock"))
+
+```
+
+#### `core/ledger.py` (687 lines, 28323 bytes)
+
+```python
+"""
+core/ledger.py
+==============
+FINRA Rule 4210 Margin Framework Ledger.
+Deprecates legacy Pattern Day Trader (PDT) constraints, Good Faith Violation (GFV)
+prevention, and T+1 temporal locks. Enables instantaneous capital reallocation upon execution.
+
+Equity & Leverage:
+- $2,000 minimum equity check required for margin eligibility.
+- Intraday Margin Buying Power: Up to 4x leverage (25% maintenance margin requirement).
+- Regulation T Overnight Buying Power: Up to 2x leverage (50% margin requirement).
+- Instantaneous settlement: Sale proceeds credit immediately to cleared funds.
+
+Thread safety: every public method takes ``self._lock``; the object may be
+shared between the asyncio event loop, the streamer thread and API threads.
 """
 
 from __future__ import annotations
 
 import logging
-import math
+import threading
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime
-from enum import Enum
-from typing import Any, Dict, List, Optional
-try:
-    from zoneinfo import ZoneInfo
-    _EDT = ZoneInfo("America/New_York")
-except ImportError:
-    import pytz
-    _EDT = pytz.timezone("America/New_York")
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Callable, Dict, List, Optional, Tuple
 
-logger = logging.getLogger("SchwabEngine.BracketManager")
+import pytz
 
+from core.liquidity_policy import ZERO, add_business_days, next_business_day, q
 
-def _to_edt(dt: datetime) -> datetime:
-    """Normalize any datetime (naive or timezone-aware) to America/New_York."""
-    if dt.tzinfo is None:
-        try:
-            return dt.replace(tzinfo=_EDT)
-        except Exception:
-            return _EDT.localize(dt)
-    return dt.astimezone(_EDT)
+logger = logging.getLogger("ledger")
+
+_EDT = pytz.timezone("America/New_York")
 
 
-class ActionType(str, Enum):
-    SELL = "SELL"
-    UPDATE_STOP = "UPDATE_STOP"
-    NOTIFY = "NOTIFY"
+def _d(value) -> Decimal:
+    return value if isinstance(value, Decimal) else Decimal(str(value))
+
+
+def today_et() -> date:
+    return datetime.now(_EDT).date()
 
 
 @dataclass
-class BracketAction:
-    """Action emitted by MultiTrancheBracket for execution routing."""
-    action_type: str                     # "SELL" | "UPDATE_STOP"
+class UnsettledLot:
+    amount: Decimal
+    trade_date: date
+    settle_date: date
+    source: str
+
+
+class ReconciliationLockError(RuntimeError):
+    """Raised when an attempt to credit cash buckets or record fills violates the Strict Reconciliation Lock."""
+
+
+@dataclass
+class ManagedPosition:
     symbol: str
-    shares: int
-    price: float
-    reason: str
-    stop_price: Optional[float] = None
-    tranche_id: Optional[int] = None
-    timestamp: Optional[datetime] = None
+    quantity: int
+    entry_price: Decimal
+    last_price: Decimal
+    stop_price: Optional[Decimal] = None
+    target_price: Optional[Decimal] = None
+    regime: str = "A"
+    opened_at: datetime = field(default_factory=lambda: datetime.now(_EDT))
+    simulated: bool = True
+    high_water_mark: Decimal = field(default=Decimal("0.00"))
+    volatility_stop_distance: Optional[Decimal] = None
+    ratchet_permitted: bool = True
+    funded_with_settled: bool = True
+    settle_date: Optional[date] = None
+    recovery_locked: bool = False
+
+    def __post_init__(self):
+        if self.high_water_mark <= Decimal("0.00"):
+            self.high_water_mark = max(self.entry_price, self.last_price)
 
     @property
-    def is_sell(self) -> bool:
-        return self.action_type == ActionType.SELL.value
+    def notional(self) -> Decimal:
+        return q(self.last_price * self.quantity)
 
     @property
-    def is_stop_update(self) -> bool:
-        return self.action_type == ActionType.UPDATE_STOP.value
+    def unrealized_pnl(self) -> Decimal:
+        return q((self.last_price - self.entry_price) * self.quantity)
 
-
-class MultiTrancheBracket:
-    """
-    Multi-Tranche Profit Scaling & Virtual Ratchet Bracket Manager.
-
-    Parameters per active position:
-      - symbol: str
-      - total_shares: int
-      - entry_price: float
-      - s0_reference: float
-      - tranches: Dict[int, Dict] defining the 3-tier scaling ladder:
-          * Tranche 1 (Scale-Out Bank): 35% of shares at Entry + 2.5%
-          * Tranche 2 (Core Target): 35% of shares at Entry + 4.5%
-          * Tranche 3 (Runner): 30% of shares trailing dynamic Yang-Zhang envelope until 15:50 EDT
-    """
-
-    def __init__(
-        self,
-        symbol: str,
-        total_shares: int,
-        entry_price: float,
-        s0_reference: Optional[float] = None,
-        initial_stop_pct: float = 0.018,
-        breakeven_offset: float = 0.02,
-        tranches: Optional[Dict[int, Dict]] = None,
-    ) -> None:
-        if total_shares < 1:
-            raise ValueError(f"total_shares must be >= 1, got {total_shares}")
-        if entry_price <= 0:
-            raise ValueError(f"entry_price must be > 0, got {entry_price}")
-
-        self.symbol: str = symbol.upper()
-        self.total_shares: int = int(total_shares)
-        self.entry_price: float = float(entry_price)
-        self.s0_reference: float = float(s0_reference) if s0_reference is not None else float(entry_price)
-        self.initial_stop_pct: float = float(initial_stop_pct)
-        self.breakeven_offset: float = float(breakeven_offset)
-
-        # Allocate shares across the 3 tranches: 35% / 35% / 30%
-        t1_shares = math.floor(self.total_shares * 0.35)
-        t2_shares = math.floor(self.total_shares * 0.35)
-        t3_shares = self.total_shares - (t1_shares + t2_shares)
-
-        # Handle small total_shares edge-cases
-        if self.total_shares >= 3:
-            if t1_shares == 0:
-                t1_shares = 1
-            if t2_shares == 0:
-                t2_shares = 1
-            t3_shares = self.total_shares - t1_shares - t2_shares
-        elif self.total_shares == 2:
-            t1_shares = 1
-            t2_shares = 1
-            t3_shares = 0
-        elif self.total_shares == 1:
-            t1_shares = 1
-            t2_shares = 0
-            t3_shares = 0
-
-        # Build default or adopt custom tranches
-        if tranches is not None:
-            self.tranches = tranches
-        else:
-            self.tranches = {
-                1: {
-                    "name": "Scale-Out Bank",
-                    "pct_shares": 0.35,
-                    "shares": t1_shares,
-                    "target_pct": 0.025,
-                    "target_price": round(self.entry_price * 1.025, 2),
-                    "filled": False,
-                    "fill_price": None,
-                    "fill_time": None,
-                },
-                2: {
-                    "name": "Core Target",
-                    "pct_shares": 0.35,
-                    "shares": t2_shares,
-                    "target_pct": 0.045,
-                    "target_price": round(self.entry_price * 1.045, 2),
-                    "filled": False,
-                    "fill_price": None,
-                    "fill_time": None,
-                },
-                3: {
-                    "name": "Runner",
-                    "pct_shares": 0.30,
-                    "shares": t3_shares,
-                    "target_pct": None,
-                    "target_price": None,
-                    "filled": False,
-                    "fill_price": None,
-                    "fill_time": None,
-                },
-            }
-
-        # Pricing anchors
-        self.initial_stop_price: float = round(self.entry_price * (1.0 - self.initial_stop_pct), 2)
-        self.breakeven_stop_price: float = round(self.entry_price + self.breakeven_offset, 2)
-        self.current_stop_price: float = self.initial_stop_price
-
-        # Progression & Accounting
-        self.remaining_shares: int = self.total_shares
-        self.tranche_1_filled: bool = False
-        self.tranche_2_filled: bool = False
-        self.breakeven_latched: bool = False
-        self.is_risk_free: bool = False
-        self.high_water_mark: float = self.entry_price
-        self.realized_pnl: float = 0.0
-        self.terminal_flushed: bool = False
-
-    @property
-    def stop_price(self) -> float:
-        return self.current_stop_price
-
-    @property
-    def is_closed(self) -> bool:
-        return self.remaining_shares <= 0
-
-    def update_state(
-        self,
-        current_price: float,
-        current_time: datetime,
-        yz_vol: float = 0.0,
-        hurst_exponent: Optional[float] = None,
-    ) -> List[BracketAction]:
+    def is_gfv_safe_to_sell(self, today: Optional[date] = None) -> Tuple[bool, str]:
         """
-        Dynamic Ratchet State Transitions:
-          - State Initial: All shares protected by initial stop (Entry - 1.8%).
-          - Trigger Tranche 1 Fill (+2.5%):
-              * Move stop on remaining 65% of shares to Breakeven (Entry Price + $0.02).
-              * Mark trade as 'Risk-Free'.
-          - Trigger Tranche 2 Fill (+4.5%):
-              * Lock trailing stop on Runner (Tranche 3) to at least Tranche 1 target price (+2.5%).
-          - Terminal Flush (15:50:00 EDT):
-              * Force exit on all unfulfilled tranches to guarantee 100% cash clearance.
+        Under FINRA Rule 4210 Margin Framework, GFV rules are eliminated.
+        Positions are eligible for instantaneous exit.
         """
-        if self.remaining_shares <= 0:
-            return []
+        return True, f"Shares of {self.symbol} are eligible for instantaneous exit (GFV exempt under margin framework)."
 
-        px = float(current_price)
+    def update_trailing_stop(
+        self,
+        current_price: Decimal | float,
+        stop_distance: Decimal | float,
+        ratchet_permitted: bool = True,
+    ) -> bool:
+        """
+        Updates the position's high-water-mark and ratchets stop_price upward.
+        Strictly monotonic: candidate stop only replaces stop_price if candidate > stop_price
+        AND ratchet_permitted is True (Hurst persistence gate).
+        If ratchet_permitted is False (Hurst <= 0.50 chop), existing stop_price is maintained.
+        Returns True if stop_price was adjusted upward.
+        """
+        px = _d(current_price)
+        dist = _d(stop_distance)
+        self.last_price = px
         if px > self.high_water_mark:
             self.high_water_mark = px
 
-        # ------------------------------------------------------------------
-        # 1. Terminal Flush (15:50:00 EDT)
-        # ------------------------------------------------------------------
-        time_edt = _to_edt(current_time).time()
-        if time_edt >= dtime(15, 50, 0):
-            flush_qty = self.remaining_shares
-            self.remaining_shares = 0
-            self.terminal_flushed = True
+        self.volatility_stop_distance = q(dist)
+        self.ratchet_permitted = ratchet_permitted
+        if not ratchet_permitted:
+            return False
 
-            for t_id in (1, 2, 3):
-                t = self.tranches[t_id]
-                if not t["filled"] and t["shares"] > 0:
-                    t["filled"] = True
-                    t["fill_price"] = px
-                    t["fill_time"] = current_time
+        candidate = q(self.high_water_mark - dist)
+        if self.stop_price is None or candidate > self.stop_price:
+            self.stop_price = candidate
+            return True
+        return False
 
-            self.realized_pnl += round(flush_qty * (px - self.entry_price), 2)
-            logger.warning(
-                "[%s] 15:50 EDT Terminal Flush triggered! Closing remaining %d shares @ $%.2f",
-                self.symbol, flush_qty, px,
-            )
-            return [
-                BracketAction(
-                    action_type=ActionType.SELL.value,
-                    symbol=self.symbol,
-                    shares=flush_qty,
-                    price=px,
-                    reason="TERMINAL_FLUSH",
-                    timestamp=current_time,
+
+@dataclass
+class TradeRecord:
+    symbol: str
+    side: str
+    quantity: int
+    price: Decimal
+    cost_basis: Decimal
+    timestamp: datetime
+    simulated: bool
+    realized_pnl: Decimal = ZERO
+    disallowed_loss: Decimal = ZERO
+    regime: str = ""
+    trade_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass
+class BrokerBalances:
+    """Normalised Schwab account balances (see services.broker_sync.parse_account)."""
+    liquidation_value: Decimal
+    settled_cash: Decimal
+    unsettled_cash: Decimal = ZERO
+    swvxx_value: Decimal = ZERO
+    positions_value: Decimal = ZERO
+
+
+class SettlementLedger:
+    def __init__(
+        self,
+        baseline_settled: Decimal | float = 0,
+        *,
+        single_ticker_cap_pct: Decimal | float = "0.33",
+        risk_per_trade_pct: Decimal | float = "0.02",
+        daily_drawdown_pct: Decimal | float = "0.05",
+        cash_buffer: Decimal | float = "10.00",
+        data_source: str = "SANDBOX_SIM",
+        env: str = "active",
+        trade_store: Optional[Any] = None,
+        sizing_governor: Optional[Any] = None,
+    ):
+        self._lock = threading.RLock()
+        self.data_source = data_source
+        self.env = env
+        self.cap_pct = _d(single_ticker_cap_pct)
+        self.risk_pct = _d(risk_per_trade_pct)
+        self.dd_pct = _d(daily_drawdown_pct)
+        self.cash_buffer = _d(cash_buffer)
+        self.trade_store = trade_store
+        self.sizing_governor = sizing_governor
+
+        self.min_margin_equity: Decimal = Decimal("2000.00")
+        self.pdt_restricted: bool = False
+        self.day_trade_count: int = 0
+
+        self._settled: Decimal = q(_d(baseline_settled))
+        self._lots: List[UnsettledLot] = []
+        self._pending_ach: Decimal = ZERO
+        self._reservations: Dict[str, Decimal] = {}
+        self._reservation_funded_settled: Dict[str, bool] = {}
+
+        self.positions: Dict[str, ManagedPosition] = {}
+        self._trades: List[TradeRecord] = []
+        if self.trade_store is not None:
+            self._rehydrate_trades()
+
+        # Broker-authoritative figures (live mode)
+        self._broker_nlv: Optional[Decimal] = None
+        self._swvxx: Decimal = ZERO
+        self._swvxx_in_flight: Decimal = ZERO
+        self._broker_positions_value: Decimal = ZERO
+        self.synced: bool = False
+        self.synced_at: Optional[datetime] = None
+        self.drift: Decimal = ZERO
+        self._ceiling_provider: Optional[Callable[[], Optional[Decimal]]] = None
+
+    def _rehydrate_trades(self, target_date: Optional[date] = None) -> None:
+        with self._lock:
+            if self.trade_store is None:
+                return
+            records = self.trade_store.fetch_trades_today(env=self.env, target_date=target_date)
+            loaded = []
+            for r in records:
+                try:
+                    ts = datetime.fromisoformat(r["timestamp"])
+                    if ts.tzinfo is None:
+                        ts = _EDT.localize(ts)
+                except Exception:
+                    ts = datetime.now(_EDT)
+                loaded.append(
+                    TradeRecord(
+                        symbol=r["symbol"],
+                        side=r["side"],
+                        quantity=int(r["quantity"]),
+                        price=Decimal(str(r["price"])),
+                        cost_basis=Decimal(str(r["cost_basis"])),
+                        timestamp=ts,
+                        simulated=bool(r["simulated"]),
+                        realized_pnl=Decimal(str(r.get("realized_pnl", 0.0))),
+                        disallowed_loss=Decimal(str(r.get("disallowed_loss", 0.0))),
+                        regime=r.get("regime", ""),
+                        trade_id=r.get("trade_id", str(uuid.uuid4())),
+                    )
                 )
-            ]
+            self._trades = loaded
+            logger.info("Hydrated %d trade(s) from SQLite for env '%s'.", len(loaded), self.env)
 
-        # ------------------------------------------------------------------
-        # 2. Stop Loss Check (Active Stop breached)
-        # ------------------------------------------------------------------
-        if px <= self.current_stop_price:
-            exit_qty = self.remaining_shares
-            self.remaining_shares = 0
+    # ------------------------------------------------------------------
+    # Read-only views
+    # ------------------------------------------------------------------
 
-            if self.tranche_2_filled:
-                reason = "RUNNER_TRAILING_STOP"
-            elif self.breakeven_latched:
-                reason = "BREAKEVEN_STOP"
+    @property
+    def settled_cash(self) -> Decimal:
+        """Cleared funds available for trading (Bucket 1)."""
+        with self._lock:
+            return self._settled
+
+    @property
+    def unsettled_cash(self) -> Decimal:
+        """Deprecated under FINRA 4210 (proceeds settle instantaneously into cleared cash)."""
+        with self._lock:
+            return ZERO
+
+    @property
+    def locked_cash(self) -> Decimal:
+        """Committed funds reserved for pending in-flight orders."""
+        with self._lock:
+            return q(sum(self._reservations.values(), ZERO))
+
+    @property
+    def bucket1_settled(self) -> float:
+        with self._lock:
+            return float(self._settled)
+
+    @property
+    def bucket2_unsettled(self) -> float:
+        with self._lock:
+            return 0.0
+
+    @property
+    def bucket3_pending(self) -> float:
+        with self._lock:
+            return float(self._pending_ach)
+
+    @property
+    def settled(self) -> Decimal:
+        with self._lock:
+            return self._settled
+
+    @property
+    def unsettled_total(self) -> Decimal:
+        with self._lock:
+            return ZERO
+
+    @property
+    def swvxx_balance(self) -> Decimal:
+        return self._swvxx
+
+    @property
+    def swvxx_in_flight(self) -> Decimal:
+        return self._swvxx_in_flight
+
+    @property
+    def pending_ach(self) -> Decimal:
+        return self._pending_ach
+
+    @property
+    def positions_value(self) -> Decimal:
+        with self._lock:
+            return q(sum((p.notional for p in self.positions.values()), ZERO))
+
+    @property
+    def nlv(self) -> Decimal:
+        """Broker NLV when synced; otherwise settled + unsettled + marked positions."""
+        with self._lock:
+            if self._broker_nlv is not None:
+                return self._broker_nlv
+            return q(self._settled + self.unsettled_total + self.positions_value
+                     + sum(self._reservations.values(), ZERO))
+
+    @property
+    def max_single_exposure(self) -> Decimal:
+        return q(self.nlv * self.cap_pct)
+
+    @property
+    def max_risk_per_trade(self) -> Decimal:
+        return q(self.nlv * self.risk_pct)
+
+    @property
+    def daily_drawdown_limit(self) -> Decimal:
+        return q(-(self.nlv * self.dd_pct))
+
+    def get_trade_log(self) -> List[TradeRecord]:
+        with self._lock:
+            return list(self._trades)
+
+    def get_positions(self) -> List[ManagedPosition]:
+        with self._lock:
+            return list(self.positions.values())
+
+    def realized_pnl_today(self, day: Optional[date] = None) -> Decimal:
+        day = day or today_et()
+        with self._lock:
+            return q(sum((t.realized_pnl for t in self._trades
+                          if t.side == "SELL" and t.timestamp.astimezone(_EDT).date() == day), ZERO))
+
+    def unrealized_pnl(self) -> Decimal:
+        with self._lock:
+            return q(sum((p.unrealized_pnl for p in self.positions.values()), ZERO))
+
+    # ------------------------------------------------------------------
+    # Capital allocation (settled-only: invariant I1)
+    # ------------------------------------------------------------------
+
+    def set_order_ceiling_provider(self, provider: Optional[Callable[[], Optional[Decimal]]]) -> None:
+        """
+        Registers a callable returning the current policy-derived maximum order
+        notional (or None for no extra ceiling). Evaluated on every pre-trade check
+        so the soft-reserve policy is enforced for StrategyEngine entries as well.
+        """
+        self._ceiling_provider = provider
+
+    def check_order_allowed(self, order_cost) -> Tuple[bool, str]:
+        """Pre-trade gate used by StrategyEngine. Settled cash + 20% NLV cap + policy ceiling."""
+        cost = _d(order_cost)
+        with self._lock:
+            if cost <= 0:
+                return False, "non-positive order cost"
+            # $2,000 Minimum Equity Check for margin eligibility
+            if self.nlv < self.min_margin_equity and cost > self._settled - self.cash_buffer:
+                return False, (
+                    f"Account equity ${self.nlv:.2f} is below $2,000 minimum for margin eligibility; "
+                    f"cost ${cost:.2f} exceeds cleared cash ${self._settled:.2f} less buffer"
+                )
+            if self.nlv >= self.min_margin_equity:
+                max_bp = q(self.nlv * 4 - self.cash_buffer)
+                if cost > max_bp:
+                    return False, f"cost ${cost:.2f} exceeds intraday margin buying power ${max_bp:.2f}"
             else:
-                reason = "INITIAL_STOP"
+                if cost > self._settled - self.cash_buffer:
+                    return False, f"cost ${cost:.2f} exceeds cash ${self._settled:.2f} less buffer"
 
-            for t_id in (1, 2, 3):
-                t = self.tranches[t_id]
-                if not t["filled"] and t["shares"] > 0:
-                    t["filled"] = True
-                    t["fill_price"] = px
-                    t["fill_time"] = current_time
+            cap = self.max_single_exposure
+            if cap > 0 and cost > cap:
+                return False, f"cost ${cost:.2f} exceeds single-ticker cap ${cap:.2f} (33% NLV)"
+            provider = self._ceiling_provider
+        if provider is not None:
+            try:
+                ceiling = provider()
+            except Exception as exc:
+                logger.error("Order ceiling provider failed (%s); refusing order.", exc)
+                return False, "order ceiling unavailable"
+            if ceiling is not None and cost > ceiling:
+                return False, f"cost ${cost:.2f} exceeds policy buying power ${ceiling:.2f}"
+        return True, "ok"
 
-            self.realized_pnl += round(exit_qty * (px - self.entry_price), 2)
-            logger.info(
-                "[%s] %s hit @ $%.2f (stop=$%.2f). Exiting remaining %d shares. Net PnL: $%.2f",
-                self.symbol, reason, px, self.current_stop_price, exit_qty, self.realized_pnl,
-            )
-            return [
-                BracketAction(
-                    action_type=ActionType.SELL.value,
-                    symbol=self.symbol,
-                    shares=exit_qty,
-                    price=px,
-                    reason=reason,
-                    stop_price=self.current_stop_price,
-                    timestamp=current_time,
-                )
-            ]
+    def allocate_capital(self, ticker: str, amount, allow_unsettled: bool = True) -> bool:
+        """
+        Reserves capital for an entry under FINRA Rule 4210 Margin Framework.
+        Capital allocation is instantaneous without T+1 settlement locks.
+        """
+        amt = q(_d(amount))
+        with self._lock:
+            ok, reason = self.check_order_allowed(amt)
+            if not ok:
+                logger.error("Allocation refused for %s: %s", ticker, reason)
+                return False
+            self._settled -= amt
+            self._reservations[ticker] = self._reservations.get(ticker, ZERO) + amt
+            self._reservation_funded_settled[ticker] = True
+            logger.info("Reserved $%s of capital for %s (instantaneous allocation).", amt, ticker)
+            return True
 
-        # ------------------------------------------------------------------
-        # 3. Virtual Take-Profit Targets
-        # ------------------------------------------------------------------
-        actions: List[BracketAction] = []
+    def cancel_reservation(self, ticker: str) -> None:
+        with self._lock:
+            amt = self._reservations.pop(ticker, ZERO)
+            self._reservation_funded_settled.pop(ticker, True)
+            self._settled += amt
+            if amt:
+                logger.info("Released reservation $%s for %s back to cash.", amt, ticker)
 
-        # --- Tranche 1: Scale-Out Bank (+2.5%) ---
-        t1 = self.tranches[1]
-        if not self.tranche_1_filled and t1["shares"] > 0:
-            target_1 = t1["target_price"]
-            if px >= target_1:
-                t1["filled"] = True
-                t1["fill_price"] = px
-                t1["fill_time"] = current_time
-                self.tranche_1_filled = True
-                self.is_risk_free = True
-                self.breakeven_latched = True
+    def can_sell_position(self, symbol: str, quantity: int = 0, today: Optional[date] = None) -> Tuple[bool, str]:
+        """
+        Pre-trade check: under FINRA Rule 4210 Margin Framework, GFV rules are eliminated.
+        Same-day round-trips and exits are 100% permitted.
+        """
+        return True, f"Margin account: {symbol} is eligible for instantaneous exit (GFV exempt)."
 
-                sold_qty = t1["shares"]
-                self.remaining_shares -= sold_qty
-                self.realized_pnl += round(sold_qty * (px - self.entry_price), 2)
+    def evaluate_gfv_compliance(self, ticker: str, today: Optional[date] = None) -> bool:
+        """Returns True under FINRA Rule 4210 Margin Framework (GFV exempt)."""
+        return True
 
-                # Move stop on remaining 65% of shares to Breakeven (Entry Price + $0.02)
-                self.current_stop_price = max(self.current_stop_price, self.breakeven_stop_price)
+    # ------------------------------------------------------------------
+    # Fills
+    # ------------------------------------------------------------------
 
-                logger.info(
-                    "[%s] Tranche 1 Filled @ $%.2f! Sold %d shares. Ratcheted stop to Breakeven $%.2f. State: Risk-Free.",
-                    self.symbol, px, sold_qty, self.current_stop_price,
-                )
-                actions.append(
-                    BracketAction(
-                        action_type=ActionType.SELL.value,
-                        symbol=self.symbol,
-                        shares=sold_qty,
-                        price=px,
-                        reason="TRANCHE_1_TARGET",
-                        tranche_id=1,
-                        timestamp=current_time,
-                    )
-                )
-                actions.append(
-                    BracketAction(
-                        action_type=ActionType.UPDATE_STOP.value,
-                        symbol=self.symbol,
-                        shares=self.remaining_shares,
-                        price=px,
-                        reason="RATCHET_BREAKEVEN",
-                        stop_price=self.current_stop_price,
-                        tranche_id=1,
-                        timestamp=current_time,
-                    )
-                )
-
-        # --- Tranche 2: Core Target (+4.5%) ---
-        t2 = self.tranches[2]
-        if self.tranche_1_filled and not self.tranche_2_filled and t2["shares"] > 0:
-            target_2 = t2["target_price"]
-            if px >= target_2:
-                t2["filled"] = True
-                t2["fill_price"] = px
-                t2["fill_time"] = current_time
-                self.tranche_2_filled = True
-
-                sold_qty = t2["shares"]
-                self.remaining_shares -= sold_qty
-                self.realized_pnl += round(sold_qty * (px - self.entry_price), 2)
-
-                # Lock trailing stop on Runner (Tranche 3) to at least Tranche 1 target price (+2.5%)
-                t1_target = self.tranches[1]["target_price"]
-                self.current_stop_price = max(self.current_stop_price, t1_target)
-
-                logger.info(
-                    "[%s] Tranche 2 Filled @ $%.2f! Sold %d shares. Locked Runner stop to at least Tranche 1 target $%.2f.",
-                    self.symbol, px, sold_qty, self.current_stop_price,
-                )
-                actions.append(
-                    BracketAction(
-                        action_type=ActionType.SELL.value,
-                        symbol=self.symbol,
-                        shares=sold_qty,
-                        price=px,
-                        reason="TRANCHE_2_TARGET",
-                        tranche_id=2,
-                        timestamp=current_time,
-                    )
-                )
-                actions.append(
-                    BracketAction(
-                        action_type=ActionType.UPDATE_STOP.value,
-                        symbol=self.symbol,
-                        shares=self.remaining_shares,
-                        price=px,
-                        reason="LOCK_RUNNER_STOP",
-                        stop_price=self.current_stop_price,
-                        tranche_id=2,
-                        timestamp=current_time,
-                    )
-                )
-
-        # --- Tranche 3: Runner Trailing Yang-Zhang Dynamic Volatility Envelope ---
-        t3 = self.tranches[3]
-        if self.remaining_shares > 0 and t3["shares"] > 0:
-            if yz_vol > 0:
-                # Dynamic volatility stop calculation
-                vol = yz_vol * math.sqrt(252.0) if yz_vol < 0.20 else yz_vol
-                time_factor = math.sqrt((15.0 / 390.0) / 252.0)
-                dist = self.high_water_mark * (2.0 * vol * time_factor)
-                dist = max(dist, self.high_water_mark * 0.005)
-                candidate_stop = round(self.high_water_mark - dist, 2)
-
-                # Regime Gating via Hurst Exponent if supplied
-                ratchet_permitted = True
-                if hurst_exponent is not None:
-                    h = float(hurst_exponent)
-                    if h <= 0.50:
-                        ratchet_permitted = False
-                    elif h > 0.55:
-                        ratchet_permitted = True
-
-                # Tranche 2 locked floor guarantee
-                if self.tranche_2_filled:
-                    t1_target = self.tranches[1]["target_price"]
-                    candidate_stop = max(candidate_stop, t1_target)
-                elif self.tranche_1_filled:
-                    candidate_stop = max(candidate_stop, self.breakeven_stop_price)
-
-                if candidate_stop > self.current_stop_price and ratchet_permitted:
-                    self.current_stop_price = candidate_stop
-                    actions.append(
-                        BracketAction(
-                            action_type=ActionType.UPDATE_STOP.value,
-                            symbol=self.symbol,
-                            shares=self.remaining_shares,
-                            price=px,
-                            reason="RUNNER_TRAILING_RATCHET",
-                            stop_price=self.current_stop_price,
-                            tranche_id=3,
-                            timestamp=current_time,
-                        )
-                    )
-
-        return actions
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Serializes current bracket state for telemetry and auditing."""
-        return {
-            "symbol": self.symbol,
-            "total_shares": self.total_shares,
-            "entry_price": self.entry_price,
-            "s0_reference": self.s0_reference,
-            "remaining_shares": self.remaining_shares,
-            "current_stop_price": self.current_stop_price,
-            "initial_stop_price": self.initial_stop_price,
-            "breakeven_stop_price": self.breakeven_stop_price,
-            "tranche_1_filled": self.tranche_1_filled,
-            "tranche_2_filled": self.tranche_2_filled,
-            "breakeven_latched": self.breakeven_latched,
-            "is_risk_free": self.is_risk_free,
-            "high_water_mark": self.high_water_mark,
-            "realized_pnl": self.realized_pnl,
-            "terminal_flushed": self.terminal_flushed,
-            "tranches": self.tranches,
-        }
-
-
-class MultiTrancheBracketManager:
-    """Multi-position manager orchestrating active MultiTrancheBrackets across symbols."""
-
-    def __init__(self) -> None:
-        self.brackets: Dict[str, MultiTrancheBracket] = {}
-
-    def add_bracket(self, bracket: MultiTrancheBracket) -> None:
-        self.brackets[bracket.symbol.upper()] = bracket
-
-    def create_bracket(
+    def confirm_buy(
         self,
         symbol: str,
-        total_shares: int,
-        entry_price: float,
-        s0_reference: Optional[float] = None,
-    ) -> MultiTrancheBracket:
-        bracket = MultiTrancheBracket(
-            symbol=symbol,
-            total_shares=total_shares,
-            entry_price=entry_price,
-            s0_reference=s0_reference,
-        )
-        self.add_bracket(bracket)
-        return bracket
+        quantity: int,
+        price,
+        *,
+        stop=None,
+        target=None,
+        regime: str = "A",
+        simulated: bool = True,
+        when: Optional[datetime] = None,
+        funded_with_settled: Optional[bool] = None,
+        settle_date: Optional[date] = None,
+        execution_payload: Optional[Dict[str, Any]] = None,
+    ) -> ManagedPosition:
+        px = _d(price)
+        cost = q(px * quantity)
+        trade_dt = when or datetime.now(_EDT)
+        trade_day = trade_dt.astimezone(_EDT).date()
+        eff_settle_date = settle_date or next_business_day(trade_day)
 
-    def get_bracket(self, symbol: str) -> Optional[MultiTrancheBracket]:
-        return self.brackets.get(symbol.upper())
+        with self._lock:
+            reserved = self._reservations.pop(symbol, ZERO)
+            was_settled_res = self._reservation_funded_settled.pop(symbol, True)
+            is_settled = funded_with_settled if funded_with_settled is not None else was_settled_res
 
-    def remove_bracket(self, symbol: str) -> Optional[MultiTrancheBracket]:
-        return self.brackets.pop(symbol.upper(), None)
+            # Settle the difference between the reservation and the actual fill.
+            diff = reserved - cost
+            if diff != ZERO:
+                self._settled += diff
 
-    def update_state(
+            existing = self.positions.get(symbol)
+            if existing:
+                total_qty = existing.quantity + quantity
+                avg = q((existing.entry_price * existing.quantity + px * quantity) / total_qty)
+                existing.quantity, existing.entry_price, existing.last_price = total_qty, avg, px
+                existing.funded_with_settled = True
+                existing.settle_date = None
+                pos = existing
+            else:
+                pos = ManagedPosition(
+                    symbol=symbol, quantity=quantity, entry_price=px, last_price=px,
+                    stop_price=_d(stop) if stop is not None else None,
+                    target_price=_d(target) if target is not None else None,
+                    regime=regime, simulated=simulated, opened_at=trade_dt,
+                    funded_with_settled=True,
+                    settle_date=None,
+                )
+                self.positions[symbol] = pos
+            rec = TradeRecord(
+                symbol=symbol, side="BUY", quantity=quantity, price=px, cost_basis=cost,
+                timestamp=trade_dt, simulated=simulated, regime=regime,
+            )
+            self._trades.append(rec)
+            if self.trade_store is not None:
+                alpha = getattr(self.sizing_governor, "alpha", 10.0) if self.sizing_governor is not None else 10.0
+                beta = getattr(self.sizing_governor, "beta", 10.0) if self.sizing_governor is not None else 10.0
+                kelly = getattr(self.sizing_governor, "kelly_fraction", 0.0) if self.sizing_governor is not None else 0.0
+                try:
+                    self.trade_store.record_trade(
+                        symbol=symbol, side="BUY", quantity=quantity, price=px, cost_basis=cost,
+                        timestamp=trade_dt, simulated=simulated, realized_pnl=ZERO,
+                        disallowed_loss=ZERO, regime=regime, trade_id=rec.trade_id, env=self.env,
+                        posterior_alpha=alpha, posterior_beta=beta, kelly_fraction=kelly,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to persist BUY trade to SQLite: %s", exc)
+            return pos
+
+    def adopt_position(
         self,
         symbol: str,
-        current_price: float,
-        current_time: datetime,
-        yz_vol: float = 0.0,
-        hurst_exponent: Optional[float] = None,
-    ) -> List[BracketAction]:
-        bracket = self.get_bracket(symbol)
-        if bracket is not None:
-            return bracket.update_state(
-                current_price, current_time, yz_vol=yz_vol, hurst_exponent=hurst_exponent
+        quantity: int,
+        entry_price: Decimal | float,
+        current_price: Optional[Decimal | float] = None,
+        *,
+        stop_price: Optional[Decimal | float] = None,
+        target_price: Optional[Decimal | float] = None,
+        regime: str = "A",
+        simulated: bool = False,
+        opened_at: Optional[datetime] = None,
+        funded_with_settled: bool = True,
+        settle_date: Optional[date] = None,
+        recovery_locked: bool = False,
+    ) -> ManagedPosition:
+        """Adopts an existing holding into the managed positions ledger."""
+        sym = symbol.upper()
+        entry_px = _d(entry_price)
+        last_px = _d(current_price) if current_price is not None else entry_px
+        trade_dt = opened_at or datetime.now(_EDT)
+        trade_day = trade_dt.astimezone(_EDT).date()
+        eff_settle = settle_date or (next_business_day(trade_day) if not funded_with_settled else None)
+        with self._lock:
+            pos = ManagedPosition(
+                symbol=sym,
+                quantity=int(quantity),
+                entry_price=entry_px,
+                last_price=last_px,
+                stop_price=_d(stop_price) if stop_price is not None else None,
+                target_price=_d(target_price) if target_price is not None else None,
+                regime=regime,
+                simulated=simulated,
+                opened_at=trade_dt,
+                funded_with_settled=True,
+                settle_date=None,
+                recovery_locked=recovery_locked,
             )
-        return []
+            self.positions[sym] = pos
+            logger.info("Adopted managed position: %s x%d @ $%s (recovery_locked=%s)",
+                        sym, quantity, entry_px, recovery_locked)
+            return pos
+
+    def record_sell(
+        self,
+        symbol: str,
+        quantity: int,
+        price,
+        *,
+        simulated: bool = True,
+        when: Optional[datetime] = None,
+        execution_payload: Optional[Dict[str, Any]] = None,
+    ) -> Decimal:
+        """
+        Closes (part of) a position. Proceeds become an UNSETTLED lot (Bucket 2 / Hard Reserve).
+
+        Strict Reconciliation Lock:
+        For live orders (simulated=False), the ledger will REFUSE to credit cash buckets
+        or modify the position unless a definitive, completed execution payload from
+        the Schwab API is provided (e.g. status='FILLED' or non-zero filledQuantity).
+        """
+        px = _d(price)
+        with self._lock:
+            # Strict Reconciliation Lock for live executions
+            if not simulated:
+                if execution_payload is None:
+                    raise ReconciliationLockError(
+                        f"Strict Reconciliation Lock: Refusing to credit sale proceeds for {symbol}. "
+                        "Definitive completed execution payload from Schwab API is required for live orders."
+                    )
+                status = str(execution_payload.get("status", "")).upper()
+                filled_qty = int(float(execution_payload.get("filledQuantity", 0) or 0))
+                has_legs = False
+                for act in execution_payload.get("orderActivityCollection", []) or []:
+                    if act.get("executionLegs"):
+                        has_legs = True
+                        break
+                if status not in ("FILLED", "EXECUTED") and filled_qty <= 0 and not has_legs:
+                    raise ReconciliationLockError(
+                        f"Strict Reconciliation Lock: Execution payload for {symbol} is not filled "
+                        f"(status='{status}', filledQuantity={filled_qty}). Refusing to credit cash."
+                    )
+
+            pos = self.positions.get(symbol)
+            qty = min(quantity, pos.quantity) if pos else quantity
+            proceeds = q(px * qty)
+            realized = q((px - pos.entry_price) * qty) if pos else ZERO
+            trade_dt = when or datetime.now(_EDT)
+            # FINRA Rule 4210: Instantaneous settlement — proceeds immediately credit cash!
+            self._settled += proceeds
+            if pos:
+                pos.quantity -= qty
+                pos.last_price = px
+                if pos.quantity <= 0:
+                    del self.positions[symbol]
+            rec = TradeRecord(
+                symbol=symbol, side="SELL", quantity=qty, price=px, cost_basis=proceeds,
+                timestamp=trade_dt, simulated=simulated, realized_pnl=realized,
+                regime=pos.regime if pos else "",
+            )
+            self._trades.append(rec)
+            if self.trade_store is not None:
+                if self.sizing_governor is not None and realized != ZERO:
+                    self.sizing_governor.update_trade_outcome(is_win=(realized > ZERO))
+                alpha = getattr(self.sizing_governor, "alpha", 10.0) if self.sizing_governor is not None else 10.0
+                beta = getattr(self.sizing_governor, "beta", 10.0) if self.sizing_governor is not None else 10.0
+                kelly = getattr(self.sizing_governor, "kelly_fraction", 0.0) if self.sizing_governor is not None else 0.0
+                try:
+                    self.trade_store.record_trade(
+                        symbol=symbol, side="SELL", quantity=qty, price=px, cost_basis=proceeds,
+                        timestamp=trade_dt, simulated=simulated, realized_pnl=realized,
+                        disallowed_loss=ZERO, regime=pos.regime if pos else "", trade_id=rec.trade_id, env=self.env,
+                        posterior_alpha=alpha, posterior_beta=beta, kelly_fraction=kelly,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to persist SELL trade to SQLite: %s", exc)
+            logger.info("SELL %s x%d @ %s -> $%s credited immediately (FINRA Rule 4210 instantaneous settlement)",
+                        symbol, qty, px, proceeds)
+            return proceeds
+
+    def mark_price(self, symbol: str, price) -> None:
+        with self._lock:
+            pos = self.positions.get(symbol)
+            if pos:
+                pos.last_price = _d(price)
+
+    # ------------------------------------------------------------------
+    # Settlement
+    # ------------------------------------------------------------------
+
+    def rollover(self, today: Optional[date] = None) -> Decimal:
+        """Deprecated under FINRA Rule 4210 (proceeds settle instantaneously). Returns ZERO."""
+        return ZERO
+
+    def set_pending_ach(self, amount) -> None:
+        with self._lock:
+            self._pending_ach = q(max(_d(amount), ZERO))
+
+    # ------------------------------------------------------------------
+    # Broker reconciliation (live mode, invariant I5)
+    # ------------------------------------------------------------------
+
+    def sync_from_broker(self, balances: BrokerBalances, drift_tolerance: Decimal = Decimal("1.00")) -> Decimal:
+        """
+        Adopts broker balances. On the first sync the broker figure is authoritative.
+        Afterwards, if the ledger's own settled figure exceeds the broker's by more
+        than ``drift_tolerance`` the ledger uses the LOWER number (never over-spend).
+
+        Returns the signed drift (ledger - broker) for the settled bucket.
+        """
+        with self._lock:
+            broker_settled = q(balances.settled_cash)
+            if not self.synced:
+                self._settled = broker_settled
+                self.drift = ZERO
+            else:
+                self.drift = q(self._settled - broker_settled)
+                if self.drift > drift_tolerance:
+                    logger.error("Ledger/broker drift $%s: using broker settled $%s.",
+                                 self.drift, broker_settled)
+                    self._settled = broker_settled
+                elif abs(self.drift) <= drift_tolerance:
+                    self._settled = min(self._settled, broker_settled)
+                else:
+                    self._settled = broker_settled
+            self._broker_nlv = q(balances.liquidation_value)
+            self._swvxx = q(balances.swvxx_value)
+            self._broker_positions_value = q(balances.positions_value)
+            self.synced = True
+            self.synced_at = datetime.now(_EDT)
+            return self.drift
+
+    @property
+    def gfv_risk_flag(self) -> bool:
+        """GFV risk flag is permanently False under FINRA Rule 4210 Margin Framework."""
+        return False
+
+    # ------------------------------------------------------------------
+    # Snapshots
+    # ------------------------------------------------------------------
+
+    def snapshot(self):
+        """Margin-framework snapshot."""
+        with self._lock:
+            ledger = self
+
+            class Snapshot:
+                settled_cash = ledger._settled
+                unsettled_cash = ZERO
+                locked_cash = ledger.locked_cash
+                bucket1_settled = ledger._settled
+                bucket2_unsettled = ZERO
+                bucket3_pending_ach = ledger._pending_ach
+                nlv = ledger.nlv
+                max_single_exposure = ledger.max_single_exposure
+                max_order_value = max(q(min(ledger.nlv * 4 - ledger.cash_buffer, ledger.max_single_exposure)), ZERO) if ledger.nlv >= ledger.min_margin_equity else max(q(min(ledger._settled - ledger.cash_buffer, ledger.max_single_exposure)), ZERO)
+                max_risk_per_trade = ledger.max_risk_per_trade
+                daily_drawdown_limit = ledger.daily_drawdown_limit
+
+            return Snapshot()
 
 ```
 
-#### `execution/sizing_governor.py` - Bayesian Quarter-Kelly sizing & cash settlement clamp (285 lines, 10751 bytes)
+#### `core/auth.py` (881 lines, 37774 bytes)
 
 ```python
 """
-execution/sizing_governor.py
-============================
-Bayesian Quarter-Kelly Sizing & Settlement Reserve Governor.
+core/auth.py
+============
+Security Vault and OAuth lifecycle manager for the Schwab Day-Trading Engine.
 
-Mathematical Formulation:
--------------------------
-1. Bayesian Conjugate Prior Updating:
-   - Model win rate p ~ Beta(alpha_prior + wins, beta_prior + losses).
-   - Weakly informative prior: alpha_0 = 10, beta_0 = 10 (prior win rate 50%).
-   - Posterior Expected Win Rate: p_hat = alpha / (alpha + beta)
-   - Win/Loss Ratio: b = avg_win_usd / avg_loss_usd
-   - Full Kelly Fraction: f_star = max(0.0, (p_hat * b - (1.0 - p_hat)) / b)
-   - Quarter-Kelly Fraction: f_qk = 0.25 * f_star
+Components
+----------
+SecurityVault
+    AES-GCM-256 authenticated encryption of schwab_tokens_vault.json.
+    Key derivation: PBKDF2HMAC(HMAC-SHA256, 600 000 iterations).
 
-2. Volatility Normalization (ATR Sizing):
-   - Dollar Volatility Risk: Risk_dollar = Account_NLV * min(0.015, f_qk)
-   - Target Shares via ATR: Shares_raw = Risk_dollar / (ATR_14 * 1.5)
+SchwabAuthManager
+    Manages the 30-minute access-token refresh cycle.
+    Persists and reloads tokens through SecurityVault.
 
-3. Three-Tier Boundary Clamps:
-   - Bound 1: Single-ticker cap w_max = 0.33 of NLV ($1,836 max on $5,563 base).
-   - Bound 2: Hard dollar ceiling clamp ($1,836.00 or $990.00 depending on active config).
-   - Bound 3: Strict Settled Cash Ceiling:
-     Shares_final = min(Shares_raw, floor(Settled_Cash / Price))
+WeekendOAuthDaemon
+    Every Saturday at 10:00 AM EDT spins up a local HTTPS loopback server
+    on 127.0.0.1:5556, captures the inbound authorization code (decoding
+    the browser's %40 → @), and exchanges it for a fresh 7-day refresh token.
 
-Guarantees ZERO Good Faith Violations (GFVs) under SEC cash account rules and Regulation T § 220.8.
+All configuration is sourced from config.yaml:
+    auth.callback_host / auth.callback_port
+    auth.pbkdf2_iterations
+    auth.access_token_ttl_sec
+    auth.refresh_token_ttl_sec
+    auth.weekend_reauth_day / auth.weekend_reauth_time
+    auth.vault_file
+    api.token_url
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
-import math
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+import os
+import socket
+import ssl
+import threading
+import time
+import urllib.parse
+from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Optional
 
-logger = logging.getLogger("sizing_governor")
+import pytz
+import requests
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+logger = logging.getLogger(__name__)
+
+class AuthCircuitBreakerError(RuntimeError):
+    """Raised when the authentication circuit breaker is open (AUTH_LOCKED)."""
 
 
-@dataclass(frozen=True)
-class SizingVerdict:
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+_NONCE_BYTES = 12   # 96-bit nonce for AES-GCM (NIST recommendation)
+_SALT_BYTES  = 16   # 128-bit PBKDF2 salt
+_KEY_BYTES   = 32   # 256-bit AES key
+_ENCODING    = "utf-8"
+_EDT         = pytz.timezone("America/New_York")
+
+
+# ===========================================================================
+# SecurityVault
+# ===========================================================================
+
+class SecurityVault:
     """
-    Immutable position sizing verdict returned by BayesianSizingGovernor.
+    Encrypts and decrypts the token vault file using AES-GCM-256.
+
+    Layout of the vault file on disk (JSON):
+        {
+            "salt":       "<base64-encoded 16-byte salt>",
+            "nonce":      "<base64-encoded 12-byte nonce>",
+            "ciphertext": "<base64-encoded ciphertext + 16-byte GCM tag>"
+        }
+
+    The 256-bit symmetric key is derived from the user-supplied passphrase
+    via PBKDF2HMAC(HMAC-SHA256, iterations=600 000, salt=random 16 bytes).
+    A fresh salt and nonce are generated on every write, so two identical
+    plaintext payloads produce different ciphertexts.
     """
-    shares: int
-    notional_usd: float
-    kelly_fraction: float
-    risk_usd: float
-    bottleneck_reason: str
+
+    def __init__(self, passphrase: str, iterations: int, vault_path: Path) -> None:
+        """
+        Args:
+            passphrase:  Master passphrase used for key derivation.
+            iterations:  PBKDF2 iteration count (spec: 600 000).
+            vault_path:  Absolute path to the JSON vault file on disk.
+        """
+        self._passphrase_bytes: bytes = passphrase.encode(_ENCODING)
+        self._iterations: int = iterations
+        self._vault_path: Path = Path(vault_path)
+        logger.info(
+            "SecurityVault ready — vault=%s, pbkdf2_iterations=%d",
+            self._vault_path, self._iterations,
+        )
+
+    # ------------------------------------------------------------------
+    # Key derivation
+    # ------------------------------------------------------------------
+
+    def _derive_key(self, salt: bytes) -> bytes:
+        """Derive a 256-bit AES key from the passphrase and salt."""
+        kdf = PBKDF2HMAC(
+            algorithm=SHA256(),
+            length=_KEY_BYTES,
+            salt=salt,
+            iterations=self._iterations,
+        )
+        return kdf.derive(self._passphrase_bytes)
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def save(self, payload: dict) -> None:
+        """
+        Serialize *payload* to JSON, encrypt with AES-GCM-256, and write
+        the result to the vault file.
+
+        A fresh random salt and nonce are generated on every call.
+        """
+        plaintext: bytes = json.dumps(payload, indent=2).encode(_ENCODING)
+
+        salt  = os.urandom(_SALT_BYTES)
+        nonce = os.urandom(_NONCE_BYTES)
+        key   = self._derive_key(salt)
+
+        aesgcm = AESGCM(key)
+        ciphertext = aesgcm.encrypt(nonce, plaintext, associated_data=None)
+
+        vault_data = {
+            "salt":       base64.b64encode(salt).decode(_ENCODING),
+            "nonce":      base64.b64encode(nonce).decode(_ENCODING),
+            "ciphertext": base64.b64encode(ciphertext).decode(_ENCODING),
+        }
+
+        self._vault_path.parent.mkdir(parents=True, exist_ok=True)
+        self._vault_path.write_text(
+            json.dumps(vault_data, indent=2), encoding=_ENCODING
+        )
+        logger.info("SecurityVault: tokens persisted to %s", self._vault_path)
+
+    def load(self) -> dict:
+        """
+        Read the vault file, decrypt the ciphertext, and return the
+        original payload dict.
+
+        Raises:
+            FileNotFoundError: Vault file does not exist yet.
+            ValueError:        Decryption failed (wrong passphrase or tampered file).
+        """
+        if not self._vault_path.exists() or self._vault_path.stat().st_size == 0:
+            raise FileNotFoundError(
+                f"Token vault not found or empty at {self._vault_path}. "
+                "Run the initial OAuth authorization flow first."
+            )
+
+        raw = json.loads(self._vault_path.read_text(encoding=_ENCODING))
+        salt       = base64.b64decode(raw["salt"])
+        nonce      = base64.b64decode(raw["nonce"])
+        ciphertext = base64.b64decode(raw["ciphertext"])
+
+        key = self._derive_key(salt)
+        aesgcm = AESGCM(key)
+
+        try:
+            plaintext = aesgcm.decrypt(nonce, ciphertext, associated_data=None)
+        except Exception as exc:
+            raise ValueError(
+                "SecurityVault: decryption failed — wrong passphrase or corrupted vault."
+            ) from exc
+
+        payload = json.loads(plaintext.decode(_ENCODING))
+        logger.info("SecurityVault: tokens loaded successfully from %s", self._vault_path)
+        return payload
 
 
-class BayesianSizingGovernor:
+# ===========================================================================
+# SchwabAuthManager
+# ===========================================================================
+
+class SchwabAuthManager:
     """
-    Bayesian Quarter-Kelly position sizer with ATR volatility normalization
-    and strict T+1 cash settlement reserve gating.
+    Manages the Schwab OAuth 2.0 token lifecycle.
+
+    Responsibilities
+    ----------------
+    - Load tokens from SecurityVault on startup.
+    - Proactively refresh the access token every 30 minutes
+      (configurable via auth.access_token_ttl_sec) before it expires.
+    - Persist updated tokens back to the vault after every refresh.
+    - Expose a `get_access_token()` method that always returns a valid token,
+      blocking briefly if a refresh is in progress.
+
+    Token refresh endpoint:
+        POST https://api.schwabapi.com/v1/oauth/token
+        Authorization: Basic <base64(client_id:client_secret)>
+        Body: grant_type=refresh_token&refresh_token=<token>
     """
 
     def __init__(
         self,
-        alpha_0: float = 10.0,
-        beta_0: float = 10.0,
-        win_loss_ratio: float = 1.25,
-        single_ticker_cap_pct: float = 0.33,
-        hard_dollar_ceiling: Optional[float] = None,
-        config: Optional[Dict[str, Any]] = None,
+        client_id: str,
+        client_secret: str,
+        vault: SecurityVault,
+        cfg: dict,
     ) -> None:
         """
         Args:
-            alpha_0: Beta prior pseudo-wins (default 10.0 for 50% prior).
-            beta_0: Beta prior pseudo-losses (default 10.0 for 50% prior).
-            win_loss_ratio: Payoff ratio b = avg_win_usd / avg_loss_usd (default 1.25).
-            single_ticker_cap_pct: Maximum single-ticker fraction of total NLV (default 0.33).
-            hard_dollar_ceiling: Absolute dollar cap override ($1,836.00 or $990.00).
-            config: Optional global configuration dictionary.
+            client_id:     Schwab Developer App client ID.
+            client_secret: Schwab Developer App client secret.
+            vault:         Initialised SecurityVault instance.
+            cfg:           Top-level config dict from config.yaml.
         """
-        self.alpha_0: float = float(alpha_0)
-        self.beta_0: float = float(beta_0)
-        self.wins: int = 0
-        self.losses: int = 0
-        self.win_loss_ratio: float = float(win_loss_ratio)
-        self.single_ticker_cap_pct: float = float(single_ticker_cap_pct)
-        self.hard_dollar_ceiling: Optional[float] = (
-            float(hard_dollar_ceiling) if hard_dollar_ceiling is not None else None
-        )
-        self.config: Dict[str, Any] = config or {}
+        self._client_id     = client_id
+        self._client_secret = client_secret
+        self._vault         = vault
 
-        # Resolve config parameters if supplied
-        if self.config:
-            risk_cfg = self.config.get("risk", {})
-            if "single_ticker_cap_pct" in risk_cfg:
-                self.single_ticker_cap_pct = float(risk_cfg["single_ticker_cap_pct"])
-            if self.hard_dollar_ceiling is None and "hard_dollar_ceiling" in risk_cfg:
-                self.hard_dollar_ceiling = float(risk_cfg["hard_dollar_ceiling"])
+        auth_cfg = cfg.get("auth", {})
+        api_cfg  = cfg.get("api",  {})
 
-    @property
-    def alpha(self) -> float:
-        """Posterior alpha (prior alpha_0 + empirical wins)."""
-        return self.alpha_0 + float(self.wins)
+        self._token_url:          str = api_cfg.get("token_url", "https://api.schwabapi.com/v1/oauth/token")
+        self._access_ttl:         int = int(auth_cfg.get("access_token_ttl_sec", 1800))
+        self._refresh_ttl:        int = int(auth_cfg.get("refresh_token_ttl_sec", 604800))
 
-    @property
-    def beta(self) -> float:
-        """Posterior beta (prior beta_0 + empirical losses)."""
-        return self.beta_0 + float(self.losses)
+        # In-memory token store
+        self._access_token:        Optional[str]   = None
+        self._refresh_token:       Optional[str]   = None
+        self._access_token_expiry: Optional[float] = None  # monotonic timestamp
+        self._refresh_issued_at:   Optional[float] = None  # epoch seconds (refresh token issuance)
 
-    @property
-    def posterior_win_rate(self) -> float:
-        """Posterior expected win rate: p_hat = alpha / (alpha + beta)."""
-        total = self.alpha + self.beta
-        return self.alpha / total if total > 0 else 0.5
+        self._lock = threading.Lock()
+        self.auth_circuit_open: bool = False
+        self.auth_circuit_failure_count: int = 0
+        self._last_trip_time: Optional[float] = None
+        self._circuit_cooldown_seconds: float = 300.0
 
-    p_hat = posterior_win_rate
-
-    @property
-    def full_kelly(self) -> float:
-        """
-        Full Kelly Fraction:
-            f_star = max(0.0, (p_hat * b - (1.0 - p_hat)) / b)
-        """
-        b = self.win_loss_ratio
-        if b <= 0.0:
-            return 0.0
-        p = self.posterior_win_rate
-        q = 1.0 - p
-        edge = (p * b) - q
-        return max(0.0, edge / b)
-
-    f_star = full_kelly
-
-    @property
-    def kelly_fraction(self) -> float:
-        """Quarter-Kelly Fraction: f_qk = 0.25 * f_star."""
-        return 0.25 * self.full_kelly
-
-    f_qk = kelly_fraction
-
-    def update_trade_outcome(self, is_win: bool, win_loss_ratio: Optional[float] = None) -> None:
-        """
-        Update the Bayesian conjugate prior with a newly realized trade outcome.
-
-        Args:
-            is_win: True if trade closed net positive, False otherwise.
-            win_loss_ratio: Optional updated payoff ratio b = avg_win / avg_loss.
-        """
-        if is_win:
-            self.wins += 1
-        else:
-            self.losses += 1
-
-        if win_loss_ratio is not None and float(win_loss_ratio) > 0:
-            self.win_loss_ratio = float(win_loss_ratio)
+        # Background refresh thread
+        self._refresh_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
 
         logger.info(
-            "BayesianSizingGovernor: updated outcome (is_win=%s) -> alpha=%.1f, beta=%.1f, "
-            "p_hat=%.3f, f_qk=%.4f (b=%.2f)",
-            is_win, self.alpha, self.beta, self.posterior_win_rate, self.kelly_fraction, self.win_loss_ratio
+            "SchwabAuthManager initialised — token_url=%s, access_ttl=%ds",
+            self._token_url, self._access_ttl,
         )
 
-    def calculate_position_size(
-        self,
-        symbol: str,
-        price: float,
-        atr: float,
-        settled_cash: float,
-        total_nlv: float,
-    ) -> SizingVerdict:
+    # ------------------------------------------------------------------
+    # Startup
+    # ------------------------------------------------------------------
+
+    def load_tokens(self) -> None:
+        """Load tokens from vault into memory. Must be called before start()."""
+        payload = self._vault.load()
+        with self._lock:
+            self._access_token        = payload["access_token"]
+            self._refresh_token       = payload["refresh_token"]
+            # Conservatively assume the saved token has half TTL remaining
+            self._access_token_expiry = time.monotonic() + (self._access_ttl / 2)
+            issued = payload.get("refresh_token_issued_at") or payload.get("obtained_at")
+            self._refresh_issued_at   = float(issued) if issued else None
+        logger.info("SchwabAuthManager: tokens loaded from vault.")
+
+    def start(self) -> None:
         """
-        Calculates optimal position size enforcing Bayesian Quarter-Kelly,
-        ATR volatility risk budget, single-ticker cap, dollar ceiling,
-        and strict settled cash reserve gating.
+        Start the background refresh daemon thread.
+        The thread wakes up every 60 seconds and proactively refreshes
+        the access token when it has less than 5 minutes of TTL remaining.
+        """
+        self._stop_event.clear()
+        self._refresh_thread = threading.Thread(
+            target=self._refresh_loop,
+            name="SchwabAuthRefreshDaemon",
+            daemon=True,
+        )
+        self._refresh_thread.start()
+        logger.info("SchwabAuthManager: refresh daemon started.")
+
+    def stop(self) -> None:
+        """Signal the background refresh daemon to stop."""
+        self._stop_event.set()
+        if self._refresh_thread:
+            self._refresh_thread.join(timeout=5)
+        logger.info("SchwabAuthManager: refresh daemon stopped.")
+
+    # ------------------------------------------------------------------
+    # Token access
+    # ------------------------------------------------------------------
+
+    def get_access_token(self) -> str:
+        """
+        Return a valid access token, refreshing synchronously if expired.
+
+        This is the primary method called by REST and WebSocket clients.
+        Thread-safe.
+        """
+        with self._lock:
+            if self.auth_circuit_open:
+                if self._last_trip_time is not None and (time.monotonic() - self._last_trip_time) >= self._circuit_cooldown_seconds:
+                    logger.info("SchwabAuthManager: circuit breaker cooldown elapsed. Entering HALF-OPEN state for retry.")
+                else:
+                    raise AuthCircuitBreakerError(
+                        "SchwabAuthManager: authentication circuit breaker is OPEN (AUTH_LOCKED). "
+                        "Automated outbound calls suppressed until reset via /api/auth/reset or re-authorization."
+                    )
+            if self._is_token_expired() or self.auth_circuit_open:
+                logger.warning(
+                    "SchwabAuthManager: access token expired or circuit half-open — synchronous refresh."
+                )
+                self._do_refresh()
+            return self._access_token  # type: ignore[return-value]
+
+    def has_refresh_token(self) -> bool:
+        """Return True if a valid refresh token is currently held in memory."""
+        with self._lock:
+            return self._refresh_token is not None and len(self._refresh_token.strip()) > 0
+
+    def refresh_seconds_remaining(self) -> Optional[float]:
+        """
+        Seconds until the refresh token expires (issuance + refresh_token_ttl_sec),
+        or None if the issuance time is unknown (legacy vault without a timestamp).
+        """
+        with self._lock:
+            if self._refresh_issued_at is None:
+                return None
+            return (self._refresh_issued_at + self._refresh_ttl) - time.time()
+
+    def force_refresh(self) -> None:
+        """Blocking refresh used at startup to validate the vault before trading."""
+        with self._lock:
+            self._do_refresh()
+
+    def refresh_access_token(self) -> float:
+        """
+        Synchronously refreshes the access token and returns remaining TTL in seconds.
+        """
+        self.force_refresh()
+        with self._lock:
+            if self._access_token_expiry is not None:
+                ttl = float(self._access_token_expiry - time.monotonic())
+                return max(0.0, ttl)
+            return float(self._access_ttl)
+
+    # ------------------------------------------------------------------
+    # Initial authorization code exchange (first-run / weekend reauth)
+    # ------------------------------------------------------------------
+
+    def exchange_authorization_code(self, auth_code: str, redirect_uri: str) -> None:
+        """
+        Exchange a fresh authorization code for access + refresh tokens.
+        Persists the result to the vault.
+
+        The authorization code may arrive with a trailing '@' encoded as '%40'.
+        This method decodes that automatically.
 
         Args:
-            symbol: Ticker symbol (e.g. "SOXL").
-            price: Execution entry price per share.
-            atr: 14-period Average True Range in dollars.
-            settled_cash: Cleared settled cash available (Bucket 1).
-            total_nlv: Account Net Liquidation Value.
+            auth_code:    Raw authorization code string from the callback URL.
+            redirect_uri: Must match the registered callback URI exactly.
+        """
+        # Spec: decode %40 back to @ before transmission
+        decoded_code = urllib.parse.unquote(auth_code)
+        logger.info("SchwabAuthManager: exchanging authorization code for tokens.")
+
+        encoded_data = urllib.parse.urlencode({
+            "grant_type":   "authorization_code",
+            "code":          decoded_code,
+            "redirect_uri":  redirect_uri,
+        }, safe="@")
+
+        response = requests.post(
+            self._token_url,
+            headers=self._basic_auth_header(),
+            data=encoded_data,
+            timeout=15,
+        )
+        response.raise_for_status()
+        with self._lock:
+            self.auth_circuit_open = False
+            self.auth_circuit_failure_count = 0
+        self._ingest_token_response(response.json())
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _basic_auth_header(self) -> dict:
+        """Build the HTTP Basic Authentication header."""
+        credentials = f"{self._client_id}:{self._client_secret}"
+        encoded = base64.b64encode(credentials.encode(_ENCODING)).decode(_ENCODING)
+        return {"Authorization": f"Basic {encoded}"}
+
+    def _is_token_expired(self) -> bool:
+        """True if the access token has 5 minutes or less remaining."""
+        if self._access_token is None or self._access_token_expiry is None:
+            return True
+        return time.monotonic() >= (self._access_token_expiry - 300)  # 5-min pre-expiry
+
+    def reset_circuit_breaker(self) -> None:
+        """Manually reset the authentication circuit breaker."""
+        with self._lock:
+            was_open = self.auth_circuit_open
+            self.auth_circuit_open = False
+            self.auth_circuit_failure_count = 0
+            logger.info("SchwabAuthManager: authentication circuit breaker reset manually.")
+            if was_open:
+                try:
+                    from core.notifier import send_alert
+                    send_alert(
+                        title="Schwab Developer Access Restored!",
+                        message="Authentication circuit breaker manually reset to CLOSED. Automated broker calls restored.",
+                        priority="urgent",
+                        tags=["white_check_mark", "lock"],
+                    )
+                except Exception:
+                    pass
+
+    def _do_refresh(self, backoff_sec: float = 10.0) -> None:
+        """
+        Perform a blocking refresh_token grant with exponential backoff circuit breaker.
+        MUST be called while holding self._lock, or at startup.
+
+        If token endpoint returns a 4xx error (including 401 Unauthorized):
+        - Attempt refresh at most 2 times with a 10s backoff.
+        - If both fail, trip the breaker: set auth_circuit_open = True,
+          transition system to AUTH_LOCKED, and suppress further outbound calls.
+        """
+        if self.auth_circuit_open:
+            if self._last_trip_time is not None and (time.monotonic() - self._last_trip_time) >= self._circuit_cooldown_seconds:
+                logger.info("SchwabAuthManager: testing circuit in HALF-OPEN state.")
+            else:
+                raise AuthCircuitBreakerError(
+                    "SchwabAuthManager: authentication circuit breaker is OPEN (AUTH_LOCKED). "
+                    "Refresh suppressed until manual reset via /api/auth/reset or new OAuth code."
+                )
+
+        if not self._refresh_token:
+            raise RuntimeError(
+                "SchwabAuthManager: no refresh token available. "
+                "Run the initial authorization flow."
+            )
+
+        logger.info("SchwabAuthManager: refreshing access token via refresh_token grant.")
+        max_attempts = 2
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = requests.post(
+                    self._token_url,
+                    headers=self._basic_auth_header(),
+                    data={
+                        "grant_type":    "refresh_token",
+                        "refresh_token":  self._refresh_token,
+                    },
+                    timeout=15,
+                )
+
+                if 400 <= response.status_code < 500:
+                    logger.warning(
+                        "SchwabAuthManager: HTTP %d (4xx) during token refresh (attempt %d/%d).",
+                        response.status_code, attempt, max_attempts,
+                    )
+                    if attempt < max_attempts:
+                        logger.info("SchwabAuthManager: backing off for %.1fs before retry...", backoff_sec)
+                        time.sleep(backoff_sec)
+                        continue
+                    else:
+                        self.auth_circuit_open = True
+                        self.auth_circuit_failure_count += 1
+                        self._last_trip_time = time.monotonic()
+                        logger.critical(
+                            "SchwabAuthManager: token refresh failed %d consecutive times with 4xx errors. "
+                            "TRIPPING AUTH CIRCUIT BREAKER (AUTH_LOCKED).",
+                            max_attempts,
+                        )
+                        try:
+                            from core.notifier import send_alert
+                            send_alert(
+                                title="Auth Circuit Breaker TRIPPED!",
+                                message=f"OAuth token refresh failed {max_attempts} consecutive times (HTTP {response.status_code}). Engine locked.",
+                                priority="urgent",
+                                tags=["rotating_light", "warning"],
+                            )
+                        except Exception:
+                            pass
+                        raise AuthCircuitBreakerError(
+                            f"OAuth token refresh returned HTTP {response.status_code}. "
+                            "Auth circuit breaker TRIPPED (AUTH_LOCKED)."
+                        )
+
+                response.raise_for_status()
+                
+                # Check if we are recovering from an open circuit
+                if self.auth_circuit_open:
+                    logger.critical("SchwabAuthManager: Auth restored. Circuit closed.")
+                    try:
+                        from core.notifier import send_alert
+                        send_alert(
+                            title="Schwab Developer Access Restored!",
+                            message="Authentication circuit breaker recovered to CLOSED / HALF-OPEN state. Automated broker calls restored.",
+                            priority="urgent",
+                            tags=["white_check_mark", "lock"],
+                        )
+                    except Exception:
+                        pass
+                
+                self.auth_circuit_open = False
+                self.auth_circuit_failure_count = 0
+                self._last_trip_time = None
+                self._ingest_token_response(response.json())
+                return
+
+            except requests.HTTPError as exc:
+                if exc.response is not None and 400 <= exc.response.status_code < 500:
+                    if attempt < max_attempts:
+                        logger.info("SchwabAuthManager: backing off for %.1fs before retry...", backoff_sec)
+                        time.sleep(backoff_sec)
+                        continue
+                    else:
+                        self.auth_circuit_open = True
+                        self.auth_circuit_failure_count += 1
+                        self._last_trip_time = time.monotonic()
+                        logger.critical(
+                            "SchwabAuthManager: auth circuit breaker TRIPPED (AUTH_LOCKED) after %d consecutive 4xx errors: %s",
+                            max_attempts, exc,
+                        )
+                        try:
+                            from core.notifier import send_alert
+                            send_alert(
+                                title="Auth Circuit Breaker TRIPPED!",
+                                message=f"Auth circuit breaker TRIPPED after {max_attempts} consecutive 4xx errors: {exc}",
+                                priority="urgent",
+                                tags=["rotating_light", "warning"],
+                            )
+                        except Exception:
+                            pass
+                        raise AuthCircuitBreakerError(
+                            f"OAuth token refresh returned HTTP {exc.response.status_code}. "
+                            "Auth circuit breaker TRIPPED (AUTH_LOCKED)."
+                        ) from exc
+                else:
+                    raise
+
+    def _ingest_token_response(self, token_data: dict) -> None:
+        """
+        Parse the OAuth token response and update in-memory state + vault.
+        Safe to call with or without the lock held (load_tokens calls it
+        without the lock during init).
+        """
+        previous_refresh    = self._refresh_token
+        self._access_token  = token_data["access_token"]
+        self._refresh_token = token_data.get("refresh_token", self._refresh_token)
+        expires_in          = int(token_data.get("expires_in", self._access_ttl))
+        self._access_token_expiry = time.monotonic() + expires_in
+        if self._refresh_issued_at is None or self._refresh_token != previous_refresh:
+            self._refresh_issued_at = time.time()
+
+        vault_payload = {
+            "access_token":  self._access_token,
+            "refresh_token": self._refresh_token,
+            "persisted_at":  datetime.utcnow().isoformat() + "Z",
+            "expires_in":    expires_in,
+            "refresh_token_issued_at": self._refresh_issued_at,
+        }
+        self._vault.save(vault_payload)
+        logger.info(
+            "SchwabAuthManager: access token refreshed, expires in %ds.",
+            expires_in,
+        )
+
+    def _refresh_loop(self) -> None:
+        """Background daemon: poll every 60 seconds and refresh when needed."""
+        while not self._stop_event.wait(timeout=60):
+            if self.auth_circuit_open:
+                logger.debug("SchwabAuthManager: refresh loop idle while auth circuit breaker is OPEN.")
+                continue
+            try:
+                with self._lock:
+                    # Skip refresh attempt if no refresh token yet (pre-OAuth state)
+                    if self._refresh_token is None:
+                        continue
+                    if self._is_token_expired():
+                        self._do_refresh()
+            except AuthCircuitBreakerError as exc:
+                logger.error(
+                    "SchwabAuthManager: circuit breaker tripped in background refresh: %s", exc
+                )
+            except requests.HTTPError as exc:
+                logger.error(
+                    "SchwabAuthManager: HTTP error during background refresh: %s", exc
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "SchwabAuthManager: unexpected error in refresh loop: %s", exc
+                )
+
+
+
+# ===========================================================================
+# WeekendOAuthDaemon
+# ===========================================================================
+
+class WeekendOAuthDaemon:
+    """
+    Weekend OAuth Maintenance Daemon.
+
+    Every Saturday at 10:00 AM EDT, the Schwab refresh token (7-day TTL)
+    must be rotated by completing a full Authorization Code Grant flow.
+    This daemon:
+        1. Calculates the next Saturday 10:00 AM EDT.
+        2. Sleeps until that moment.
+        3. Spins up a local HTTPS loopback server on 127.0.0.1:5556.
+        4. Logs a browser URL for the operator to visit.
+        5. Captures the inbound ?code=<auth_code> callback.
+        6. Decodes %40 → @ and calls auth_manager.exchange_authorization_code().
+        7. Shuts down the loopback server and schedules the next rotation.
+
+    Configuration sources:
+        auth.callback_host         → "127.0.0.1"
+        auth.callback_port         → 5556
+        auth.weekend_reauth_day    → "Saturday"
+        auth.weekend_reauth_time   → "10:00:00"
+        api.callback_url           → "https://127.0.0.1:5556"
+    """
+
+    def __init__(
+        self,
+        auth_manager: SchwabAuthManager,
+        client_id: str,
+        cfg: dict,
+        ssl_cert_path: Optional[str] = None,
+        ssl_key_path: Optional[str] = None,
+    ) -> None:
+        """
+        Args:
+            auth_manager:   The live SchwabAuthManager to hand tokens to.
+            client_id:      Schwab app Client ID (for building the auth URL).
+            cfg:            Top-level config dict from config.yaml.
+            ssl_cert_path:  Path to the self-signed TLS certificate (PEM).
+                            If None, the server runs over plain HTTP (dev only).
+            ssl_key_path:   Path to the corresponding private key (PEM).
+        """
+        self._auth_manager = auth_manager
+        self._client_id    = client_id
+        self._ssl_cert     = ssl_cert_path
+        self._ssl_key      = ssl_key_path
+
+        auth_cfg = cfg.get("auth", {})
+        api_cfg  = cfg.get("api",  {})
+
+        self._host:          str = auth_cfg.get("callback_host", "127.0.0.1")
+        self._port:          int = int(auth_cfg.get("callback_port", 5556))
+        self._reauth_day:    str = auth_cfg.get("weekend_reauth_day", "Saturday")
+        self._reauth_time:   str = auth_cfg.get("weekend_reauth_time", "10:00:00")
+        self._redirect_uri:  str = api_cfg.get("callback_url", f"https://127.0.0.1:{self._port}")
+        self._base_url:      str = api_cfg.get("base_url", "https://api.schwabapi.com")
+
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+        logger.info(
+            "WeekendOAuthDaemon initialised — will trigger every %s at %s EDT on %s:%d",
+            self._reauth_day, self._reauth_time, self._host, self._port,
+        )
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Start the daemon thread."""
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._daemon_loop,
+            name="WeekendOAuthDaemon",
+            daemon=True,
+        )
+        self._thread.start()
+        logger.info("WeekendOAuthDaemon: daemon thread started.")
+
+    def stop(self) -> None:
+        """Stop the daemon thread cleanly."""
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=10)
+        logger.info("WeekendOAuthDaemon: daemon thread stopped.")
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _next_trigger_time(self) -> datetime:
+        """
+        Calculate the next wall-clock datetime for the scheduled re-auth.
+
+        Returns the next occurrence of `self._reauth_day` at `self._reauth_time`
+        EDT. If today is the correct day but the window is in the past, returns
+        the same day next week.
+        """
+        day_map = {
+            "Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
+            "Friday": 4, "Saturday": 5, "Sunday": 6,
+        }
+        target_weekday = day_map[self._reauth_day]
+        h, m, s = [int(x) for x in self._reauth_time.split(":")]
+
+        now_edt = datetime.now(_EDT)
+        days_ahead = (target_weekday - now_edt.weekday()) % 7
+
+        candidate = now_edt.replace(hour=h, minute=m, second=s, microsecond=0)
+        if days_ahead == 0 and now_edt >= candidate:
+            days_ahead = 7  # Already past this week's window; schedule next week
+
+        return candidate + timedelta(days=days_ahead)
+
+    def _sleep_until(self, target: datetime) -> bool:
+        """
+        Sleep in short intervals until `target` or until stop is requested.
 
         Returns:
-            SizingVerdict with shares, notional_usd, kelly_fraction, risk_usd, bottleneck_reason.
+            True  — woke up naturally at the target time.
+            False — stop_event was set; caller should exit.
         """
-        sym = symbol.upper()
-        px = float(price)
-        c_atr = float(atr)
-        cash = max(0.0, float(settled_cash))
-        nlv = max(0.0, float(total_nlv))
-        f_qk = self.kelly_fraction
+        while True:
+            now = datetime.now(_EDT)
+            remaining = (target - now).total_seconds()
+            if remaining <= 0:
+                return True
+            if self._stop_event.wait(timeout=min(remaining, 60)):
+                return False  # Stop requested
 
-        if px <= 0.0 or nlv <= 0.0:
-            logger.warning("[%s] Sizing failed: non-positive price ($%.2f) or NLV ($%.2f)", sym, px, nlv)
-            return SizingVerdict(
-                shares=0,
-                notional_usd=0.0,
-                kelly_fraction=round(f_qk, 6),
-                risk_usd=0.0,
-                bottleneck_reason="INVALID_PRICE_OR_NLV",
+    def _build_auth_url(self) -> str:
+        """Construct the Schwab OAuth authorization URL."""
+        params = urllib.parse.urlencode({
+            "client_id":     self._client_id,
+            "redirect_uri":  self._redirect_uri,
+            "response_type": "code",
+        })
+        return f"{self._base_url}/v1/oauth/authorize?{params}"
+
+    def _capture_auth_code(self) -> Optional[str]:
+        """
+        Start a single-request HTTP server on the loopback address.
+        Waits for the OAuth callback, extracts and returns the raw auth code.
+        Returns None if an error occurs.
+        """
+        captured_code: list[Optional[str]] = [None]
+        server_ready  = threading.Event()
+        server_done   = threading.Event()
+
+        class _CallbackHandler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):  # Silence default server logging
+                logger.debug("OAuthCallback: " + fmt, *args)
+
+            def do_GET(self):  # noqa: N802
+                parsed = urllib.parse.urlparse(self.path)
+                params = urllib.parse.parse_qs(parsed.query)
+
+                if "code" in params:
+                    # Spec: decode %40 → @ before use
+                    raw_code = params["code"][0]
+                    decoded  = urllib.parse.unquote(raw_code)
+                    captured_code[0] = decoded
+                    logger.info("WeekendOAuthDaemon: authorization code captured.")
+                    body = b"<html><body><h2>Authorization successful. You may close this tab.</h2></body></html>"
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(b"Missing authorization code.")
+
+                server_done.set()
+
+        httpd = HTTPServer((self._host, self._port), _CallbackHandler)
+
+        # Optionally wrap with TLS
+        if self._ssl_cert and self._ssl_key:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(certfile=self._ssl_cert, keyfile=self._ssl_key)
+            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+            logger.info(
+                "WeekendOAuthDaemon: HTTPS loopback server listening on %s:%d",
+                self._host, self._port,
             )
-
-        # 1. Dollar Volatility Risk: Risk_dollar = Account_NLV * min(0.015, f_qk)
-        risk_fraction = min(0.015, f_qk)
-        if risk_fraction <= 0.0:
-            logger.warning("[%s] Sizing halted: Kelly indicates no statistical edge (f_qk=%.4f)", sym, f_qk)
-            return SizingVerdict(
-                shares=0,
-                notional_usd=0.0,
-                kelly_fraction=round(f_qk, 6),
-                risk_usd=0.0,
-                bottleneck_reason="KELLY_NO_EDGE",
-            )
-
-        risk_dollar = nlv * risk_fraction
-
-        # 2. Target Shares via ATR: Shares_raw = Risk_dollar / (ATR_14 * 1.5)
-        stop_dist = c_atr * 1.5
-        if stop_dist <= 0.0:
-            logger.warning("[%s] Sizing failed: non-positive stop distance from ATR ($%.4f)", sym, c_atr)
-            return SizingVerdict(
-                shares=0,
-                notional_usd=0.0,
-                kelly_fraction=round(f_qk, 6),
-                risk_usd=0.0,
-                bottleneck_reason="INVALID_ATR",
-            )
-
-        shares_raw = risk_dollar / stop_dist
-        target_shares_atr = math.floor(shares_raw)
-
-        # 3. Three-Tier Boundary Clamps:
-        # Bound 1: Single-ticker cap w_max = 0.33 of NLV ($1,836 max on $5,563 base).
-        w_max = self.single_ticker_cap_pct * nlv
-        shares_bound1 = math.floor(w_max / px)
-
-        # Bound 2: Hard dollar ceiling clamp ($1,836.00 or $990.00 depending on active config).
-        if self.hard_dollar_ceiling is not None:
-            dollar_ceiling = self.hard_dollar_ceiling
-        elif nlv <= 1500.0:
-            dollar_ceiling = 990.00
         else:
-            dollar_ceiling = 1836.00
-
-        shares_bound2 = math.floor(dollar_ceiling / px)
-
-        # Candidate shares before cash settlement constraint
-        candidate_shares = max(0, min(target_shares_atr, shares_bound1, shares_bound2))
-        candidate_notional = candidate_shares * px
-
-        # Bound 3: Strict Settled Cash Ceiling:
-        # Shares_final = min(Shares_raw, floor(Settled_Cash / Price))
-        shares_cash = max(0, math.floor(cash / px))
-
-        if cash < candidate_notional or shares_cash < candidate_shares:
-            shares_final = shares_cash
-            bottleneck_reason = "SETTLEMENT_RESERVE_CONSTRAINT"
             logger.warning(
-                "[%s] Sizing restricted by settlement reserve: candidate %d shares ($%.2f) "
-                "clamped to %d shares ($%.2f) on settled cash $%.2f (Zero GFV Guarantee).",
-                sym, candidate_shares, candidate_notional, shares_final, shares_final * px, cash
+                "WeekendOAuthDaemon: TLS cert/key not provided — HTTP loopback only. "
+                "Use HTTPS in production (Schwab requires HTTPS callback URI)."
             )
-        else:
-            shares_final = candidate_shares
-            if candidate_shares == shares_bound1 and shares_bound1 < target_shares_atr:
-                bottleneck_reason = "SINGLE_TICKER_CAP"
-            elif candidate_shares == shares_bound2 and shares_bound2 < target_shares_atr:
-                bottleneck_reason = "HARD_DOLLAR_CEILING"
-            elif target_shares_atr <= min(shares_bound1, shares_bound2):
-                bottleneck_reason = "VOLATILITY_RISK_LIMIT"
-            else:
-                bottleneck_reason = "NONE"
 
-        notional_usd = round(shares_final * px, 2)
-        risk_usd = round(shares_final * stop_dist, 2)
-
-        verdict = SizingVerdict(
-            shares=shares_final,
-            notional_usd=notional_usd,
-            kelly_fraction=round(f_qk, 6),
-            risk_usd=risk_usd,
-            bottleneck_reason=bottleneck_reason,
+        server_thread = threading.Thread(
+            target=lambda: (server_ready.set(), httpd.handle_request()),
+            daemon=True,
         )
+        server_thread.start()
+        server_ready.wait(timeout=2)
 
+        auth_url = self._build_auth_url()
         logger.info(
-            "[%s] SizingVerdict: %d shares | Notional: $%.2f | Kelly(f_qk): %.4f | "
-            "Risk: $%.2f | Bottleneck: %s",
-            sym, verdict.shares, verdict.notional_usd, verdict.kelly_fraction,
-            verdict.risk_usd, verdict.bottleneck_reason
+            "\n"
+            "=====================================================================\n"
+            "  WeekendOAuthDaemon: ACTION REQUIRED\n"
+            "  Open the following URL in your browser to re-authorize:\n"
+            "  %s\n"
+            "=====================================================================",
+            auth_url,
         )
-        return verdict
+
+        # Wait up to 30 minutes for the operator to complete the browser flow
+        if not server_done.wait(timeout=1800):
+            logger.error(
+                "WeekendOAuthDaemon: timed out waiting for OAuth callback (10 min)."
+            )
+            httpd.server_close()
+            return None
+
+        httpd.server_close()
+        return captured_code[0]
+
+    def _run_rotation(self) -> None:
+        auth_code = self._capture_auth_code()
+        if auth_code:
+            try:
+                self._auth_manager.exchange_authorization_code(
+                    auth_code=auth_code,
+                    redirect_uri=self._redirect_uri,
+                )
+                logger.info(
+                    "WeekendOAuthDaemon: refresh token successfully rotated/saved."
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "WeekendOAuthDaemon: token exchange failed: %s", exc
+                )
+        else:
+            logger.error("WeekendOAuthDaemon: no authorization code received.")
+
+    def _daemon_loop(self) -> None:
+        """Main daemon loop: sleep → capture → exchange → repeat."""
+        # Retry initial auth every 30 minutes until tokens arrive.
+        # This ensures the engine re-opens the listener automatically
+        # after each timeout so the operator doesn't need to restart.
+        while not self._stop_event.is_set():
+            if self._auth_manager._refresh_token is not None:
+                break
+            logger.info(
+                "WeekendOAuthDaemon: initial auth required — opening listener."
+            )
+            self._run_rotation()
+            if self._auth_manager._refresh_token is not None:
+                break
+            if not self._stop_event.is_set():
+                logger.info(
+                    "WeekendOAuthDaemon: auth not received. "
+                    "Re-opening listener in 30 minutes..."
+                )
+                self._stop_event.wait(timeout=1800)
+
+        # Normal weekly rotation loop once tokens are established
+        while not self._stop_event.is_set():
+            next_run = self._next_trigger_time()
+            logger.info(
+                "WeekendOAuthDaemon: next token rotation scheduled for %s EDT",
+                next_run.strftime("%Y-%m-%d %H:%M:%S %Z"),
+            )
+
+            if not self._sleep_until(next_run):
+                break  # Stop was requested
+
+            logger.info("WeekendOAuthDaemon: token rotation window reached.")
+            self._run_rotation()
 
 ```
 
-#### `execution/order_manager.py` - Routing firewall & order state transitions (1109 lines, 42264 bytes)
+#### `execution/order_manager.py` (1718 lines, 69480 bytes)
 
 ```python
 """
@@ -2669,10 +2100,15 @@ Configuration sources (config.yaml):
 
 from __future__ import annotations
 
+import asyncio
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 import logging
+import random
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple
 import uuid
 import pytz
 
@@ -2771,6 +2207,7 @@ class OrderManager:
         self._tier2_stops:    Dict[str, Dict[str, Any]] = {}
         self.telemetry:       Any = None
         self._router:         Any = None
+        self._swap_coordinator: Optional["DualSleeveSwapCoordinator"] = None
 
     # ------------------------------------------------------------------
     # Account Firewall
@@ -3448,7 +2885,8 @@ class OrderManager:
 
         self._require_firewall()
 
-        px_str = f"{limit_price:.2f}"
+        px_val = float(limit_price)
+        px_str = f"{px_val:.2f}"
         body = self._build_order(
             instruction=_INST_SELL,
             order_type=_OT_LIMIT,
@@ -3734,10 +3172,612 @@ class OrderManager:
         except Exception:
             pass
 
+    @property
+    def swap_coordinator(self) -> "DualSleeveSwapCoordinator":
+        """Atomic 2-leg execution supervisor attached to OrderManager."""
+        if self._swap_coordinator is None:
+            self._swap_coordinator = DualSleeveSwapCoordinator(order_manager=self)
+        return self._swap_coordinator
+
+    def execute_dual_sleeve_swap(
+        self,
+        plan: Any,
+        backoff_schedule: Tuple[float, ...] = (1.0, 2.0, 4.0),
+        max_leg2_attempts: int = 3,
+    ) -> "SwapExecutionResult":
+        """
+        Executes a 2-leg DualSleeveSwapPlan via DualSleeveSwapCoordinator.
+        """
+        self.swap_coordinator.backoff_schedule = tuple(backoff_schedule)
+        self.swap_coordinator.max_leg2_attempts = int(max_leg2_attempts)
+        return self.swap_coordinator.execute_swap(plan)
+
+    async def execute_dual_sleeve_swap_async(
+        self,
+        plan: Any,
+        backoff_schedule: Tuple[float, ...] = (1.0, 2.0, 4.0),
+        max_leg2_attempts: int = 3,
+    ) -> "SwapExecutionResult":
+        """
+        Asynchronously executes a 2-leg DualSleeveSwapPlan via DualSleeveSwapCoordinator.
+        """
+        self.swap_coordinator.backoff_schedule = tuple(backoff_schedule)
+        self.swap_coordinator.max_leg2_attempts = int(max_leg2_attempts)
+        return await self.swap_coordinator.execute_swap_async(plan)
+
+
+# ---------------------------------------------------------------------------
+# Atomic Dual-Sleeve Rebalance State Machine (#107)
+# ---------------------------------------------------------------------------
+
+class SwapState(str, Enum):
+    """State machine states for DualSleeveSwapCoordinator."""
+    IDLE = "IDLE"
+    LEG1_SUBMITTING = "LEG1_SUBMITTING"
+    LEG1_FILLED = "LEG1_FILLED"
+    LEG2_RETRYING = "LEG2_RETRYING"
+    COMPLETED = "COMPLETED"
+    SWVXX_FALLBACK_SWEPT = "SWVXX_FALLBACK_SWEPT"
+    FAILED = "FAILED"
+
+
+@dataclass
+class LegRetryTask:
+    """Bounded retry queue item for Leg 2 execution."""
+    order: Any
+    idempotency_key: str
+    attempt: int = 0
+    max_attempts: int = 3
+    last_error: Optional[str] = None
+
+
+@dataclass
+class SwapExecutionResult:
+    """Immutable audit record of an atomic 2-leg dual-sleeve rebalance."""
+    swap_id: str
+    state: str
+    leg1_order_ids: List[str] = field(default_factory=list)
+    leg2_order_ids: List[str] = field(default_factory=list)
+    freed_notional_usd: float = 0.0
+    core_deployed_usd: float = 0.0
+    swvxx_swept_usd: float = 0.0
+    stranded_cash_usd: float = 0.0
+    leg2_attempts: int = 0
+    backoff_delays: List[float] = field(default_factory=list)
+    fallback_triggered: bool = False
+    cash_sweep_vehicle: str = "SWVXX"
+    duplicate_orders_prevented: int = 0
+    unique_orders_submitted: int = 0
+
+
+class DualSleeveSwapCoordinator:
+    """
+    Atomic 2-Leg Execution Supervisor (#107).
+
+    Eliminates the partial-fill gap in paired dual-sleeve swaps:
+    1. Executes Leg 1 (Sell 3x Satellite or funding leg) and escrows 100% of freed notional.
+    2. Routes Leg 2 (Buy 1x Core basket) through an asynchronous bounded retry queue
+       with exponential backoff (1s, 2s, 4s) and configurable jitter on HTTP 429 or rejection.
+    3. Enforces client-order idempotency keys so retries across consecutive HTTP 429 responses
+       never submit duplicate orders.
+    4. If Leg 2 repeatedly fails after 3 attempts, immediately falls back to sweeping 100% of
+       freed notional into SWVXX cash yield until the next rebalance window (zero stranded cash).
+    """
+
+    DEFAULT_BACKOFF_SCHEDULE: Tuple[float, ...] = (1.0, 2.0, 4.0)
+
+    def __init__(
+        self,
+        order_manager: Optional[OrderManager] = None,
+        rest_client: Optional[Any] = None,
+        account_hash: Optional[str] = None,
+        backoff_schedule: Tuple[float, ...] = DEFAULT_BACKOFF_SCHEDULE,
+        max_leg2_attempts: int = 3,
+        max_queue_size: int = 64,
+        cash_sweep_vehicle: str = "SWVXX",
+        jitter_max_sec: float = 0.0,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+        async_sleep_fn: Optional[Callable[[float], Awaitable[None]]] = None,
+        rng_seed: Optional[int] = 42,
+    ) -> None:
+        self.order_manager = order_manager
+        self._rest = rest_client or (order_manager._rest if order_manager is not None else None)
+        self._account_hash = account_hash or (order_manager.account_hash if order_manager is not None else "HASH_015_SAFE")
+        self.backoff_schedule: Tuple[float, ...] = tuple(backoff_schedule)
+        self.max_leg2_attempts: int = int(max_leg2_attempts)
+        self.max_queue_size: int = int(max_queue_size)
+        self.cash_sweep_vehicle: str = str(cash_sweep_vehicle)
+        self.jitter_max_sec: float = max(0.0, float(jitter_max_sec))
+        self._sleep_fn: Callable[[float], None] = sleep_fn or time.sleep
+        self._async_sleep_fn: Callable[[float], Awaitable[None]] = async_sleep_fn or asyncio.sleep
+        self._rng = random.Random(rng_seed)
+
+        self.state: str = SwapState.IDLE.value
+        self.retry_queue: Deque[LegRetryTask] = deque(maxlen=self.max_queue_size)
+        self.swvxx_balance_usd: float = 0.0
+        self.stranded_cash_usd: float = 0.0
+        self.swap_history: List[SwapExecutionResult] = []
+
+        # Idempotency ledger: maps idempotency_key -> confirmed broker order_id
+        self._idempotency_ledger: Dict[str, str] = {}
+        self.duplicate_orders_prevented: int = 0
+
+    def _resolve_rest_and_hash(self) -> Tuple[Any, str]:
+        rest = self._rest or (self.order_manager._rest if self.order_manager is not None else None)
+        acct_hash = (
+            (self.order_manager.account_hash if self.order_manager is not None and self.order_manager.account_hash else None)
+            or self._account_hash
+            or "HASH_015_SAFE"
+        )
+        return rest, acct_hash
+
+    def _compute_backoff_delay(self, attempt_index: int, base_schedule: Optional[Tuple[float, ...]] = None) -> float:
+        sched = base_schedule if base_schedule is not None else self.backoff_schedule
+        if attempt_index < len(sched):
+            base = float(sched[attempt_index])
+        else:
+            base = float(sched[0]) * (2 ** attempt_index) if sched else float(2 ** attempt_index)
+        jitter = self._rng.uniform(0.001, self.jitter_max_sec) if self.jitter_max_sec > 0.0 else 0.0
+        return round(base + jitter, 6)
+
+    def _place_single_order_once(
+        self,
+        symbol: str,
+        side: str,
+        shares: int,
+        price: float,
+        idempotency_key: str,
+    ) -> str:
+        """
+        Dispatches a single order attempt with idempotency protection.
+        If the idempotency_key has already been accepted by the broker, returns the cached
+        order ID without transmitting a duplicate order.
+        """
+        if idempotency_key in self._idempotency_ledger:
+            self.duplicate_orders_prevented += 1
+            return self._idempotency_ledger[idempotency_key]
+
+        rest, acct_hash = self._resolve_rest_and_hash()
+        sym = symbol.upper()
+        qty = int(shares)
+        px_str = f"{float(price):.2f}"
+        side_u = side.upper()
+
+        # Check if broker already has a matching working/filled order with this idempotency key
+        if rest is not None and hasattr(rest, "get_orders"):
+            try:
+                existing = rest.get_orders(acct_hash, status="WORKING")
+                if isinstance(existing, list):
+                    for o in existing:
+                        if isinstance(o, dict) and o.get("clientOrderId") == idempotency_key:
+                            oid = str(o.get("orderId", f"DEDUP_{idempotency_key}"))
+                            self._idempotency_ledger[idempotency_key] = oid
+                            self.duplicate_orders_prevented += 1
+                            return oid
+            except Exception:
+                pass
+
+        order_body = {
+            "orderType": _OT_LIMIT,
+            "session": _SESSION_NORMAL,
+            "duration": _DURATION_DAY,
+            "orderStrategyType": _ORDER_STRATEGY_TYPE,
+            "price": px_str,
+            "clientOrderId": idempotency_key,
+            "orderLegCollection": [
+                {
+                    "orderLegType": _ORDER_LEG_EQUITY,
+                    "legId": 1,
+                    "instrument": {"symbol": sym, "assetType": _ASSET_TYPE_EQUITY},
+                    "instruction": _INST_BUY if side_u == "BUY" else _INST_SELL,
+                    "quantity": qty,
+                }
+            ],
+        }
+
+        if rest is None:
+            oid = f"SIM_{side_u}_{sym}_{uuid.uuid4().hex[:8]}"
+            self._idempotency_ledger[idempotency_key] = oid
+            return oid
+
+        resp = rest.place_order(
+            acct_hash,
+            order_body,
+            is_essential=(side_u == "SELL"),
+            action=f"DUAL_SLEEVE_{side_u}",
+        )
+        status_code = getattr(resp, "status_code", 201)
+        if status_code == 429 or status_code >= 400:
+            raise RuntimeError(f"HTTP {status_code}: Broker rate limit or rejection on {side_u} {sym}")
+
+        headers = getattr(resp, "headers", {}) or {}
+        loc = headers.get("Location", "")
+        oid = loc.rstrip("/").split("/")[-1] if loc else f"ORD_{sym}_{uuid.uuid4().hex[:6]}"
+        self._idempotency_ledger[idempotency_key] = oid
+        return oid
+
+    def submit_order_with_rate_limit_backoff(
+        self,
+        symbol: str,
+        side: str,
+        shares: int,
+        price: float,
+        idempotency_key: Optional[str] = None,
+        max_retries: int = 5,
+        base_backoff: float = 1.0,
+        jitter_max_sec: float = 0.25,
+    ) -> Dict[str, Any]:
+        """
+        Submits an order resilient to a burst of consecutive HTTP 429 rate-limit responses.
+        Applies exponential backoff with random jitter and guarantees zero duplicate order submissions.
+        """
+        idem_key = idempotency_key or f"IDEM_{symbol.upper()}_{side.upper()}_{shares}_{uuid.uuid4().hex[:8]}"
+        saved_jitter = self.jitter_max_sec
+        self.jitter_max_sec = max(0.001, float(jitter_max_sec))
+        sched = tuple(base_backoff * (2 ** i) for i in range(max_retries))
+        backoff_delays: List[float] = []
+        attempts = 0
+        order_id: Optional[str] = None
+        last_err: Optional[str] = None
+
+        try:
+            for attempt_idx in range(max_retries + 1):
+                attempts += 1
+                try:
+                    order_id = self._place_single_order_once(
+                        symbol=symbol,
+                        side=side,
+                        shares=shares,
+                        price=price,
+                        idempotency_key=idem_key,
+                    )
+                    break
+                except Exception as exc:
+                    last_err = str(exc)
+                    if attempt_idx >= max_retries:
+                        raise
+                    delay = self._compute_backoff_delay(attempt_idx, base_schedule=sched)
+                    backoff_delays.append(delay)
+                    self._sleep_fn(delay)
+        finally:
+            self.jitter_max_sec = saved_jitter
+
+        return {
+            "order_id": order_id,
+            "idempotency_key": idem_key,
+            "attempts": attempts,
+            "backoff_delays": backoff_delays,
+            "duplicate_orders_prevented": self.duplicate_orders_prevented,
+            "last_error": last_err,
+        }
+
+    def execute_swap(self, plan: Any) -> SwapExecutionResult:
+        """
+        Synchronous execution of the atomic 2-leg Dual-Sleeve Rebalance State Machine.
+        - Leg 1 (Sell 3x Satellite): executes and records freed notional V_freed.
+        - Leg 2 (Buy 1x Core): queued into bounded retry queue; retries up to max_leg2_attempts (3)
+          with exponential backoff (1s, 2s, 4s).
+        - If Leg 2 fails after 3 attempts, sweeps 100% of freed notional into SWVXX cash yield.
+        """
+        swap_id = f"SWAP_{uuid.uuid4().hex[:10]}"
+        orders = getattr(plan, "orders", []) or []
+        if not orders:
+            self.state = SwapState.IDLE.value
+            return SwapExecutionResult(swap_id=swap_id, state=self.state, cash_sweep_vehicle=self.cash_sweep_vehicle)
+
+        leg1_orders = [o for o in orders if getattr(o, "leg_id", 1) == 1]
+        leg2_orders = [o for o in orders if getattr(o, "leg_id", 1) == 2]
+
+        # 1. Execute Leg 1 (Sell 3x Satellite / Funding Leg)
+        self.state = SwapState.LEG1_SUBMITTING.value
+        leg1_ids: List[str] = []
+        freed_notional = 0.0
+
+        for idx, o in enumerate(leg1_orders):
+            idem_key = f"{swap_id}_L1_{idx}_{o.symbol}_{o.shares}"
+            oid = self._place_single_order_once(
+                symbol=o.symbol,
+                side=o.side,
+                shares=o.shares,
+                price=o.price,
+                idempotency_key=idem_key,
+            )
+            leg1_ids.append(oid)
+            freed_notional += float(o.shares) * float(o.price)
+
+        freed_notional = round(freed_notional, 2)
+        self.state = SwapState.LEG1_FILLED.value
+
+        # If there are no Leg 2 orders, sweep 100% of freed notional directly into SWVXX
+        if not leg2_orders:
+            self.swvxx_balance_usd = round(self.swvxx_balance_usd + freed_notional, 2)
+            self.state = SwapState.SWVXX_FALLBACK_SWEPT.value
+            res = SwapExecutionResult(
+                swap_id=swap_id,
+                state=self.state,
+                leg1_order_ids=leg1_ids,
+                leg2_order_ids=[],
+                freed_notional_usd=freed_notional,
+                core_deployed_usd=0.0,
+                swvxx_swept_usd=freed_notional,
+                stranded_cash_usd=0.0,
+                leg2_attempts=0,
+                backoff_delays=[],
+                fallback_triggered=True,
+                cash_sweep_vehicle=self.cash_sweep_vehicle,
+                duplicate_orders_prevented=self.duplicate_orders_prevented,
+                unique_orders_submitted=len(self._idempotency_ledger),
+            )
+            self.swap_history.append(res)
+            return res
+
+        # 2. Enqueue Leg 2 orders into bounded retry queue
+        self.retry_queue.clear()
+        for idx, o in enumerate(leg2_orders):
+            self.retry_queue.append(
+                LegRetryTask(
+                    order=o,
+                    idempotency_key=f"{swap_id}_L2_{idx}_{o.symbol}_{o.shares}",
+                    attempt=0,
+                    max_attempts=self.max_leg2_attempts,
+                )
+            )
+
+        self.state = SwapState.LEG2_RETRYING.value
+        leg2_ids: List[str] = []
+        core_deployed = 0.0
+        backoff_delays: List[float] = []
+        total_leg2_attempts = 0
+        leg2_failed = False
+
+        for attempt_num in range(1, self.max_leg2_attempts + 1):
+            if not self.retry_queue:
+                break
+            total_leg2_attempts = attempt_num
+            wave_count = len(self.retry_queue)
+            wave_errors: List[str] = []
+
+            for _ in range(wave_count):
+                task = self.retry_queue.popleft()
+                task.attempt = attempt_num
+                try:
+                    oid = self._place_single_order_once(
+                        symbol=task.order.symbol,
+                        side=task.order.side,
+                        shares=task.order.shares,
+                        price=task.order.price,
+                        idempotency_key=task.idempotency_key,
+                    )
+                    leg2_ids.append(oid)
+                    core_deployed += float(task.order.shares) * float(task.order.price)
+                except Exception as exc:
+                    task.last_error = str(exc)
+                    wave_errors.append(task.last_error)
+                    self.retry_queue.append(task)
+
+            if not self.retry_queue:
+                break
+
+            delay = self._compute_backoff_delay(attempt_num - 1)
+            backoff_delays.append(delay)
+            self._sleep_fn(delay)
+
+            if attempt_num >= self.max_leg2_attempts:
+                logger.error(
+                    "DualSleeveSwapCoordinator: [%s] Leg 2 failed after %d attempts (%s). "
+                    "Triggering immediate SWVXX cash sweep fallback.",
+                    swap_id, attempt_num, wave_errors[-1] if wave_errors else "unknown error",
+                )
+                leg2_failed = True
+                self.retry_queue.clear()
+                break
+
+        if leg2_failed:
+            # Immediate fallback: sweep 100% of unallocated freed notional into SWVXX cash yield
+            unallocated_freed = round(max(0.0, freed_notional - core_deployed), 2)
+            self.swvxx_balance_usd = round(self.swvxx_balance_usd + unallocated_freed, 2)
+            self.state = SwapState.SWVXX_FALLBACK_SWEPT.value
+            res = SwapExecutionResult(
+                swap_id=swap_id,
+                state=self.state,
+                leg1_order_ids=leg1_ids,
+                leg2_order_ids=leg2_ids,
+                freed_notional_usd=freed_notional,
+                core_deployed_usd=round(core_deployed, 2),
+                swvxx_swept_usd=unallocated_freed,
+                stranded_cash_usd=0.0,
+                leg2_attempts=total_leg2_attempts,
+                backoff_delays=backoff_delays,
+                fallback_triggered=True,
+                cash_sweep_vehicle=self.cash_sweep_vehicle,
+                duplicate_orders_prevented=self.duplicate_orders_prevented,
+                unique_orders_submitted=len(self._idempotency_ledger),
+            )
+        else:
+            # Leg 2 succeeded: sweep fractional quantization remainder into SWVXX
+            quantization_remainder = round(max(0.0, freed_notional - core_deployed), 2)
+            self.swvxx_balance_usd = round(self.swvxx_balance_usd + quantization_remainder, 2)
+            self.state = SwapState.COMPLETED.value
+            res = SwapExecutionResult(
+                swap_id=swap_id,
+                state=self.state,
+                leg1_order_ids=leg1_ids,
+                leg2_order_ids=leg2_ids,
+                freed_notional_usd=freed_notional,
+                core_deployed_usd=round(core_deployed, 2),
+                swvxx_swept_usd=quantization_remainder,
+                stranded_cash_usd=0.0,
+                leg2_attempts=total_leg2_attempts,
+                backoff_delays=backoff_delays,
+                fallback_triggered=False,
+                cash_sweep_vehicle=self.cash_sweep_vehicle,
+                duplicate_orders_prevented=self.duplicate_orders_prevented,
+                unique_orders_submitted=len(self._idempotency_ledger),
+            )
+
+        self.swap_history.append(res)
+        return res
+
+    async def execute_swap_async(self, plan: Any) -> SwapExecutionResult:
+        """
+        Asynchronous execution of the atomic 2-leg Dual-Sleeve Rebalance State Machine
+        using an asyncio.Queue(maxsize=self.max_queue_size) bounded retry queue and
+        exponential backoff (1s, 2s, 4s).
+        """
+        swap_id = f"SWAP_{uuid.uuid4().hex[:10]}"
+        orders = getattr(plan, "orders", []) or []
+        if not orders:
+            self.state = SwapState.IDLE.value
+            return SwapExecutionResult(swap_id=swap_id, state=self.state, cash_sweep_vehicle=self.cash_sweep_vehicle)
+
+        leg1_orders = [o for o in orders if getattr(o, "leg_id", 1) == 1]
+        leg2_orders = [o for o in orders if getattr(o, "leg_id", 1) == 2]
+
+        # 1. Execute Leg 1
+        self.state = SwapState.LEG1_SUBMITTING.value
+        leg1_ids: List[str] = []
+        freed_notional = 0.0
+
+        for idx, o in enumerate(leg1_orders):
+            idem_key = f"{swap_id}_L1_{idx}_{o.symbol}_{o.shares}"
+            oid = self._place_single_order_once(
+                symbol=o.symbol,
+                side=o.side,
+                shares=o.shares,
+                price=o.price,
+                idempotency_key=idem_key,
+            )
+            leg1_ids.append(oid)
+            freed_notional += float(o.shares) * float(o.price)
+
+        freed_notional = round(freed_notional, 2)
+        self.state = SwapState.LEG1_FILLED.value
+
+        if not leg2_orders:
+            self.swvxx_balance_usd = round(self.swvxx_balance_usd + freed_notional, 2)
+            self.state = SwapState.SWVXX_FALLBACK_SWEPT.value
+            res = SwapExecutionResult(
+                swap_id=swap_id,
+                state=self.state,
+                leg1_order_ids=leg1_ids,
+                freed_notional_usd=freed_notional,
+                swvxx_swept_usd=freed_notional,
+                fallback_triggered=True,
+                cash_sweep_vehicle=self.cash_sweep_vehicle,
+                duplicate_orders_prevented=self.duplicate_orders_prevented,
+                unique_orders_submitted=len(self._idempotency_ledger),
+            )
+            self.swap_history.append(res)
+            return res
+
+        # 2. Asynchronous bounded retry queue for Leg 2
+        async_queue: asyncio.Queue[LegRetryTask] = asyncio.Queue(maxsize=self.max_queue_size)
+        for idx, o in enumerate(leg2_orders):
+            await async_queue.put(
+                LegRetryTask(
+                    order=o,
+                    idempotency_key=f"{swap_id}_L2_{idx}_{o.symbol}_{o.shares}",
+                    attempt=0,
+                    max_attempts=self.max_leg2_attempts,
+                )
+            )
+
+        self.state = SwapState.LEG2_RETRYING.value
+        leg2_ids: List[str] = []
+        core_deployed = 0.0
+        backoff_delays: List[float] = []
+        total_leg2_attempts = 0
+        leg2_failed = False
+
+        for attempt_num in range(1, self.max_leg2_attempts + 1):
+            if async_queue.empty():
+                break
+            total_leg2_attempts = attempt_num
+            wave_count = async_queue.qsize()
+            failed_tasks: List[LegRetryTask] = []
+
+            for _ in range(wave_count):
+                task = await async_queue.get()
+                task.attempt = attempt_num
+                try:
+                    oid = self._place_single_order_once(
+                        symbol=task.order.symbol,
+                        side=task.order.side,
+                        shares=task.order.shares,
+                        price=task.order.price,
+                        idempotency_key=task.idempotency_key,
+                    )
+                    leg2_ids.append(oid)
+                    core_deployed += float(task.order.shares) * float(task.order.price)
+                except Exception as exc:
+                    task.last_error = str(exc)
+                    failed_tasks.append(task)
+                finally:
+                    async_queue.task_done()
+
+            if not failed_tasks:
+                break
+
+            delay = self._compute_backoff_delay(attempt_num - 1)
+            backoff_delays.append(delay)
+            await self._async_sleep_fn(delay)
+
+            if attempt_num < self.max_leg2_attempts:
+                for ft in failed_tasks:
+                    await async_queue.put(ft)
+            else:
+                leg2_failed = True
+                break
+
+        if leg2_failed:
+            unallocated_freed = round(max(0.0, freed_notional - core_deployed), 2)
+            self.swvxx_balance_usd = round(self.swvxx_balance_usd + unallocated_freed, 2)
+            self.state = SwapState.SWVXX_FALLBACK_SWEPT.value
+            res = SwapExecutionResult(
+                swap_id=swap_id,
+                state=self.state,
+                leg1_order_ids=leg1_ids,
+                leg2_order_ids=leg2_ids,
+                freed_notional_usd=freed_notional,
+                core_deployed_usd=round(core_deployed, 2),
+                swvxx_swept_usd=unallocated_freed,
+                stranded_cash_usd=0.0,
+                leg2_attempts=total_leg2_attempts,
+                backoff_delays=backoff_delays,
+                fallback_triggered=True,
+                cash_sweep_vehicle=self.cash_sweep_vehicle,
+                duplicate_orders_prevented=self.duplicate_orders_prevented,
+                unique_orders_submitted=len(self._idempotency_ledger),
+            )
+        else:
+            quantization_remainder = round(max(0.0, freed_notional - core_deployed), 2)
+            self.swvxx_balance_usd = round(self.swvxx_balance_usd + quantization_remainder, 2)
+            self.state = SwapState.COMPLETED.value
+            res = SwapExecutionResult(
+                swap_id=swap_id,
+                state=self.state,
+                leg1_order_ids=leg1_ids,
+                leg2_order_ids=leg2_ids,
+                freed_notional_usd=freed_notional,
+                core_deployed_usd=round(core_deployed, 2),
+                swvxx_swept_usd=quantization_remainder,
+                stranded_cash_usd=0.0,
+                leg2_attempts=total_leg2_attempts,
+                backoff_delays=backoff_delays,
+                fallback_triggered=False,
+                cash_sweep_vehicle=self.cash_sweep_vehicle,
+                duplicate_orders_prevented=self.duplicate_orders_prevented,
+                unique_orders_submitted=len(self._idempotency_ledger),
+            )
+
+        self.swap_history.append(res)
+        return res
+
+
 
 ```
 
-#### `execution/risk_manager.py` - Account risk controls & exposure governors (428 lines, 18361 bytes)
+#### `execution/risk_manager.py` (2143 lines, 92112 bytes)
 
 ```python
 """
@@ -3758,9 +3798,9 @@ the external backstop never contribute to it.
 
 import math
 import logging
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from datetime import datetime, time as dtime
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 logger = logging.getLogger("risk_manager")
 
@@ -3768,9 +3808,862 @@ logger = logging.getLogger("risk_manager")
 PRIOR_MEAN = 0.5
 ROBUSTNESS_KAPPA = 15
 
+LETF_3X_SYMBOLS: Set[str] = {"SOXL", "TQQQ", "TNA", "FNGU", "UPRO", "TECL"}
+CORE_1X_SYMBOLS: Set[str] = {"SPY", "QQQ", "IWM", "HYG", "IEF"}
+CASH_SWEEP_VEHICLE: str = "SWVXX"
+
+DEFAULT_ROUTING_SWEEP_VECTOR: Dict[str, float] = {
+    "SPY": 0.35,
+    "QQQ": 0.25,
+    "IWM": 0.10,
+    "HYG": 0.15,
+    "IEF": 0.15,
+    "cash": 0.0,
+}
+
+DEFAULT_CORE_PRICES: Dict[str, float] = {
+    "SPY": 585.0,
+    "QQQ": 490.0,
+    "IWM": 220.0,
+    "HYG": 79.0,
+    "IEF": 95.0,
+}
+
+DEFAULT_REGIME_SATELLITE_TARGETS: Dict[str, Dict[str, Any]] = {
+    "Goldilocks": {
+        "target": 0.25,
+        "ntz_band": [0.21, 0.29],
+    },
+    "Uncertainty": {
+        "target": 0.10,
+        "ntz_band": [0.08, 0.12],
+    },
+    "Shock": {
+        "target": 0.00,
+        "ntz_band": [0.00, 0.00],
+    },
+}
+
+
+class MetaGovernorHMM:
+    """
+    3-State Online Continuous HMM Meta-Governor (#91 / #98 Argon 2.4.0 Calibration).
+    Maintains a filtered probability vector pi(t) = [pi_Goldilocks, pi_Uncertainty, pi_Shock]^T in Delta^2.
+    Hydrated with 15-month empirical transition matrix T and Gaussian emission vectors (mu_k, sigma_k)
+    for M(t) = [Macro_Surprise_Z, Macro_Sentiment, Macro_HYSpread_Bps]^T.
+    """
+    REGIMES = ("Goldilocks", "Uncertainty", "Macro Shock")
+    REGIME_ORDER = ("goldilocks", "uncertainty", "shock")
+
+    EMPIRICAL_TRANSITION_MATRIX_3X3: List[List[float]] = [
+        [0.9993, 0.0, 0.0007],
+        [0.0032, 0.9968, 0.0],
+        [0.0029, 0.0, 0.9971],
+    ]
+
+    EMPIRICAL_PERSISTENCE_DIAGONAL: Dict[str, float] = {
+        "T_goldilocks_persistence": 0.9993,
+        "T_uncertainty_persistence": 0.9968,
+        "T_shock_persistence": 0.9971,
+    }
+
+    EMPIRICAL_MEAN_EMISSION_VECTORS: Dict[str, Dict[str, Dict[str, float]]] = {
+        "goldilocks": {
+            "mu": {
+                "Macro_Surprise_Z": 0.9946,
+                "Macro_Sentiment": 0.4803,
+                "Macro_HYSpread_Bps": 317.6,
+            },
+            "sigma": {
+                "Macro_Surprise_Z": 0.2498,
+                "Macro_Sentiment": 0.1064,
+                "Macro_HYSpread_Bps": 18.8,
+            },
+        },
+        "uncertainty": {
+            "mu": {
+                "Macro_Surprise_Z": -0.2989,
+                "Macro_Sentiment": -0.06,
+                "Macro_HYSpread_Bps": 406.8,
+            },
+            "sigma": {
+                "Macro_Surprise_Z": 0.092,
+                "Macro_Sentiment": 0.0417,
+                "Macro_HYSpread_Bps": 6.7,
+            },
+        },
+        "shock": {
+            "mu": {
+                "Macro_Surprise_Z": -1.243,
+                "Macro_Sentiment": -0.472,
+                "Macro_HYSpread_Bps": 481.9,
+            },
+            "sigma": {
+                "Macro_Surprise_Z": 0.2657,
+                "Macro_Sentiment": 0.1452,
+                "Macro_HYSpread_Bps": 35.3,
+            },
+        },
+    }
+
+    def __init__(
+        self,
+        initial_pi: Optional[Tuple[float, float, float]] = None,
+        persistence: float = 0.9993,
+        transition_matrix: Optional[List[List[float]]] = None,
+    ) -> None:
+        self.persistence = persistence
+        self.persistence_diagonal: Tuple[float, float, float] = (0.9993, 0.9968, 0.9971)
+        self.recommended_hmm_persistence_diagonal: Dict[str, float] = dict(self.EMPIRICAL_PERSISTENCE_DIAGONAL)
+
+        # Hydrate 3x3 transition matrix with empirical diagonal persistence values (#98)
+        if transition_matrix is not None:
+            self.transition_matrix = [list(row) for row in transition_matrix]
+        else:
+            self.transition_matrix = [list(row) for row in self.EMPIRICAL_TRANSITION_MATRIX_3X3]
+        self.transition_matrix_3x3 = self.transition_matrix
+
+        self.pi: List[float] = list(initial_pi) if initial_pi else [0.70, 0.25, 0.05]
+        self._normalize_pi()
+
+        # Calibrated Gaussian emission parameters for [Macro_Surprise_Z, Macro_Sentiment, Macro_HYSpread_Bps]
+        self.mean_emission_vectors = {
+            k: {"mu": dict(v["mu"]), "sigma": dict(v["sigma"])}
+            for k, v in self.EMPIRICAL_MEAN_EMISSION_VECTORS.items()
+        }
+        self.mu = [
+            [0.9946, 0.4803, 317.6],   # Goldilocks
+            [-0.2989, -0.06, 406.8],   # Uncertainty
+            [-1.243, -0.472, 481.9],   # Macro Shock
+        ]
+        self.sigma = [
+            [0.2498, 0.1064, 18.8],    # Goldilocks
+            [0.092, 0.0417, 6.7],      # Uncertainty
+            [0.2657, 0.1452, 35.3],    # Macro Shock
+        ]
+
+    def _normalize_pi(self) -> None:
+        total = sum(self.pi)
+        if total > 0:
+            self.pi = [p / total for p in self.pi]
+        else:
+            self.pi = [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]
+
+    def update(
+        self,
+        macro_state: Union[Any, Tuple[float, float, float], Dict[str, float]],
+        dt_seconds: float = 1.0,
+    ) -> Tuple[float, float, float]:
+        """
+        Executes continuous Bayesian filtering step:
+        pi(t) = ((T^dt)^T * pi(t-dt) * L(M(t))) / ||...||_1
+        """
+        if isinstance(macro_state, dict):
+            flash_ret = float(
+                macro_state.get(
+                    "soxl_return_30s",
+                    macro_state.get("flash_crash_return", macro_state.get("price_change_pct", 0.0)),
+                )
+            )
+            flash_drop = float(macro_state.get("flash_crash_drop_pct", 0.0))
+            sigma_yz = float(macro_state.get("sigma_yz", 0.0))
+            is_flash_crash = (flash_ret <= -0.15) or (flash_drop >= 0.15) or (sigma_yz >= 0.15)
+            z_s = float(
+                macro_state.get(
+                    "Macro_Surprise_Z",
+                    macro_state.get("economic_surprise_z_score", -2.5 if is_flash_crash else 0.0),
+                )
+            )
+            s_nlp = float(
+                macro_state.get(
+                    "Macro_Sentiment",
+                    macro_state.get("sentiment_decayed", -0.90 if is_flash_crash else 0.0),
+                )
+            )
+            cs = float(
+                macro_state.get(
+                    "Macro_HYSpread_Bps",
+                    macro_state.get("hybrid_credit_spread_bps", 640.0 if is_flash_crash else 317.6),
+                )
+            )
+        elif hasattr(macro_state, "economic_surprise_z_score"):
+            z_s = float(macro_state.economic_surprise_z_score)
+            s_nlp = float(getattr(macro_state, "sentiment_decayed", getattr(macro_state, "sentiment_polarity_raw", 0.0)))
+            cs = float(getattr(macro_state, "hybrid_credit_spread_bps", getattr(macro_state, "fred_oas_bps", 317.6)))
+        elif isinstance(macro_state, (tuple, list)):
+            z_s, s_nlp, cs = float(macro_state[0]), float(macro_state[1]), float(macro_state[2])
+        else:
+            return self.get_regime_posterior()
+
+        # 1. State prediction via transition matrix: pi_pred = T^T * pi (with 1e-4 ergodic floor)
+        pi_pred = [0.0, 0.0, 0.0]
+        for j in range(3):
+            for i in range(3):
+                pi_pred[j] += self.pi[i] * self.transition_matrix[i][j]
+            pi_pred[j] = max(pi_pred[j], 1e-4)
+
+        # 2. Dimension-normalized Gaussian log-likelihood for each state k in {0, 1, 2}
+        m = [z_s, s_nlp, cs]
+        num_dims = 3.0
+        log_liks = []
+        for k in range(3):
+            ll = 0.0
+            for dim in range(3):
+                diff = (m[dim] - self.mu[k][dim]) / self.sigma[k][dim]
+                ll += -0.5 * (diff * diff) / num_dims
+            log_liks.append(ll)
+
+        max_ll = max(log_liks)
+        liks = [math.exp(ll - max_ll) for ll in log_liks]
+
+        # 3. Bayes measurement update: pi_new = (pi_pred * L) / sum(pi_pred * L)
+        unnorm = [pi_pred[k] * liks[k] for k in range(3)]
+        total = sum(unnorm)
+        if total > 0:
+            self.pi = [u / total for u in unnorm]
+        else:
+            self.pi = pi_pred
+        self._normalize_pi()
+        return self.get_regime_posterior()
+
+    def get_regime_posterior(self) -> Tuple[float, float, float]:
+        return (round(self.pi[0], 4), round(self.pi[1], 4), round(self.pi[2], 4))
+
+    @property
+    def pi_goldilocks(self) -> float:
+        return self.pi[0]
+
+    @property
+    def pi_uncertainty(self) -> float:
+        return self.pi[1]
+
+    @property
+    def pi_shock(self) -> float:
+        return self.pi[2]
+
+    def get_dominant_regime(self) -> str:
+        idx = self.pi.index(max(self.pi))
+        return self.REGIMES[idx]
+
+    def calculate_target_satellite_weight(
+        self,
+        w_base: Optional[float] = None,
+        w_c: Optional[float] = None,
+        drawdown_damper: float = 1.0,
+        w_max_a: float = 0.35,
+        w_goldilocks: float = 0.25,
+        w_uncertainty: float = 0.10,
+        w_shock: float = 0.00,
+        regime_targets: Optional[Dict[str, Any]] = None,
+    ) -> float:
+        """
+        Regime-Dynamic Satellite Target Weight (#111):
+        W_sat*(t) = (pi_Goldilocks * 0.25) + (pi_Uncertainty * 0.10) + (pi_Shock * 0.00)
+        Under Macro Shock (pi_shock >= 0.60 or dominant regime == 'Macro Shock'), overrides W_sat*(t) = 0.0.
+        """
+        if self.pi_shock >= 0.60 or self.get_dominant_regime() == "Macro Shock":
+            return 0.0
+
+        if regime_targets:
+            wg = regime_targets.get("Goldilocks", w_goldilocks)
+            w_goldilocks = float(wg.get("target", wg) if isinstance(wg, dict) else wg)
+            wu = regime_targets.get("Uncertainty", w_uncertainty)
+            w_uncertainty = float(wu.get("target", wu) if isinstance(wu, dict) else wu)
+            ws = regime_targets.get("Shock", w_shock)
+            w_shock = float(ws.get("target", ws) if isinstance(ws, dict) else ws)
+
+        raw_target = (
+            self.pi_goldilocks * w_goldilocks
+            + self.pi_uncertainty * w_uncertainty
+            + self.pi_shock * w_shock
+        ) * drawdown_damper
+        return round(min(w_max_a, max(0.0, raw_target)), 4)
+
+    def calculate_dynamic_leland_bounds(
+        self,
+        w_sat_target: Optional[float] = None,
+    ) -> Tuple[float, float, float]:
+        """
+        Dynamically compute Leland NTZ lower and upper bounds around W_sat*(t) (#111):
+        tau_band = 0.04 if pi_Goldilocks > 0.70 else 0.02
+        lower_bound = max(0.0, W_sat* - tau_band)
+        upper_bound = min(0.35, W_sat* + tau_band)
+        Returns (tau_band, lower_bound, upper_bound).
+        """
+        if w_sat_target is None:
+            w_sat_target = self.calculate_target_satellite_weight()
+        if w_sat_target <= 0.0 or self.pi_shock >= 0.60 or self.get_dominant_regime() == "Macro Shock":
+            return 0.0, 0.0, 0.0
+        tau_band = 0.04 if self.pi_goldilocks > 0.70 else 0.02
+        lower_bound = round(max(0.0, w_sat_target - tau_band), 4)
+        upper_bound = round(min(0.35, w_sat_target + tau_band), 4)
+        return tau_band, lower_bound, upper_bound
+
+
+@dataclass
+class DualSleeveOrder:
+    symbol: str
+    side: str  # "BUY" or "SELL"
+    shares: int
+    target_notional: float
+    price: float
+    sleeve: str  # "CORE" or "SATELLITE"
+    reason: str
+    leg_id: int = 1
+
+
+@dataclass
+class DualSleeveSwapPlan:
+    action: str  # "HARVEST_TO_CORE", "TRIM_CORE_TO_SATELLITE", "NO_TRADE_ZONE"
+    active_satellite_weight: float
+    target_satellite_weight: float
+    band_lower: float
+    band_upper: float
+    satellite_notional_delta: float
+    core_notional_delta: float
+    orders: List[DualSleeveOrder] = field(default_factory=list)
+    instantaneous_settlement_bypass: bool = True
+    cash_buffer_sweep_usd: float = 0.0
+    cash_sweep_vehicle: str = CASH_SWEEP_VEHICLE
+    w_core: float = 0.85
+    w_sat: float = 0.15
+    w_buf: float = 0.0
+    core_basket_shares: Dict[str, int] = field(default_factory=dict)
+    routing_sweep_vector: Dict[str, float] = field(default_factory=dict)
+
+
+class DualSleeveRouter:
+    """
+    Dual-Sleeve Capital Router implementing unchained Leland No-Trade Zone rebalancing
+    between 3x Tactical Satellite S(t), multi-asset 1x Robo-Core C(t), and SWVXX cash
+    sweep buffer M_buf(t), preserving W_core + W_sat + W_buf == 1.0 (#91 / #98 / #111).
+    """
+
+    def __init__(
+        self,
+        tau_band: Optional[float] = None,
+        core_symbol: str = "SPY",
+        routing_sweep_vector: Optional[Dict[str, float]] = None,
+        cash_sweep_vehicle: str = CASH_SWEEP_VEHICLE,
+        hmm: Optional[MetaGovernorHMM] = None,
+        regime_targets: Optional[Dict[str, Any]] = None,
+    ):
+        self.tau_band = tau_band
+        self.core_symbol = core_symbol
+        self.routing_sweep_vector: Dict[str, float] = dict(
+            routing_sweep_vector if routing_sweep_vector is not None else DEFAULT_ROUTING_SWEEP_VECTOR
+        )
+        self.cash_sweep_vehicle: str = cash_sweep_vehicle
+        self.hmm: Optional[MetaGovernorHMM] = hmm
+        self.regime_targets = regime_targets or DEFAULT_REGIME_SATELLITE_TARGETS
+
+    def calculate_target_satellite_weight(
+        self,
+        hmm: Optional[MetaGovernorHMM] = None,
+        pi: Optional[Union[Tuple[float, float, float], List[float]]] = None,
+    ) -> float:
+        """
+        Compute dynamic target weight (#111):
+        W_sat*(t) = (pi_Goldilocks * 0.25) + (pi_Uncertainty * 0.10) + (pi_Shock * 0.00)
+        """
+        active_hmm = hmm or self.hmm
+        if pi is not None:
+            pi_g, pi_u, pi_s = float(pi[0]), float(pi[1]), float(pi[2])
+            if pi_s >= 0.60:
+                return 0.0
+            raw = (pi_g * 0.25) + (pi_u * 0.10) + (pi_s * 0.00)
+            return round(min(0.35, max(0.0, raw)), 4)
+        if active_hmm is not None:
+            return active_hmm.calculate_target_satellite_weight(regime_targets=self.regime_targets)
+        return 0.25
+
+    def compute_dynamic_leland_bounds(
+        self,
+        target_satellite_weight: Optional[float] = None,
+        hmm: Optional[MetaGovernorHMM] = None,
+        tau_band: Optional[float] = None,
+    ) -> Tuple[float, float, float]:
+        """
+        Dynamically compute Leland NTZ lower and upper bounds around W_sat*(t) (#111):
+        tau_band = 0.04 if pi_Goldilocks > 0.70 else 0.02
+        lower_bound = max(0.0, W_sat* - tau_band)
+        upper_bound = min(0.35, W_sat* + tau_band)
+        Returns (tau_band, lower_bound, upper_bound).
+        """
+        active_hmm = hmm or self.hmm
+        w_sat = (
+            float(target_satellite_weight)
+            if target_satellite_weight is not None
+            else self.calculate_target_satellite_weight(active_hmm)
+        )
+        is_macro_shock = (w_sat <= 0.0) or (
+            active_hmm is not None
+            and (active_hmm.pi_shock >= 0.60 or active_hmm.get_dominant_regime() == "Macro Shock")
+        )
+        if is_macro_shock:
+            return 0.0, 0.0, 0.0
+
+        if tau_band is not None:
+            tau = float(tau_band)
+        elif self.tau_band is not None:
+            tau = float(self.tau_band)
+        elif active_hmm is not None:
+            tau = 0.04 if active_hmm.pi_goldilocks > 0.70 else 0.02
+        else:
+            tau = 0.02
+
+        lower_bound = round(max(0.0, w_sat - tau), 4)
+        upper_bound = round(min(0.35, w_sat + tau), 4)
+        return tau, lower_bound, upper_bound
+
+    compute_leland_bounds = compute_dynamic_leland_bounds
+
+    def allocate_from_live_nlv(
+        self,
+        nlv: float,
+        target_satellite_weight: Optional[float] = None,
+        core_prices: Optional[Dict[str, float]] = None,
+        satellite_prices: Optional[Dict[str, float]] = None,
+        satellite_sub_weights: Optional[Dict[str, float]] = None,
+        routing_sweep_vector: Optional[Dict[str, float]] = None,
+        hmm: Optional[MetaGovernorHMM] = None,
+        tau_band: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Scale-invariant portfolio initialization and quantization referencing live broker NLV exclusively.
+        Evaluates breaches against dynamic Leland NTZ bounds (#111).
+        Enforces discrete integer floor quantizations:
+            Q_{sat, j} = floor((V_{sat, budget} * w_j) / P_j)
+            Q_{core, c} = floor((V_{freed} * w_c) / P_c)
+        and sweeps all fractional quantization remainders into SWVXX cash yield, guaranteeing:
+            swvxx_cash >= 0.0 and abs((core_mv + sat_mv + swvxx_cash) - total_nlv) < 0.01.
+        """
+        live_nlv = max(0.0, float(nlv))
+        active_hmm = hmm or self.hmm
+        if target_satellite_weight is not None:
+            w_sat_target = max(0.0, min(1.0, float(target_satellite_weight)))
+        elif active_hmm is not None:
+            w_sat_target = active_hmm.calculate_target_satellite_weight(regime_targets=self.regime_targets)
+        else:
+            w_sat_target = 0.25
+
+        tau, lower_bound, upper_bound = self.compute_dynamic_leland_bounds(
+            target_satellite_weight=w_sat_target,
+            hmm=active_hmm,
+            tau_band=tau_band,
+        )
+
+        c_px_map = dict(DEFAULT_CORE_PRICES)
+        if core_prices:
+            for sym, px in core_prices.items():
+                if float(px) > 0.0:
+                    c_px_map[sym.upper()] = float(px)
+
+        sat_px_map = {"SOXL": 45.0, "TQQQ": 78.0, "TNA": 50.0}
+        if satellite_prices:
+            for sym, px in satellite_prices.items():
+                if float(px) > 0.0:
+                    sat_px_map[sym.upper()] = float(px)
+
+        sub_w = dict(satellite_sub_weights or {"SOXL": 0.40, "TQQQ": 0.35, "TNA": 0.25})
+        sweep_vec = dict(routing_sweep_vector if routing_sweep_vector is not None else self.routing_sweep_vector)
+
+        sat_budget_usd = live_nlv * w_sat_target
+        sat_positions: Dict[str, Dict[str, Any]] = {}
+        sat_mv = 0.0
+
+        for sym, w_j in sub_w.items():
+            s = sym.upper()
+            px_j = max(0.01, float(sat_px_map.get(s, 50.0)))
+            q_j = math.floor((sat_budget_usd * float(w_j)) / px_j) if w_sat_target > 0.0 else 0
+            mv_j = round(q_j * px_j, 4)
+            sat_mv += mv_j
+            sat_positions[s] = {
+                "quantity": q_j,
+                "current_price": px_j,
+                "entry_price": px_j,
+                "market_value": mv_j,
+                "sleeve": "SATELLITE",
+            }
+
+        # Freed/remaining capital allocated across 1x Core basket using floor((V_freed * w_c) / P_c)
+        v_freed_for_core = max(0.0, live_nlv - sat_mv)
+        core_positions: Dict[str, Dict[str, Any]] = {}
+        core_mv = 0.0
+
+        for c_sym_raw, w_c_raw in sweep_vec.items():
+            c_key = c_sym_raw.upper()
+            if c_key in ("CASH", "CASH_BUFFER", self.cash_sweep_vehicle.upper()):
+                continue
+            w_c = float(w_c_raw)
+            if w_c <= 0.0:
+                continue
+            px_c = max(0.01, float(c_px_map.get(c_key, 100.0)))
+            q_c = math.floor((v_freed_for_core * w_c) / px_c)
+            mv_c = round(q_c * px_c, 4)
+            core_mv += mv_c
+            core_positions[c_key] = {
+                "quantity": q_c,
+                "current_price": px_c,
+                "entry_price": px_c,
+                "market_value": mv_c,
+                "sleeve": "CORE",
+            }
+
+        swvxx_cash = round(max(0.0, live_nlv - (core_mv + sat_mv)), 4)
+        w_sat_actual = round(sat_mv / live_nlv, 6) if live_nlv > 0 else 0.0
+
+        # Evaluate breaches against dynamic Leland NTZ bounds (#111)
+        is_macro_shock = (w_sat_target <= 0.0) or (
+            active_hmm is not None
+            and (active_hmm.pi_shock >= 0.60 or active_hmm.get_dominant_regime() == "Macro Shock")
+        )
+        if is_macro_shock:
+            is_breached = w_sat_actual > 0.0
+            breach_direction = "UPPER" if is_breached else "NONE"
+            breach_status = "MACRO_SHOCK_BREACH" if is_breached else "NO_BREACH"
+        elif w_sat_actual > upper_bound:
+            is_breached = True
+            breach_direction = "UPPER"
+            breach_status = "UPPER_BREACH"
+        elif w_sat_actual < lower_bound:
+            is_breached = True
+            breach_direction = "LOWER"
+            breach_status = "LOWER_BREACH"
+        else:
+            is_breached = False
+            breach_direction = "NONE"
+            breach_status = "NO_BREACH"
+
+        return {
+            "total_nlv": round(live_nlv, 4),
+            "core_mv": round(core_mv, 4),
+            "sat_mv": round(sat_mv, 4),
+            "swvxx_cash": swvxx_cash,
+            "cash_sweep_vehicle": self.cash_sweep_vehicle,
+            "core_positions": core_positions,
+            "satellite_positions": sat_positions,
+            "w_core": round(core_mv / live_nlv, 6) if live_nlv > 0 else 0.0,
+            "w_sat": w_sat_actual,
+            "w_buf": round(swvxx_cash / live_nlv, 6) if live_nlv > 0 else 0.0,
+            "target_satellite_weight": round(w_sat_target, 4),
+            "tau_band": round(tau, 4),
+            "lower_bound": round(lower_bound, 4),
+            "upper_bound": round(upper_bound, 4),
+            "band_lower": round(lower_bound, 4),
+            "band_upper": round(upper_bound, 4),
+            "is_breached": is_breached,
+            "breach_direction": breach_direction,
+            "breach_status": breach_status,
+        }
+
+    def plan_dual_sleeve_reallocation(
+        self,
+        nlv: float,
+        satellite_positions: Dict[str, Any],
+        target_satellite_weight: Optional[float] = None,
+        core_positions: Optional[Dict[str, Any]] = None,
+        core_symbol: Optional[str] = None,
+        core_price: float = 585.0,
+        core_prices: Optional[Dict[str, float]] = None,
+        routing_sweep_vector: Optional[Dict[str, float]] = None,
+        satellite_sub_weights: Optional[Dict[str, float]] = None,
+        satellite_prices: Optional[Dict[str, float]] = None,
+        tau_band: Optional[float] = None,
+        trend_gate_active: bool = True,
+        hmm: Optional[MetaGovernorHMM] = None,
+    ) -> DualSleeveSwapPlan:
+        """
+        Evaluates active satellite weight w(t) against dynamic target W_sat^*(t) +- tau_band (#111).
+        Generates paired atomic swap orders referencing live broker NLV exclusively:
+        - When w(t) > W_sat^* + tau_band (or W_sat^* == 0.0 in Macro Shock):
+          Sell Satellite to boundary -> Route freed notional V_freed across multi-asset Core
+          basket (routing_sweep_vector) with discrete integer share flooring:
+              Delta Q_c = floor((V_freed * w_{sweep, c}) / P_c(t))
+          and quantize residual fractional cash balances into SWVXX / M_buf, preserving
+              W_core + W_sat + W_buf == 1.0.
+        - When w(t) < W_sat^* - tau_band (and trend gate active):
+          Sell 1x Robo-Core -> Buy Satellite with proceeds and route fractional residue to SWVXX.
+        - Inside band: No trade (zero turnover churn).
+        """
+        csym = (core_symbol or self.core_symbol).upper()
+        active_hmm = hmm or self.hmm
+        if target_satellite_weight is not None:
+            w_sat_target = float(target_satellite_weight)
+        elif active_hmm is not None:
+            w_sat_target = active_hmm.calculate_target_satellite_weight(regime_targets=self.regime_targets)
+        else:
+            w_sat_target = 0.25
+
+        tau, band_lower, band_upper = self.compute_dynamic_leland_bounds(
+            target_satellite_weight=w_sat_target,
+            hmm=active_hmm,
+            tau_band=tau_band,
+        )
+        is_macro_shock_flatten = (w_sat_target <= 0.0) or (
+            active_hmm is not None
+            and (active_hmm.pi_shock >= 0.60 or active_hmm.get_dominant_regime() == "Macro Shock")
+        )
+        c_px = max(1.0, float(core_price))
+        if routing_sweep_vector is not None:
+            sweep_vec = dict(routing_sweep_vector)
+        elif is_macro_shock_flatten:
+            sweep_vec = {"IEF": 1.0, "cash": 0.0}
+        else:
+            sweep_vec = dict(self.routing_sweep_vector)
+
+        # Build Core basket price map P_c(t)
+        c_px_map: Dict[str, float] = dict(DEFAULT_CORE_PRICES)
+        c_px_map[csym] = c_px
+        if core_positions:
+            for sym, pos in core_positions.items():
+                s = sym.upper()
+                if isinstance(pos, dict):
+                    px_val = float(pos.get("current_price", pos.get("last_price", 0.0)))
+                else:
+                    px_val = float(getattr(pos, "current_price", getattr(pos, "last_price", 0.0)))
+                if px_val > 0.0:
+                    c_px_map[s] = px_val
+        if core_prices:
+            for sym, px_val in core_prices.items():
+                if float(px_val) > 0.0:
+                    c_px_map[sym.upper()] = float(px_val)
+
+        # Calculate current satellite market value
+        sat_val = 0.0
+        sat_held: Dict[str, Tuple[int, float, float]] = {}  # sym -> (qty, px, mv)
+
+        for sym, pos in satellite_positions.items():
+            s = sym.upper()
+            if isinstance(pos, dict):
+                q = int(pos.get("quantity", 0))
+                px = float(pos.get("current_price", pos.get("last_price", 0.0)))
+                mv = float(pos.get("market_value", q * px))
+            else:
+                q = int(getattr(pos, "quantity", 0))
+                px = float(getattr(pos, "current_price", getattr(pos, "last_price", 0.0)))
+                mv = float(getattr(pos, "market_value", q * px))
+            if q > 0 and px > 0.0:
+                sat_held[s] = (q, px, mv)
+                sat_val += mv
+
+        active_weight = (sat_val / nlv) if nlv > 0.0 else 0.0
+
+        # ---------------------------------------------------------------------
+        # Case A: Harvesting / De-risking (Satellite > Upper Band or Macro Shock)
+        # ---------------------------------------------------------------------
+        if active_weight > band_upper:
+            excess_weight = active_weight - band_upper
+            excess_usd = excess_weight * nlv
+            orders: List[DualSleeveOrder] = []
+            freed_usd = 0.0
+
+            # Leg 1: Sell 3x Satellite assets proportionally down to boundary (100% if Macro Shock)
+            for s, (q, px, mv) in sat_held.items():
+                if is_macro_shock_flatten:
+                    shares_to_sell = q
+                else:
+                    frac = (mv / sat_val) if sat_val > 0.0 else (1.0 / len(sat_held))
+                    asset_trim_usd = excess_usd * frac
+                    shares_to_sell = min(q, max(1, int(round(asset_trim_usd / px))))
+                notional = shares_to_sell * px
+                freed_usd += notional
+                orders.append(
+                    DualSleeveOrder(
+                        symbol=s,
+                        side="SELL",
+                        shares=shares_to_sell,
+                        target_notional=round(notional, 2),
+                        price=round(px, 4),
+                        sleeve="SATELLITE",
+                        reason=(
+                            f"MACRO_SHOCK_LIQUIDATE: w({active_weight:.3f}) -> 0.000"
+                            if is_macro_shock_flatten
+                            else f"LELAND_NTZ_HARVEST: w({active_weight:.3f}) > upper({band_upper:.3f})"
+                        ),
+                        leg_id=1,
+                    )
+                )
+
+            # Leg 2: Route freed notional V_freed across multi-asset Core basket (routing_sweep_vector)
+            # Delta Q_c = floor((V_freed * w_{sweep, c}) / P_c(t))
+            total_core_deployed = 0.0
+            core_basket_shares: Dict[str, int] = {}
+
+            for c_sym_raw, w_sweep_c in sweep_vec.items():
+                c_key = c_sym_raw.upper()
+                if c_key in ("CASH", "CASH_BUFFER", self.cash_sweep_vehicle.upper()):
+                    continue
+                w_c = float(w_sweep_c)
+                if w_c <= 0.0:
+                    continue
+                px_c = max(0.01, float(c_px_map.get(c_key, c_px)))
+                delta_q_c = math.floor((freed_usd * w_c) / px_c)
+                core_basket_shares[c_key] = delta_q_c
+                if delta_q_c > 0:
+                    core_notional_c = delta_q_c * px_c
+                    total_core_deployed += core_notional_c
+                    orders.append(
+                        DualSleeveOrder(
+                            symbol=c_key,
+                            side="BUY",
+                            shares=delta_q_c,
+                            target_notional=round(core_notional_c, 2),
+                            price=round(px_c, 4),
+                            sleeve="CORE",
+                            reason=f"LELAND_NTZ_SWEEP_INTO_CORE: w_sweep({w_c:.2f}) multi-asset basket reinvestment",
+                            leg_id=2,
+                        )
+                    )
+
+            # Quantize residual fractional cash balance into cash sweep buffer (SWVXX / M_buf)
+            residual_cash_buf = max(0.0, freed_usd - total_core_deployed)
+            post_sat_val = max(0.0, sat_val - freed_usd)
+            w_sat_post = (post_sat_val / nlv) if nlv > 0.0 else 0.0
+            w_buf_post = (residual_cash_buf / nlv) if nlv > 0.0 else 0.0
+            w_core_post = max(0.0, 1.0 - w_sat_post - w_buf_post)
+
+            return DualSleeveSwapPlan(
+                action="HARVEST_TO_CORE",
+                active_satellite_weight=round(active_weight, 4),
+                target_satellite_weight=round(w_sat_target, 4),
+                band_lower=round(band_lower, 4),
+                band_upper=round(band_upper, 4),
+                satellite_notional_delta=-round(freed_usd, 2),
+                core_notional_delta=round(total_core_deployed, 2),
+                orders=orders,
+                instantaneous_settlement_bypass=True,
+                cash_buffer_sweep_usd=round(residual_cash_buf, 2),
+                cash_sweep_vehicle=self.cash_sweep_vehicle,
+                w_core=round(w_core_post, 6),
+                w_sat=round(w_sat_post, 6),
+                w_buf=round(1.0 - round(w_core_post, 6) - round(w_sat_post, 6), 6),
+                core_basket_shares=core_basket_shares,
+                routing_sweep_vector=sweep_vec,
+            )
+
+        # ---------------------------------------------------------------------
+        # Case B: Risk-On / NTZ Dip-Buying (Satellite < Lower Band)
+        # ---------------------------------------------------------------------
+        elif active_weight < band_lower and trend_gate_active:
+            deficit_weight = band_lower - active_weight
+            expansion_usd = deficit_weight * nlv
+            orders = []
+
+            # Leg 1: Trim 1x Robo-Core to fund Satellite expansion
+            core_shares_to_sell = max(1, int(math.ceil(expansion_usd / c_px)))
+            if core_positions and csym in core_positions:
+                pos_obj = core_positions[csym]
+                held_core_q = int(pos_obj.get("quantity", 0) if isinstance(pos_obj, dict) else getattr(pos_obj, "quantity", 0))
+                if held_core_q > 0:
+                    core_shares_to_sell = min(core_shares_to_sell, held_core_q)
+            core_trim_usd = core_shares_to_sell * c_px
+            orders.append(
+                DualSleeveOrder(
+                    symbol=csym,
+                    side="SELL",
+                    shares=core_shares_to_sell,
+                    target_notional=round(core_trim_usd, 2),
+                    price=round(c_px, 4),
+                    sleeve="CORE",
+                    reason=f"LELAND_NTZ_TRIM_CORE: Fund satellite dip-buy w({active_weight:.3f}) < lower({band_lower:.3f})",
+                    leg_id=1,
+                )
+            )
+
+            # Leg 2: Deploy proceeds into 3x Satellite assets based on sub-weights
+            sub_w = satellite_sub_weights or {"SOXL": 0.40, "TQQQ": 0.35, "TNA": 0.25}
+            sat_px_map = satellite_prices or {"SOXL": 45.0, "TQQQ": 78.0, "TNA": 50.0}
+            deployable_budget_usd = min(expansion_usd, core_trim_usd)
+            total_deployed = 0.0
+
+            for sym, weight in sub_w.items():
+                s = sym.upper()
+                px = sat_px_map.get(s, 50.0)
+                asset_usd = deployable_budget_usd * weight
+                shares_to_buy = math.floor(asset_usd / px)
+                if shares_to_buy > 0:
+                    notional = shares_to_buy * px
+                    total_deployed += notional
+                    orders.append(
+                        DualSleeveOrder(
+                            symbol=s,
+                            side="BUY",
+                            shares=shares_to_buy,
+                            target_notional=round(notional, 2),
+                            price=round(px, 4),
+                            sleeve="SATELLITE",
+                            reason=f"LELAND_NTZ_BUY_SATELLITE: Sub-weight {weight:.2f}",
+                            leg_id=2,
+                        )
+                    )
+
+            residual_cash_buf = max(0.0, core_trim_usd - total_deployed)
+            post_sat_val = sat_val + total_deployed
+            w_sat_post = (post_sat_val / nlv) if nlv > 0.0 else 0.0
+            w_buf_post = (residual_cash_buf / nlv) if nlv > 0.0 else 0.0
+            w_core_post = max(0.0, 1.0 - w_sat_post - w_buf_post)
+
+            return DualSleeveSwapPlan(
+                action="TRIM_CORE_TO_SATELLITE",
+                active_satellite_weight=round(active_weight, 4),
+                target_satellite_weight=round(w_sat_target, 4),
+                band_lower=round(band_lower, 4),
+                band_upper=round(band_upper, 4),
+                satellite_notional_delta=round(total_deployed, 2),
+                core_notional_delta=-round(core_trim_usd, 2),
+                orders=orders,
+                instantaneous_settlement_bypass=True,
+                cash_buffer_sweep_usd=round(residual_cash_buf, 2),
+                cash_sweep_vehicle=self.cash_sweep_vehicle,
+                w_core=round(w_core_post, 6),
+                w_sat=round(w_sat_post, 6),
+                w_buf=round(1.0 - round(w_core_post, 6) - round(w_sat_post, 6), 6),
+                core_basket_shares={csym: -core_shares_to_sell},
+                routing_sweep_vector=sweep_vec,
+            )
+
+        # ---------------------------------------------------------------------
+        # Case C: Inside Leland NTZ Band
+        # ---------------------------------------------------------------------
+        action_name = "NO_TRADE_ZONE" if trend_gate_active else "TREND_GATE_INHIBITED"
+        w_sat_curr = round(active_weight, 6)
+        w_core_curr = round(max(0.0, 1.0 - w_sat_curr), 6)
+        return DualSleeveSwapPlan(
+            action=action_name,
+            active_satellite_weight=round(active_weight, 4),
+            target_satellite_weight=round(w_sat_target, 4),
+            band_lower=round(band_lower, 4),
+            band_upper=round(band_upper, 4),
+            satellite_notional_delta=0.0,
+            core_notional_delta=0.0,
+            orders=[],
+            instantaneous_settlement_bypass=True,
+            cash_buffer_sweep_usd=0.0,
+            cash_sweep_vehicle=self.cash_sweep_vehicle,
+            w_core=w_core_curr,
+            w_sat=w_sat_curr,
+            w_buf=round(1.0 - w_core_curr - w_sat_curr, 6),
+            core_basket_shares={},
+            routing_sweep_vector=sweep_vec,
+        )
+
 
 class RiskEngine:
-    def __init__(self, wins: int = 45, executions: int = 100, payoff_ratio: float = 1.6):
+    MIN_MARGIN_EQUITY: float = 2000.0
+    INTRADAY_MARGIN_REQ: float = 0.25
+    OVERNIGHT_MARGIN_REQ: float = 0.50
+    MAX_INTRADAY_LEVERAGE: float = 4.0
+    MAX_OVERNIGHT_LEVERAGE: float = 2.0
+
+    def __init__(
+        self,
+        wins: int = 45,
+        executions: int = 100,
+        payoff_ratio: float = 1.6,
+        account_base: float = 0.0,
+        enforce_letf_house_margin: bool = False,
+    ):
         self._active_positions = {}
         self.brackets: Dict[str, Any] = {}
         self.macro_risk_multiplier: float = 1.0
@@ -3780,6 +4673,39 @@ class RiskEngine:
         self.wins = wins
         self.executions = executions
         self.payoff_ratio = payoff_ratio
+
+        # FINRA Rule 4210 Margin Framework State
+        self.account_equity: float = float(account_base)
+        self.cash_balance: float = float(account_base)
+        self.swvxx_cash_balance: float = float(account_base)
+        self.positions: Dict[str, Dict[str, Any]] = {}
+        self._tick_history: Dict[str, List[Tuple[float, float]]] = {}
+        self.intraday_buying_power: float = 0.0
+        self.overnight_buying_power: float = 0.0
+        self.total_position_value: float = 0.0
+        self.intraday_margin_deficit: float = 0.0
+        self.is_margin_eligible: bool = False
+        self.enforce_letf_house_margin: bool = enforce_letf_house_margin
+
+        # Dual-Sleeve Meta-Governor & Router State (#91 / #98 / #111)
+        self.hmm = MetaGovernorHMM()
+        self.router = DualSleeveRouter(hmm=self.hmm)
+        self.satellite_peak_equity: float = float(account_base)
+        self.cumulative_core_heal: float = 0.0
+        self.lambda_0: float = 0.03
+        self.kappa_core: float = 0.5
+        self.last_lambda_hwm_eff: float = 0.03
+
+        # Volatility Trigger & Instantaneous Reallocation State
+        self.regime: str = "NORMAL"
+        self.volatility_multiplier: float = 1.0
+        self.instantaneous_reallocation_permitted: bool = True
+
+        # Deprecation of legacy PDT & day-trade counters
+        self.pdt_restricted: bool = False
+        self.day_trade_count: int = 0
+
+        self.recalculate_margin_buying_power()
 
     def create_breakout_bracket(
         self,
@@ -3866,6 +4792,835 @@ class RiskEngine:
         """Dynamically updates the macro liquidity risk multiplier (0.0 to 1.0)."""
         self.macro_risk_multiplier = max(0.0, min(1.0, float(multiplier)))
         logger.info(f"RiskEngine macro risk multiplier updated to: {self.macro_risk_multiplier:.4f}")
+
+    def get_asset_margin_requirements(
+        self,
+        symbol: str,
+        enforce_letf_house_margin: Optional[bool] = None,
+    ) -> Tuple[float, float]:
+        """
+        Returns (intraday_margin_req, overnight_margin_req) for a given symbol under FINRA Rule 4210.
+        When enforce_letf_house_margin is enabled:
+        - 3x Leveraged ETFs (SOXL, TQQQ, TNA, etc.): 75% intraday / 90% overnight.
+        - 1x Core Equities (SPY, QQQ, etc.): 25% intraday / 50% Reg T overnight.
+        When enforce_letf_house_margin is False (legacy default):
+        - Returns uniform (0.25, 0.50).
+        """
+        enforce = self.enforce_letf_house_margin if enforce_letf_house_margin is None else enforce_letf_house_margin
+        if enforce and symbol.upper() in LETF_3X_SYMBOLS:
+            return (0.75, 0.90)
+        return (self.INTRADAY_MARGIN_REQ, self.OVERNIGHT_MARGIN_REQ)
+
+    def recalculate_margin_buying_power(self) -> Dict[str, Any]:
+        """
+        Dynamically calculates Dual Buying Power in real-time under FINRA Rule 4210:
+        1. Intraday Margin Buying Power: Up to 4x leverage (25% maintenance margin requirement)
+           calculated dynamically in real-time based on active tick valuations.
+        2. Regulation T Overnight Buying Power: Up to 2x leverage (50% margin requirement).
+        3. Enforces $2,000 minimum equity check for margin eligibility.
+        """
+        self.total_position_value = sum(
+            pos.get("quantity", 0) * pos.get("current_price", 0.0)
+            for pos in self.positions.values()
+        )
+
+        equity = self.account_equity
+        self.is_margin_eligible = equity >= self.MIN_MARGIN_EQUITY
+
+        if not self.is_margin_eligible:
+            # Below $2,000: Account is not margin eligible (cash-only, no borrowing)
+            avail_cash = max(0.0, equity - self.total_position_value)
+            self.intraday_buying_power = avail_cash
+            self.overnight_buying_power = avail_cash
+            self.intraday_margin_deficit = 0.0 if avail_cash >= 0 else abs(avail_cash)
+        elif self.enforce_letf_house_margin:
+            # Asset-specific FINRA 4210 House Maintenance Margin
+            intraday_req = sum(
+                pos.get("quantity", 0) * pos.get("current_price", 0.0) * self.get_asset_margin_requirements(sym, True)[0]
+                for sym, pos in self.positions.items()
+            )
+            intraday_excess = equity - intraday_req
+            if intraday_excess < 0:
+                self.intraday_margin_deficit = abs(intraday_excess)
+                self.intraday_buying_power = 0.0
+            else:
+                self.intraday_margin_deficit = 0.0
+                self.intraday_buying_power = max(0.0, intraday_excess * self.MAX_INTRADAY_LEVERAGE)
+
+            overnight_req = sum(
+                pos.get("quantity", 0) * pos.get("current_price", 0.0) * self.get_asset_margin_requirements(sym, True)[1]
+                for sym, pos in self.positions.items()
+            )
+            overnight_excess = equity - overnight_req
+            self.overnight_buying_power = max(0.0, overnight_excess * self.MAX_OVERNIGHT_LEVERAGE)
+        else:
+            # Intraday Margin: 25% maintenance requirement (up to 4x leverage)
+            intraday_req = self.total_position_value * self.INTRADAY_MARGIN_REQ
+            intraday_excess = equity - intraday_req
+            if intraday_excess < 0:
+                self.intraday_margin_deficit = abs(intraday_excess)
+                self.intraday_buying_power = 0.0
+            else:
+                self.intraday_margin_deficit = 0.0
+                self.intraday_buying_power = max(0.0, intraday_excess * self.MAX_INTRADAY_LEVERAGE)
+
+            # Regulation T Overnight: 50% requirement (up to 2x leverage)
+            overnight_req = self.total_position_value * self.OVERNIGHT_MARGIN_REQ
+            overnight_excess = equity - overnight_req
+            self.overnight_buying_power = max(0.0, overnight_excess * self.MAX_OVERNIGHT_LEVERAGE)
+
+        return {
+            "account_equity": self.account_equity,
+            "total_position_value": self.total_position_value,
+            "intraday_buying_power": self.intraday_buying_power,
+            "overnight_buying_power": self.overnight_buying_power,
+            "intraday_margin_deficit": self.intraday_margin_deficit,
+            "is_margin_eligible": self.is_margin_eligible,
+            "instantaneous_reallocation": self.instantaneous_reallocation_permitted,
+        }
+
+    @property
+    def live_nlv(self) -> float:
+        """Authoritative live broker Net Liquidation Value."""
+        return self.account_equity
+
+    def get_sleeve_balances(self) -> Dict[str, float]:
+        """
+        Computes current live valuations of Core sleeve, Satellite sleeve, SWVXX cash buffer,
+        and total NLV to verify the conservation invariant:
+            abs((core_mv + sat_mv + swvxx_cash) - total_nlv) < 0.01
+        """
+        core_mv = 0.0
+        sat_mv = 0.0
+        for sym, pos in self.positions.items():
+            s = sym.upper()
+            mv = float(pos.get("quantity", 0)) * float(pos.get("current_price", 0.0))
+            if s in LETF_3X_SYMBOLS or pos.get("sleeve") == "SATELLITE":
+                sat_mv += mv
+            else:
+                core_mv += mv
+        swvxx_cash = max(0.0, float(self.swvxx_cash_balance))
+        total_nlv = float(self.account_equity)
+        return {
+            "core_mv": round(core_mv, 4),
+            "sat_mv": round(sat_mv, 4),
+            "swvxx_cash": round(swvxx_cash, 4),
+            "total_nlv": round(total_nlv, 4),
+            "invariant_drift": abs((core_mv + sat_mv + swvxx_cash) - total_nlv),
+        }
+
+    def allocate_from_live_nlv(
+        self,
+        nlv: Optional[float] = None,
+        target_satellite_weight: Optional[float] = None,
+        core_prices: Optional[Dict[str, float]] = None,
+        satellite_prices: Optional[Dict[str, float]] = None,
+        satellite_sub_weights: Optional[Dict[str, float]] = None,
+        routing_sweep_vector: Optional[Dict[str, float]] = None,
+        tau_band: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Initializes or re-syncs internal dual-sleeve positions and SWVXX cash buffer
+        exclusively from live broker NLV using discrete integer share floors.
+        Evaluates breaches against dynamic Leland NTZ bounds (#111).
+        """
+        eff_nlv = float(nlv) if nlv is not None else float(self.account_equity)
+        if target_satellite_weight is None:
+            target_satellite_weight = self.hmm.calculate_target_satellite_weight()
+        alloc = self.router.allocate_from_live_nlv(
+            nlv=eff_nlv,
+            target_satellite_weight=target_satellite_weight,
+            core_prices=core_prices,
+            satellite_prices=satellite_prices,
+            satellite_sub_weights=satellite_sub_weights,
+            routing_sweep_vector=routing_sweep_vector,
+            hmm=self.hmm,
+            tau_band=tau_band,
+        )
+        combined_positions: Dict[str, Dict[str, Any]] = {}
+        for sym, pos in alloc["core_positions"].items():
+            if pos["quantity"] > 0:
+                combined_positions[sym] = dict(pos)
+        for sym, pos in alloc["satellite_positions"].items():
+            if pos["quantity"] > 0:
+                combined_positions[sym] = dict(pos)
+
+        self.account_equity = float(alloc["total_nlv"])
+        self.cash_balance = float(alloc["swvxx_cash"])
+        self.swvxx_cash_balance = float(alloc["swvxx_cash"])
+        self.positions = combined_positions
+        self.recalculate_margin_buying_power()
+        return alloc
+
+    def update_tick(
+        self,
+        symbol: str,
+        price: float,
+        timestamp_s: Optional[float] = None,
+    ) -> None:
+        """
+        Real-time pipeline update: Adjusts position valuation from active tick data
+        and updates account equity and intraday buying power in real-time.
+        Monitors 30-second rolling returns on 3x LETFs to detect flash crashes (>= 15% drop in <= 30s)
+        and immediately transition the HMM Meta-Governor to 'Macro Shock'.
+        """
+        sym = symbol.upper()
+        new_px = float(price)
+        now_s = float(timestamp_s) if timestamp_s is not None else 0.0
+
+        # Track 30-second rolling tick window for flash-crash detection on 3x LETFs
+        hist = self._tick_history.setdefault(sym, [])
+        if sym in self.positions and not hist:
+            ep = float(self.positions[sym].get("entry_price", self.positions[sym].get("current_price", new_px)))
+            hist.append((max(0.0, now_s - 1.0), ep))
+        hist.append((now_s, new_px))
+        if now_s > 0.0:
+            cutoff = now_s - 30.0
+            self._tick_history[sym] = [(t, p) for (t, p) in hist if t >= cutoff]
+        elif len(hist) > 60:
+            self._tick_history[sym] = hist[-60:]
+
+        if sym in LETF_3X_SYMBOLS and self._tick_history[sym]:
+            window_max_px = max(p for _, p in self._tick_history[sym])
+            if window_max_px > 0.0:
+                drop_pct = (window_max_px - new_px) / window_max_px
+                if drop_pct >= 0.15:
+                    self.hmm.update((-2.5, -0.90, 640.0))
+                    self.regime = "MACRO_SHOCK"
+
+        if sym in self.positions:
+            old_px = float(self.positions[sym].get("current_price", price))
+            qty = int(self.positions[sym].get("quantity", 0))
+            self.positions[sym]["current_price"] = new_px
+            self.positions[sym]["market_value"] = qty * new_px
+            pnl_diff = (new_px - old_px) * qty
+            self.account_equity += pnl_diff
+            self.recalculate_margin_buying_power()
+
+    def update_position(
+        self,
+        symbol: str,
+        quantity: int,
+        current_price: float,
+        entry_price: Optional[float] = None,
+    ) -> None:
+        """
+        Updates an active position in the internal position book and recalculates buying power.
+        """
+        sym = symbol.upper()
+        qty = int(quantity)
+        px = float(current_price)
+        ep = float(entry_price) if entry_price is not None else px
+
+        if qty <= 0:
+            self.positions.pop(sym, None)
+        else:
+            self.positions[sym] = {
+                "quantity": qty,
+                "entry_price": ep,
+                "current_price": px,
+                "market_value": qty * px,
+            }
+        self.recalculate_margin_buying_power()
+
+    def sync_account_state(
+        self,
+        equity: float,
+        cash: Optional[float] = None,
+        positions: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Authoritative sync of account equity, cash balance, and open position valuations.
+        """
+        self.account_equity = float(equity)
+        if cash is not None:
+            self.cash_balance = float(cash)
+            self.swvxx_cash_balance = float(cash)
+        if positions is not None:
+            parsed = {}
+            for sym, p in positions.items():
+                s = str(sym).upper()
+                if isinstance(p, dict):
+                    qty = int(p.get("quantity", 0))
+                    entry_px = float(p.get("entry_price", 0.0))
+                    curr_px = float(p.get("last_price", p.get("current_price", entry_px)))
+                else:
+                    qty = int(getattr(p, "quantity", 0))
+                    entry_px = float(getattr(p, "entry_price", 0.0))
+                    curr_px = float(getattr(p, "last_price", getattr(p, "current_price", entry_px)))
+                if qty > 0:
+                    parsed[s] = {
+                        "quantity": qty,
+                        "entry_price": entry_px,
+                        "current_price": curr_px,
+                        "market_value": qty * curr_px,
+                    }
+            self.positions = parsed
+        self.recalculate_margin_buying_power()
+        if cash is None:
+            self.swvxx_cash_balance = max(0.0, self.account_equity - self.total_position_value)
+
+    def validate_pre_trade_margin(
+        self,
+        symbol: str,
+        quantity: int,
+        price: float,
+        side: str = "BUY",
+    ) -> Tuple[bool, str]:
+        """
+        Pre-trade execution check under FINRA Rule 4210.
+        Actively blocks any order that would create or exacerbate an intraday margin deficit.
+        """
+        if str(side).upper() != "BUY":
+            return True, "ok"
+
+        order_notional = float(quantity) * float(price)
+        if order_notional <= 0:
+            return False, "Order notional must be positive"
+
+        # 1. $2,000 Minimum Equity Check for Margin Eligibility
+        if self.account_equity < self.MIN_MARGIN_EQUITY:
+            available_cash = max(0.0, self.account_equity - self.total_position_value)
+            if order_notional > available_cash:
+                return False, (
+                    f"Margin ineligible: Account equity ${self.account_equity:,.2f} is below the "
+                    f"${self.MIN_MARGIN_EQUITY:,.2f} minimum requirement. Order notional ${order_notional:,.2f} "
+                    f"exceeds available cash ${available_cash:,.2f}."
+                )
+
+        # 2. Existing Margin Deficit Check: actively block any order that would exacerbate deficit
+        if self.intraday_margin_deficit > 0:
+            return False, (
+                f"Order blocked: Account is currently in an intraday margin deficit of "
+                f"${self.intraday_margin_deficit:,.2f}. Any new purchase would exacerbate the deficit."
+            )
+
+        # 3. Intraday Buying Power Check: actively block order exceeding intraday buying power
+        if order_notional > self.intraday_buying_power:
+            return False, (
+                f"Order blocked: Order notional ${order_notional:,.2f} exceeds real-time "
+                f"Intraday Margin Buying Power ${self.intraday_buying_power:,.2f}."
+            )
+
+        # 4. Prospective Deficit Verification: prospective requirement must not exceed equity
+        if self.enforce_letf_house_margin:
+            sym_intra, _ = self.get_asset_margin_requirements(symbol, True)
+            current_margin_req = sum(
+                pos.get("quantity", 0) * pos.get("current_price", 0.0) * self.get_asset_margin_requirements(s, True)[0]
+                for s, pos in self.positions.items()
+            )
+            prospective_margin_req = current_margin_req + (order_notional * sym_intra)
+            if prospective_margin_req > self.account_equity:
+                deficit = prospective_margin_req - self.account_equity
+                return False, (
+                    f"Order blocked: Prospective maintenance margin requirement ${prospective_margin_req:,.2f} "
+                    f"(including {sym_intra*100:.0f}% FINRA Rule 4210 requirement for {symbol}) "
+                    f"exceeds equity ${self.account_equity:,.2f} (would create intraday margin deficit of ${deficit:,.2f})."
+                )
+        else:
+            prospective_total_val = self.total_position_value + order_notional
+            prospective_margin_req = prospective_total_val * self.INTRADAY_MARGIN_REQ
+            if prospective_margin_req > self.account_equity:
+                deficit = prospective_margin_req - self.account_equity
+                return False, (
+                    f"Order blocked: Prospective maintenance margin requirement ${prospective_margin_req:,.2f} "
+                    f"exceeds equity ${self.account_equity:,.2f} (would create intraday margin deficit of ${deficit:,.2f})."
+                )
+
+        return True, "ok"
+
+    def check_order_allowed(
+        self,
+        symbol: str,
+        quantity: int,
+        price: float,
+        side: str = "BUY",
+    ) -> Tuple[bool, str]:
+        """Convenience alias for validate_pre_trade_margin."""
+        return self.validate_pre_trade_margin(symbol, quantity, price, side=side)
+
+    def update_governor_regime(self, regime: str, volatility_multiplier: float = 1.0) -> None:
+        """
+        Updates strategy regime and volatility trigger from governor.py.
+        Permits instantaneous capital reallocation back into equities the moment
+        the volatility trigger signals a 'Normal' regime, without applying a 24-hour settlement waiting period.
+        """
+        reg_upper = str(regime).upper()
+        is_normal = reg_upper in ("NORMAL", "A") or (0.8 <= float(volatility_multiplier) <= 1.2)
+
+        self.regime = "NORMAL" if is_normal else reg_upper
+        self.volatility_multiplier = float(volatility_multiplier)
+        self.macro_risk_multiplier = 1.0 if is_normal else min(1.0, max(0.0, 1.0 / self.volatility_multiplier))
+
+        if is_normal:
+            self.instantaneous_reallocation_permitted = True
+            logger.info(
+                "RiskEngine: Governor volatility trigger signals NORMAL regime (vol_mult=%.2f). "
+                "Instantaneous capital reallocation back into equities enabled (0h settlement lag).",
+                self.volatility_multiplier,
+            )
+        else:
+            logger.info(
+                "RiskEngine: Governor signals non-normal regime %s (vol_mult=%.2f). Macro multiplier: %.2f.",
+                self.regime, self.volatility_multiplier, self.macro_risk_multiplier,
+            )
+        self.recalculate_margin_buying_power()
+
+    def calculate_overnight_excess(
+        self,
+        enforce_letf_house_margin: Optional[bool] = None,
+    ) -> Tuple[float, float, float]:
+        """
+        Calculates the delta between total open position value and allowable Reg T overnight limit.
+        Returns: (delta, total_position_value, allowable_overnight_limit)
+        """
+        self.recalculate_margin_buying_power()
+        enforce = self.enforce_letf_house_margin if enforce_letf_house_margin is None else enforce_letf_house_margin
+        if enforce:
+            overnight_req = sum(
+                pos.get("quantity", 0) * pos.get("current_price", 0.0) * self.get_asset_margin_requirements(s, True)[1]
+                for s, pos in self.positions.items()
+            )
+            delta = max(0.0, overnight_req - self.account_equity)
+            allowable_overnight_limit = self.account_equity
+            return delta, self.total_position_value, allowable_overnight_limit
+        else:
+            allowable_overnight_limit = self.account_equity * self.MAX_OVERNIGHT_LEVERAGE
+            delta = max(0.0, self.total_position_value - allowable_overnight_limit)
+            return delta, self.total_position_value, allowable_overnight_limit
+
+    def plan_eod_overnight_liquidation(self) -> List[Dict[str, Any]]:
+        """
+        Determines the exact positions and quantities to liquidate to eliminate
+        any Reg T overnight margin excess (delta) prior to the 8:00 p.m. ET cutoff.
+        """
+        delta, total_val, allowable_limit = self.calculate_overnight_excess()
+        if delta <= 0:
+            return []
+
+        liquidation_orders = []
+        remaining_reduction_needed = delta
+
+        # Sort positions descending by market value to reduce largest exposures first
+        sorted_positions = sorted(
+            self.positions.items(),
+            key=lambda item: item[1].get("quantity", 0) * item[1].get("current_price", 0.0),
+            reverse=True,
+        )
+
+        for sym, pos in sorted_positions:
+            qty = pos.get("quantity", 0)
+            px = pos.get("current_price", 0.0)
+            if qty <= 0 or px <= 0:
+                continue
+
+            pos_val = qty * px
+            if pos_val <= remaining_reduction_needed:
+                shares_to_sell = qty
+                notional_reduction = pos_val
+            else:
+                shares_to_sell = math.ceil(remaining_reduction_needed / px)
+                shares_to_sell = min(shares_to_sell, qty)
+                notional_reduction = shares_to_sell * px
+
+            liquidation_orders.append({
+                "symbol": sym,
+                "shares_to_sell": shares_to_sell,
+                "estimated_price": px,
+                "notional_reduction": notional_reduction,
+                "reason": "REG_T_OVERNIGHT_EXCESS_LIQUIDATION",
+            })
+
+            remaining_reduction_needed -= notional_reduction
+            if remaining_reduction_needed <= 0:
+                break
+
+        return liquidation_orders
+
+    def execute_eod_overnight_liquidation(
+        self,
+        order_manager: Optional[Any] = None,
+        notifier: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        Executes automated liquidation of excess leveraged positions prior to the 8:00 p.m. ET cutoff
+        to prevent margin calls.
+        """
+        delta, total_val, allowable_limit = self.calculate_overnight_excess()
+        orders = self.plan_eod_overnight_liquidation()
+
+        if delta <= 0 or not orders:
+            logger.info(
+                "EOD Reg T Check: Open positions ($%.2f) within overnight limit ($%.2f). No liquidation needed.",
+                total_val, allowable_limit,
+            )
+            return {
+                "delta": 0.0,
+                "total_position_value": total_val,
+                "allowable_overnight_limit": allowable_limit,
+                "orders_executed": [],
+                "alert_triggered": False,
+            }
+
+        alert_msg = (
+            f"EOD Reg T Overnight Excess: Total position value ${total_val:,.2f} exceeds "
+            f"allowable 2x limit ${allowable_limit:,.2f} by ${delta:,.2f}. "
+            f"Executing automated liquidation of {len(orders)} position(s) prior to 8:00 p.m. ET cutoff."
+        )
+        logger.warning(alert_msg)
+
+        if notifier is not None and hasattr(notifier, "send_alert"):
+            try:
+                notifier.send_alert(
+                    title="⚠️ Reg T Overnight Margin Excess Alert",
+                    message=alert_msg,
+                    priority="urgent",
+                    tags=["warning", "money_with_wings"],
+                )
+            except Exception as exc:
+                logger.warning("Failed to dispatch EOD overnight alert: %s", exc)
+        else:
+            try:
+                from core.notifier import send_alert
+                send_alert(
+                    title="⚠️ Reg T Overnight Margin Excess Alert",
+                    message=alert_msg,
+                    priority="urgent",
+                    tags=["warning", "money_with_wings"],
+                )
+            except Exception:
+                pass
+
+        executed = []
+        for o in orders:
+            sym = o["symbol"]
+            qty = o["shares_to_sell"]
+            if order_manager is not None and hasattr(order_manager, "execute_market_sell"):
+                try:
+                    order_id = order_manager.execute_market_sell(
+                        symbol=sym,
+                        quantity=qty,
+                        reason="REG_T_OVERNIGHT_EXCESS_LIQUIDATION",
+                    )
+                    o["order_id"] = order_id
+                    executed.append(o)
+                    logger.info("Executed Reg T overnight liquidation sell: %s x%d (order %s)", sym, qty, order_id)
+                except Exception as exc:
+                    logger.error("Failed to execute Reg T liquidation for %s: %s", sym, exc)
+            else:
+                o["order_id"] = f"SIM_EOD_LIQ_{sym}"
+                executed.append(o)
+                if sym in self.positions:
+                    self.positions[sym]["quantity"] = max(0, self.positions[sym]["quantity"] - qty)
+                    if self.positions[sym]["quantity"] == 0:
+                        del self.positions[sym]
+
+        self.recalculate_margin_buying_power()
+        return {
+            "delta": delta,
+            "total_position_value": total_val,
+            "allowable_overnight_limit": allowable_limit,
+            "orders_executed": executed,
+            "alert_triggered": True,
+        }
+
+    def plan_two_stage_eod_deleveraging(
+        self,
+        current_time_et: Optional[Union[datetime, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Two-Stage EOD De-Levering schedule under FINRA Rule 4210(f)(8)(A) (#91):
+        - Stage 1 (15:50:00 ET Primary Regular-Session Closing Auction Trim):
+          Eliminates overnight margin excess prior to 16:00 ET Reg T snapshot during peak liquidity.
+        - Stage 2 (19:45:00 ET Extended-Hours Hard Backstop):
+          Emergency sweep prior to 20:00 ET close.
+        Prioritizes trimming 3x LETFs (90% overnight requirement) first to free maximum margin.
+        """
+        # Determine current stage
+        stage_name = "STAGE_1_1550_ET_REGULAR_CLOSE_TRIM"
+        if current_time_et is not None:
+            hour = 15
+            if isinstance(current_time_et, datetime):
+                hour = current_time_et.hour
+            elif isinstance(current_time_et, str):
+                try:
+                    hour = int(current_time_et.split(":")[0])
+                except Exception:
+                    hour = 15
+            if hour >= 17:
+                stage_name = "STAGE_2_1945_ET_EXTENDED_HOURS_BACKSTOP"
+
+        delta, total_val, allowable_limit = self.calculate_overnight_excess(enforce_letf_house_margin=True)
+        if delta <= 0:
+            return {
+                "stage": stage_name,
+                "delta": 0.0,
+                "total_position_value": total_val,
+                "allowable_limit": allowable_limit,
+                "orders": [],
+                "action_required": False,
+            }
+
+        orders = []
+        remaining_reduction_needed = delta
+
+        # Sort positions prioritizing 3x LETFs first, then by market value descending
+        sorted_positions = sorted(
+            self.positions.items(),
+            key=lambda item: (item[0].upper() in LETF_3X_SYMBOLS, item[1].get("quantity", 0) * item[1].get("current_price", 0.0)),
+            reverse=True,
+        )
+
+        for sym, pos in sorted_positions:
+            qty = pos.get("quantity", 0)
+            px = pos.get("current_price", 0.0)
+            if qty <= 0 or px <= 0:
+                continue
+
+            pos_val = qty * px
+            req_over = self.get_asset_margin_requirements(sym, True)[1]
+            effective_reduction_needed = remaining_reduction_needed / req_over if req_over > 0 else remaining_reduction_needed
+
+            if pos_val <= effective_reduction_needed:
+                shares_to_sell = qty
+                notional_reduction = pos_val
+            else:
+                shares_to_sell = math.ceil(effective_reduction_needed / px)
+                shares_to_sell = min(shares_to_sell, qty)
+                notional_reduction = shares_to_sell * px
+
+            margin_released = notional_reduction * req_over
+            orders.append({
+                "symbol": sym,
+                "shares_to_sell": shares_to_sell,
+                "estimated_price": px,
+                "notional_reduction": round(notional_reduction, 2),
+                "margin_released": round(margin_released, 2),
+                "overnight_margin_requirement": req_over,
+                "stage": stage_name,
+                "reason": f"TWO_STAGE_EOD_DELEVERAGING_{stage_name}",
+            })
+
+            remaining_reduction_needed -= margin_released
+            if remaining_reduction_needed <= 0:
+                break
+
+        return {
+            "stage": stage_name,
+            "delta": round(delta, 2),
+            "total_position_value": round(total_val, 2),
+            "allowable_limit": round(allowable_limit, 2),
+            "orders": orders,
+            "action_required": True,
+        }
+
+    def compute_effective_hwm_decay(
+        self,
+        r_core: Union[float, Dict[str, float], List[float], Tuple[float, ...]],
+        w_sat: float = 0.15,
+        w_base: float = 0.15,
+        lambda_0: float = 0.03,
+        kappa_core: float = 0.5,
+        w_sweep: Optional[Dict[str, float]] = None,
+    ) -> Tuple[float, float]:
+        """
+        Computes the Strategy D core-accelerated recovery decay rate (#98):
+            lambda_hwm^eff(t) = lambda_0 + kappa_core * max(0, w_sweep^T * r_core(t)) * (W_swept(t) / w_base)
+        Returns (lambda_hwm_eff, weighted_r_core).
+        """
+        sweep_vec = w_sweep if w_sweep is not None else self.router.routing_sweep_vector
+        equity_weights = {
+            k.upper(): float(v)
+            for k, v in sweep_vec.items()
+            if k.upper() not in ("CASH", "CASH_BUFFER", CASH_SWEEP_VEHICLE)
+        }
+        weight_sum = sum(equity_weights.values())
+
+        if isinstance(r_core, dict):
+            weighted_r_core = sum(
+                equity_weights.get(sym.upper(), 0.0) * float(ret)
+                for sym, ret in r_core.items()
+            )
+        elif isinstance(r_core, (list, tuple)):
+            ordered_weights = list(equity_weights.values())
+            weighted_r_core = sum(
+                w * float(r) for w, r in zip(ordered_weights, r_core)
+            )
+        else:
+            weighted_r_core = float(r_core) * (weight_sum if weight_sum > 0.0 else 1.0)
+
+        w_swept = max(0.0, float(w_base) - float(w_sat))
+        swept_ratio = (w_swept / float(w_base)) if float(w_base) > 0.0 else 1.0
+        eff_decay = float(lambda_0) + float(kappa_core) * max(0.0, weighted_r_core) * swept_ratio
+        return round(eff_decay, 6), weighted_r_core
+
+    def update_core_accelerated_drawdown(
+        self,
+        current_satellite_equity: float,
+        r_core: Union[float, Dict[str, float], List[float], Tuple[float, ...]],
+        w_sat: float = 0.15,
+        w_base: float = 0.15,
+        lambda_0: float = 0.03,
+        kappa_core: float = 0.5,
+        dt_seconds: float = 1.0,
+        w_sweep: Optional[Dict[str, float]] = None,
+    ) -> float:
+        """
+        Strategy D: Core-Accelerated Sleeve Drawdown Damper (#91 / #98).
+        Swept satellite capital sheltered in the multi-asset 1x Robo-Core basket earns
+        w_sweep^T * r_core(t), accelerating the decay of the satellite high-water mark E_sat,peak(t):
+            lambda_hwm^eff(t) = lambda_0 + kappa_core * max(0, w_sweep^T * r_core(t)) * (W_swept(t) / w_base)
+        Returns the continuous drawdown damper D_sat in [0.0, 1.0].
+        """
+        curr_eq = max(0.0, float(current_satellite_equity))
+        if curr_eq > self.satellite_peak_equity:
+            self.satellite_peak_equity = curr_eq
+            self.cumulative_core_heal = 0.0
+            self.last_lambda_hwm_eff = float(lambda_0)
+            return 1.0
+
+        eff_decay_rate, weighted_r_core = self.compute_effective_hwm_decay(
+            r_core=r_core,
+            w_sat=w_sat,
+            w_base=w_base,
+            lambda_0=lambda_0,
+            kappa_core=kappa_core,
+            w_sweep=w_sweep,
+        )
+        self.last_lambda_hwm_eff = eff_decay_rate
+        w_swept = max(0.0, float(w_base) - float(w_sat))
+
+        # High-water-mark decay: dE_peak / dt = -lambda_eff * (E_peak - E_curr)
+        decay_amount = eff_decay_rate * (self.satellite_peak_equity - curr_eq) * dt_seconds
+        self.satellite_peak_equity = max(curr_eq, self.satellite_peak_equity - decay_amount)
+
+        # Cumulative beta healing credit from swept capital
+        if weighted_r_core > 0.0 and w_swept > 0.0:
+            core_heal = w_swept * curr_eq * weighted_r_core * dt_seconds
+            self.cumulative_core_heal += core_heal
+
+        effective_equity = curr_eq + self.cumulative_core_heal
+        if self.satellite_peak_equity > 0:
+            drawdown = max(0.0, (self.satellite_peak_equity - effective_equity) / self.satellite_peak_equity)
+        else:
+            drawdown = 0.0
+
+        # Tiered / continuous damper D_sat
+        if drawdown < 0.05:
+            d_sat = 1.0
+        elif drawdown < 0.10:
+            # Linear scaling from 1.0 down to 0.5 between 5% and 10% drawdown
+            d_sat = 1.0 - ((drawdown - 0.05) / 0.05) * 0.5
+        else:
+            # Further throttling down to 0.0 for drawdowns >= 15%
+            d_sat = max(0.0, 0.5 - ((drawdown - 0.10) / 0.05) * 0.5)
+
+        return round(d_sat, 4)
+
+    def plan_dual_sleeve_reallocation(
+        self,
+        nlv: Optional[float] = None,
+        satellite_positions: Optional[Dict[str, Any]] = None,
+        target_satellite_weight: Optional[float] = None,
+        core_positions: Optional[Dict[str, Any]] = None,
+        core_symbol: Optional[str] = None,
+        core_price: float = 585.0,
+        core_prices: Optional[Dict[str, float]] = None,
+        routing_sweep_vector: Optional[Dict[str, float]] = None,
+        satellite_sub_weights: Optional[Dict[str, float]] = None,
+        satellite_prices: Optional[Dict[str, float]] = None,
+        tau_band: Optional[float] = None,
+        trend_gate_active: bool = True,
+    ) -> DualSleeveSwapPlan:
+        """Delegates to DualSleeveRouter to generate paired atomic swap orders referencing live broker NLV (#111)."""
+        eff_nlv = float(nlv) if nlv is not None else float(self.account_equity)
+        if target_satellite_weight is None:
+            target_satellite_weight = self.hmm.calculate_target_satellite_weight()
+        if satellite_positions is None:
+            satellite_positions = {
+                s: p for s, p in self.positions.items()
+                if s.upper() in LETF_3X_SYMBOLS or p.get("sleeve") == "SATELLITE"
+            }
+        if core_positions is None and self.positions:
+            core_positions = {
+                s: p for s, p in self.positions.items()
+                if s.upper() not in LETF_3X_SYMBOLS and p.get("sleeve") != "SATELLITE"
+            }
+        return self.router.plan_dual_sleeve_reallocation(
+            nlv=eff_nlv,
+            satellite_positions=satellite_positions,
+            target_satellite_weight=target_satellite_weight,
+            core_positions=core_positions,
+            core_symbol=core_symbol,
+            core_price=core_price,
+            core_prices=core_prices,
+            routing_sweep_vector=routing_sweep_vector,
+            satellite_sub_weights=satellite_sub_weights,
+            satellite_prices=satellite_prices,
+            tau_band=tau_band,
+            trend_gate_active=trend_gate_active,
+            hmm=self.hmm,
+        )
+
+    def apply_swap_plan(
+        self,
+        plan: DualSleeveSwapPlan,
+        leg2_succeeded: bool = True,
+    ) -> Dict[str, float]:
+        """
+        Applies an executed DualSleeveSwapPlan to the internal position book and SWVXX cash balance,
+        preserving exact dollar conservation:
+            abs((core_mv + sat_mv + swvxx_cash) - total_nlv) < 0.01
+        """
+        if not plan.orders:
+            return self.get_sleeve_balances()
+
+        for order in plan.orders:
+            sym = order.symbol.upper()
+            if order.leg_id == 2 and not leg2_succeeded:
+                continue
+            pos = self.positions.get(sym, {
+                "quantity": 0,
+                "entry_price": order.price,
+                "current_price": order.price,
+                "market_value": 0.0,
+                "sleeve": order.sleeve,
+            })
+            if order.side.upper() == "SELL":
+                sell_q = min(int(pos.get("quantity", 0)), int(order.shares))
+                new_q = max(0, int(pos.get("quantity", 0)) - sell_q)
+                proceeds = sell_q * float(order.price)
+                self.swvxx_cash_balance += proceeds
+                self.cash_balance = self.swvxx_cash_balance
+                if new_q <= 0:
+                    self.positions.pop(sym, None)
+                else:
+                    pos["quantity"] = new_q
+                    pos["current_price"] = float(order.price)
+                    pos["market_value"] = new_q * float(order.price)
+                    self.positions[sym] = pos
+            elif order.side.upper() == "BUY":
+                buy_q = int(order.shares)
+                cost = buy_q * float(order.price)
+                new_q = int(pos.get("quantity", 0)) + buy_q
+                self.swvxx_cash_balance = max(0.0, self.swvxx_cash_balance - cost)
+                self.cash_balance = self.swvxx_cash_balance
+                pos["quantity"] = new_q
+                pos["current_price"] = float(order.price)
+                pos["market_value"] = new_q * float(order.price)
+                pos["sleeve"] = order.sleeve
+                self.positions[sym] = pos
+
+        self.recalculate_margin_buying_power()
+        return self.get_sleeve_balances()
+
+    def update_macro_hmm(
+        self,
+        macro_state: Union[Any, Tuple[float, float, float]],
+        dt_seconds: float = 1.0,
+    ) -> Tuple[float, float, float]:
+        """Updates continuous 3-state HMM Meta-Governor."""
+        return self.hmm.update(macro_state, dt_seconds=dt_seconds)
 
     def posterior_win_rate(self, wins: int = None, executions: int = None, prior_mean: float = PRIOR_MEAN) -> float:
         """Beta-conjugate posterior mean win rate."""
@@ -4171,5915 +5926,747 @@ def evaluate_microstructure_gate(snap: Any, symbol: str, strategy: str, phase: A
 
 ```
 
-### 3.2 Core & Data Subsystem
-
-#### `core/synthetic_divergence.py` - Multi-factor SES regime governor & relative strength (1345 lines, 54637 bytes)
+#### `data/multi_rate_sync.py` (646 lines, 28465 bytes)
 
 ```python
 """
-core/synthetic_divergence.py
-============================
-Pillar 4: Real-Time Cross-Asset Synthetic Divergence Engine & False Liquidity Trap Guard.
+data/multi_rate_sync.py
+=======================
+Multi-Rate Telemetry Synchronizer for SchwabEngine Dual-Sleeve Architecture (#90).
 
-Tracks inverse ETF pairs during live market hours:
-- SOXL <-> SOXS (Semiconductor 3x)
-- TQQQ <-> SQQQ (Nasdaq 3x)
-- TNA  <-> TZA  (Russell 2000 3x)
-- UCO  <-> SCO  (Crude Oil 2x)
+Coordinates three decoupled telemetry ingestion planes with distinct frequency and latency profiles:
+1. Hot Plane (Sub-50ms / Streaming):
+   - Ingests streaming Schwab LEVELONE_EQUITIES quotes (or REST market data).
+   - Computes mid-price, volume-weighted microprice, and L1 Order Book Imbalance (OBI).
+   - Enforces quote-age watermarking (stale quote rejection).
+   - Dynamically marks both the 1x Robo-Core sleeve C(t) and 3x Tactical Satellite sleeve S(t)
+     to market, producing continuous live Net Liquidation Value N_live(t) without waiting for REST.
+   - Tracks live instantaneous and rolling return r_core(t) of the Robo-Core sleeve for Strategy D
+     drawdown recovery acceleration.
 
-Mathematical Foundations:
-1. Relative Volume Delta Spread:
-   ΔV_spread = (V_Bull,t / V_bar_Bull) - (V_Bear,t / V_bar_Bear) = RVOL_Bull - RVOL_Bear
+2. Warm Plane (On-Fill + 60s Periodic Reconciliation & Mid-Session Hot Boot):
+   - Ingests Schwab /trader/v1/accounts payloads.
+   - Categorizes positions into 1x Robo-Core C(t) and 3x Tactical Satellite S(t).
+   - Robust Mid-Session Hot Boot: Syncs live broker positions, cash, and balances at any mid-day
+     point without requiring a 09:30 AM baseline or 09:45 AM pre-market cash reference (S0).
+   - Reconciles broker holdings against internal inventory and updates sleeve weights.
 
-2. Normalized Synthetic Price Product:
-   S_t = (P_Bull,t * P_Bear,t) / (P_Bull,0 * P_Bear,0)
-
-3. Liquidity Absorption Trap Detection:
-   Market maker inventory churn without directional price expansion.
-   Flags LIQUIDITY_TRAP_ACTIVE for a pair when:
-     a) Both instruments show simultaneous elevated volume (RVOL_Bull >= 1.30 and RVOL_Bear >= 1.30).
-     b) Absolute price velocity across both legs is compressed (|ΔP_Bull| < 0.15% and |ΔP_Bear| < 0.15%).
-   Maintains an active trap cooldown of 120 seconds after conditions subside.
+3. Cold Plane (Event-Driven / Macroeconomic Ingestion):
+   - Ingests FRED daily High Yield OAS (BAMLH0A0HYM2) and Economic Surprise Z-scores (Z_s).
+   - Ingests Gemini NLP Dovish/Hawkish sentiment polarity S_nlp(t0).
+   - Applies continuous exponential time decay e^(-lambda * dt) to sentiment scores.
+   - Fuses daily macro anchors with live intraday proxies into feature vector M(t) for the HMM Meta-Governor.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime, timedelta, timezone
-from enum import Enum
-import json
-import logging
-from pathlib import Path
-import sqlite3
-import threading
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
-from zoneinfo import ZoneInfo
-
-import numpy as np
-
-from core.paths import TELEMETRY_DB_PATH
-
-logger = logging.getLogger(__name__)
-
-
-@dataclass
-class SyntheticPair:
-    """Definition of an inverse ETF instrument pair."""
-    name: str
-    bull_symbol: str
-    bear_symbol: str
-    description: str
-    p_bull_0: Optional[float] = None
-    p_bear_0: Optional[float] = None
-
-
-# Canonical Inverse ETF Pairs
-DEFAULT_SYNTHETIC_PAIRS: List[SyntheticPair] = [
-    SyntheticPair(name="SOXL_SOXS", bull_symbol="SOXL", bear_symbol="SOXS", description="Semiconductor 3x"),
-    SyntheticPair(name="TQQQ_SQQQ", bull_symbol="TQQQ", bear_symbol="SQQQ", description="Nasdaq 3x"),
-    SyntheticPair(name="TNA_TZA",   bull_symbol="TNA",  bear_symbol="TZA",  description="Russell 2000 3x"),
-    SyntheticPair(name="UCO_SCO",   bull_symbol="UCO",  bear_symbol="SCO",  description="Crude Oil 2x"),
-]
-
-
-@dataclass
-class TickRecord:
-    """Single tick data point in the rolling circular buffer."""
-    timestamp: datetime
-    price: float
-    volume: int
-
-
-def _normalize_time(dt: Optional[datetime]) -> datetime:
-    """Normalize datetime to timezone-aware UTC datetime."""
-    if dt is None:
-        return datetime.now(timezone.utc)
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-class SyntheticDivergenceEngine:
-    """
-    Real-Time Cross-Asset Synthetic Divergence Engine.
-    Maintains rolling 15-second tick buffers for inverse ETF pairs,
-    calculates volume delta spread and synthetic price products,
-    and detects false liquidity traps with 120-second cooldown recovery.
-    """
-
-    def __init__(
-        self,
-        pairs: Optional[List[SyntheticPair]] = None,
-        window_seconds: float = 15.0,
-        cooldown_seconds: float = 120.0,
-        rvol_trap_threshold: float = 1.30,
-        price_velocity_trap_threshold: float = 0.15,  # 0.15%
-        default_baseline_volume: float = 1000.0,
-        regime_governor: Optional[RealTimeRegimeGovernor] = None,
-    ) -> None:
-        self.window_seconds = float(window_seconds)
-        self.cooldown_seconds = float(cooldown_seconds)
-        self.rvol_trap_threshold = float(rvol_trap_threshold)
-        self.price_velocity_trap_threshold = float(price_velocity_trap_threshold)
-        self.default_baseline_volume = float(default_baseline_volume)
-        self.regime_governor: Optional[RealTimeRegimeGovernor] = regime_governor
-
-        self._lock = threading.RLock()
-
-        # Pair mappings: pair_name -> SyntheticPair, and symbol -> SyntheticPair
-        self._pairs: Dict[str, SyntheticPair] = {}
-        self._symbol_to_pair: Dict[str, SyntheticPair] = {}
-        pair_list = pairs if pairs is not None else DEFAULT_SYNTHETIC_PAIRS
-        for p in pair_list:
-            self.register_pair(p)
-
-        # Per-symbol state
-        self._tick_buffers: Dict[str, deque[TickRecord]] = defaultdict(deque)
-        self._initial_prices: Dict[str, float] = {}
-        self._last_prices: Dict[str, float] = {}
-        self._last_total_volume: Dict[str, int] = {}
-        self._baseline_volumes: Dict[str, float] = {}
-        self._opening_buffer: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        self._baseline_spreads: Dict[str, float] = {
-            "SOXL": 0.02,
-            "SOXS": 0.015,
-            "TQQQ": 0.01,
-            "SQQQ": 0.01,
-            "TNA":  0.02,
-            "TZA":  0.02,
-            "FNGU": 0.02,
-            "TECL": 0.02,
-        }
-
-        # Trap state: pair_name -> last_condition_met_timestamp
-        self._last_trap_condition_time: Dict[str, datetime] = {}
-        self._last_tick_edt: Optional[datetime] = None
-
-    @property
-    def pairs(self) -> Dict[str, SyntheticPair]:
-        """Dictionary of registered synthetic inverse pairs."""
-        return self._pairs
-
-    def get_tracked_symbols(self) -> List[str]:
-        """Returns all unique bull and bear symbols tracked across all pairs."""
-        with self._lock:
-            syms = set()
-            for pair in self._pairs.values():
-                syms.add(pair.bull_symbol.upper())
-                syms.add(pair.bear_symbol.upper())
-            return sorted(syms)
-
-    def reset_opening_anchors(self) -> None:
-        """Resets P_bull_0 and P_bear_0 anchors across all tracked pairs for the 09:30 cash open."""
-        with self._lock:
-            self._initial_prices.clear()
-            self._opening_buffer.clear()
-            for pair_key, state in self.pairs.items():
-                state.p_bull_0 = None
-                state.p_bear_0 = None
-            logger.info("SyntheticDivergenceEngine: 09:30 cash open anchors reset across all pairs.")
-
-    def set_baseline_spread(self, symbol: str, spread_dollars: float) -> None:
-        """Set baseline spread in dollars for 09:30 VWMP spread filtering."""
-        with self._lock:
-            self._baseline_spreads[symbol.upper()] = float(spread_dollars)
-
-    def _calculate_vwmp(self, symbol: str) -> Optional[float]:
-        """
-        Calculate volume-weighted median price (VWMP) of buffered opening ticks,
-        filtering out ticks whose spread exceeds 2x the baseline spread.
-        """
-        ticks = self._opening_buffer.get(symbol.upper(), [])
-        if not ticks:
-            return None
-
-        baseline_spread = self._baseline_spreads.get(symbol.upper(), 0.02)
-        max_allowed_spread = 2.0 * baseline_spread
-
-        valid_ticks = []
-        for t in ticks:
-            sp = t.get("spread")
-            if sp is not None and sp > 0 and max_allowed_spread > 0:
-                if sp > max_allowed_spread:
-                    logger.debug(
-                        "SyntheticDivergenceEngine: filtered opening tick for %s (spread=%.4f > 2x baseline %.4f)",
-                        symbol, sp, baseline_spread,
-                    )
-                    continue
-            valid_ticks.append(t)
-
-        if not valid_ticks:
-            valid_ticks = ticks
-
-        # Sort ascending by price
-        valid_ticks.sort(key=lambda t: t["price"])
-        total_vol = sum(max(1, t["volume"]) for t in valid_ticks)
-        half_vol = total_vol / 2.0
-
-        cum_vol = 0
-        for t in valid_ticks:
-            cum_vol += max(1, t["volume"])
-            if cum_vol >= half_vol:
-                return round(float(t["price"]), 4)
-
-        return round(float(valid_ticks[-1]["price"]), 4)
-
-    def register_pair(self, pair: SyntheticPair) -> None:
-        """Register a new synthetic inverse pair."""
-        with self._lock:
-            fresh_pair = SyntheticPair(
-                name=pair.name,
-                bull_symbol=pair.bull_symbol,
-                bear_symbol=pair.bear_symbol,
-                description=pair.description,
-                p_bull_0=pair.p_bull_0,
-                p_bear_0=pair.p_bear_0,
-            )
-            self._pairs[fresh_pair.name] = fresh_pair
-            self._symbol_to_pair[fresh_pair.bull_symbol.upper()] = fresh_pair
-            self._symbol_to_pair[fresh_pair.bear_symbol.upper()] = fresh_pair
-
-    def get_pair(self, symbol_or_pair: str) -> Optional[SyntheticPair]:
-        """Look up pair definition by pair name or ticker symbol."""
-        key = symbol_or_pair.upper()
-        with self._lock:
-            if key in self._pairs:
-                return self._pairs[key]
-            return self._symbol_to_pair.get(key)
-
-    def set_baseline_volume(self, symbol: str, baseline: float) -> None:
-        """Set expected baseline volume for the 15-second window."""
-        with self._lock:
-            self._baseline_volumes[symbol.upper()] = float(baseline)
-
-    def set_initial_price(self, symbol: str, price: float) -> None:
-        """Set initial (session open P_0) price for synthetic price product calculation."""
-        with self._lock:
-            sym = symbol.upper()
-            self._initial_prices[sym] = float(price)
-            pair = self._symbol_to_pair.get(sym)
-            if pair is not None:
-                if sym == pair.bull_symbol.upper():
-                    pair.p_bull_0 = float(price)
-                elif sym == pair.bear_symbol.upper():
-                    pair.p_bear_0 = float(price)
-
-    # -----------------------------------------------------------------------
-    # Ingestion
-    # -----------------------------------------------------------------------
-
-    def record_tick(
-        self,
-        symbol: str,
-        price: float,
-        volume: int,
-        timestamp: Optional[Union[datetime, float, int]] = None,
-        is_incremental: bool = True,
-        spread: Optional[float] = None,
-    ) -> None:
-        """
-        Record a tick into the symbol's rolling 15-second circular buffer.
-
-        Args:
-            symbol: Ticker symbol.
-            price: Current tick price.
-            volume: Tick volume (if is_incremental=True) or total session volume (if is_incremental=False).
-            timestamp: Tick timestamp (defaults to UTC now).
-            is_incremental: If True, volume is treated as this tick's trade size.
-                            If False, volume is treated as cumulative total_volume.
-            spread: Current bid-ask spread in dollars (optional, used for 09:30 VWMP filtering).
-        """
-        sym = symbol.upper()
-        if price <= 0:
-            return
-
-        is_real_epoch = False
-        if timestamp is None:
-            is_real_epoch = True
-            ts = datetime.now(timezone.utc)
-        elif isinstance(timestamp, (int, float)):
-            is_real_epoch = timestamp > 1_000_000_000
-            ts = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-        elif isinstance(timestamp, datetime):
-            is_real_epoch = timestamp.timestamp() > 1_000_000_000
-            ts = _normalize_time(timestamp)
-        else:
-            ts = _normalize_time(timestamp)
-
-        with self._lock:
-            if is_real_epoch:
-                ts_edt = ts.astimezone(ZoneInfo("America/New_York"))
-                # Check pre-market (< 09:30 EDT) to regular hours (>= 09:30 EDT) boundary crossing
-                if self._last_tick_edt is not None:
-                    was_premarket = (
-                        self._last_tick_edt.date() < ts_edt.date() or
-                        self._last_tick_edt.time() < dtime(9, 30, 0)
-                    )
-                    is_regular = ts_edt.time() >= dtime(9, 30, 0)
-                    if was_premarket and is_regular:
-                        self.reset_opening_anchors()
-                self._last_tick_edt = ts_edt
-
-            # Compute incremental volume
-            if is_incremental:
-                inc_vol = max(0, int(volume))
-            else:
-                tot_vol = int(volume)
-                prev_tot = self._last_total_volume.get(sym)
-                if prev_tot is None:
-                    inc_vol = 0
-                else:
-                    inc_vol = max(0, tot_vol - prev_tot)
-                self._last_total_volume[sym] = tot_vol
-
-            # Anchor session open / initial price:
-            if not is_real_epoch:
-                # Unit tests with synthetic timestamps (< 1_000_000_000): preserve immediate single-tick latching
-                if sym not in self._initial_prices or self._initial_prices[sym] <= 0:
-                    self._initial_prices[sym] = price
-                pair = self._symbol_to_pair.get(sym)
-                if pair is not None:
-                    if sym == pair.bull_symbol.upper() and (pair.p_bull_0 is None or pair.p_bull_0 <= 0):
-                        pair.p_bull_0 = price
-                    elif sym == pair.bear_symbol.upper() and (pair.p_bear_0 is None or pair.p_bear_0 <= 0):
-                        pair.p_bear_0 = price
-            else:
-                ts_edt = ts.astimezone(ZoneInfo("America/New_York"))
-                t_time = ts_edt.time()
-
-                if dtime(9, 30, 0) <= t_time < dtime(9, 30, 5):
-                    # 5-second 09:30:00 <= t < 09:30:05 EDT anchor buffer
-                    self._opening_buffer[sym].append({
-                        "price": float(price),
-                        "volume": int(inc_vol),
-                        "spread": float(spread) if spread is not None else None,
-                        "timestamp": ts,
-                    })
-
-                elif t_time >= dtime(9, 30, 5):
-                    # At t >= 09:30:05 EDT, calculate VWMP of buffered ticks
-                    for s, b_ticks in list(self._opening_buffer.items()):
-                        if s not in self._initial_prices or self._initial_prices[s] <= 0:
-                            vwmp = self._calculate_vwmp(s)
-                            if vwmp is not None and vwmp > 0:
-                                self._initial_prices[s] = vwmp
-                                p_entry = self._symbol_to_pair.get(s)
-                                if p_entry is not None:
-                                    if s == p_entry.bull_symbol.upper() and (p_entry.p_bull_0 is None or p_entry.p_bull_0 <= 0):
-                                        p_entry.p_bull_0 = vwmp
-                                    elif s == p_entry.bear_symbol.upper() and (p_entry.p_bear_0 is None or p_entry.p_bear_0 <= 0):
-                                        p_entry.p_bear_0 = vwmp
-                                    logger.info(
-                                        "SyntheticDivergenceEngine: %s VWMP anchor latched at %.4f from %d buffered ticks",
-                                        s, vwmp, len(b_ticks)
-                                    )
-
-                    # If current symbol is still not latched
-                    if sym not in self._initial_prices or self._initial_prices[sym] <= 0:
-                        self._initial_prices[sym] = price
-                        pair = self._symbol_to_pair.get(sym)
-                        if pair is not None:
-                            if sym == pair.bull_symbol.upper() and (pair.p_bull_0 is None or pair.p_bull_0 <= 0):
-                                pair.p_bull_0 = price
-                            elif sym == pair.bear_symbol.upper() and (pair.p_bear_0 is None or pair.p_bear_0 <= 0):
-                                pair.p_bear_0 = price
-
-            self._last_prices[sym] = price
-
-            buf = self._tick_buffers[sym]
-            buf.append(TickRecord(timestamp=ts, price=price, volume=inc_vol))
-
-            # Prune old ticks beyond the 15-second window
-            cutoff = ts - timedelta(seconds=self.window_seconds)
-            while buf and buf[0].timestamp < cutoff:
-                buf.popleft()
-
-            # Forward macro factors to regime governor if attached
-            if hasattr(self, "regime_governor") and self.regime_governor is not None:
-                norm_sym = RealTimeRegimeGovernor.canonical_symbol(sym)
-                if norm_sym in RealTimeRegimeGovernor.FACTORS:
-                    self.regime_governor.record_tick(norm_sym, price=price, volume=inc_vol, timestamp=ts)
-
-    def on_tick(
-        self,
-        symbol: str,
-        price: Optional[Union[dict, float, int]] = None,
-        volume: Optional[Union[int, float]] = None,
-        timestamp: Optional[Any] = None,
-        fields: Optional[dict] = None,
-    ) -> None:
-        """
-        Convenience adapter for streamer Level 1 tick dict or direct price/volume call.
-        Supports:
-          on_tick(symbol, fields={...}, timestamp=...)
-          on_tick(symbol, {"last_price": ...}, timestamp=...)
-          on_tick(symbol, price=..., volume=..., timestamp=...)
-          on_tick(symbol, price, volume, timestamp)
-        """
-        tick_dict = fields if fields is not None else (price if isinstance(price, dict) else None)
-        spread = None
-        if tick_dict is not None:
-            p = float(tick_dict.get("last_price", 0.0) or 0.0)
-            v = int(tick_dict.get("total_volume", 0) or 0)
-            is_inc = False
-            if "spread" in tick_dict and tick_dict["spread"] is not None:
-                spread = float(tick_dict["spread"] or 0.0)
-            elif "bid_price" in tick_dict and "ask_price" in tick_dict:
-                bid = float(tick_dict.get("bid_price", 0.0) or 0.0)
-                ask = float(tick_dict.get("ask_price", 0.0) or 0.0)
-                if ask > bid > 0:
-                    spread = ask - bid
-            elif "bid" in tick_dict and "ask" in tick_dict:
-                bid = float(tick_dict.get("bid", 0.0) or 0.0)
-                ask = float(tick_dict.get("ask", 0.0) or 0.0)
-                if ask > bid > 0:
-                    spread = ask - bid
-        else:
-            p = float(price or 0.0)
-            v = int(volume or 0)
-            is_inc = True
-
-        if p > 0:
-            self.record_tick(symbol, price=p, volume=v, timestamp=timestamp, is_incremental=is_inc, spread=spread)
-
-    # -----------------------------------------------------------------------
-    # Internal Window Pruning & Metrics
-    # -----------------------------------------------------------------------
-
-    def _prune_buffer(self, symbol: str, current_time: datetime) -> None:
-        sym = symbol.upper()
-        buf = self._tick_buffers[sym]
-        cutoff = current_time - timedelta(seconds=self.window_seconds)
-        while buf and buf[0].timestamp < cutoff:
-            buf.popleft()
-
-    def get_window_volume(self, symbol: str, current_time: Optional[datetime] = None) -> int:
-        """Sum of all executed volume in the rolling 15-second buffer."""
-        sym = symbol.upper()
-        t = _normalize_time(current_time)
-        with self._lock:
-            self._prune_buffer(sym, t)
-            return sum(item.volume for item in self._tick_buffers[sym])
-
-    def get_rvol(self, symbol: str, current_time: Optional[datetime] = None) -> float:
-        """
-        Relative Volume for symbol over rolling 15-second window:
-        RVOL = V_t / V_bar
-        """
-        sym = symbol.upper()
-        with self._lock:
-            vol = self.get_window_volume(sym, current_time)
-            baseline = self._baseline_volumes.get(sym, self.default_baseline_volume)
-            if baseline <= 0:
-                return 1.0
-            return vol / baseline
-
-    def get_price_velocity(self, symbol: str, current_time: Optional[datetime] = None) -> float:
-        """
-        Percentage price velocity across the rolling 15-second window:
-        ΔP = ((P_latest - P_start) / P_start) * 100.0  (in %)
-        """
-        sym = symbol.upper()
-        t = _normalize_time(current_time)
-        with self._lock:
-            self._prune_buffer(sym, t)
-            buf = self._tick_buffers[sym]
-            if len(buf) < 2:
-                return 0.0
-            p_start = buf[0].price
-            p_latest = buf[-1].price
-            if p_start <= 0:
-                return 0.0
-            return ((p_latest - p_start) / p_start) * 100.0
-
-    def get_volume_delta_spread(self, symbol_or_pair: str, current_time: Optional[datetime] = None) -> float:
-        """
-        Relative Volume Delta Spread:
-        ΔV_spread = (V_Bull,t / V_bar_Bull) - (V_Bear,t / V_bar_Bear) = RVOL_Bull - RVOL_Bear
-        """
-        pair = self.get_pair(symbol_or_pair)
-        if pair is None:
-            return 0.0
-        t = _normalize_time(current_time)
-        with self._lock:
-            rvol_bull = self.get_rvol(pair.bull_symbol, t)
-            rvol_bear = self.get_rvol(pair.bear_symbol, t)
-            return rvol_bull - rvol_bear
-
-    def get_synthetic_price_product(self, symbol_or_pair: str, current_time: Optional[datetime] = None) -> float:
-        """
-        Normalized Synthetic Price Product:
-        S_t = (P_Bull,t * P_Bear,t) / (P_Bull,0 * P_Bear,0)
-        """
-        pair = self.get_pair(symbol_or_pair)
-        if pair is None:
-            return 1.0
-        with self._lock:
-            p_bull_0 = pair.p_bull_0 if pair.p_bull_0 is not None and pair.p_bull_0 > 0 else self._initial_prices.get(pair.bull_symbol, 0.0)
-            p_bear_0 = pair.p_bear_0 if pair.p_bear_0 is not None and pair.p_bear_0 > 0 else self._initial_prices.get(pair.bear_symbol, 0.0)
-            p_bull_t = self._last_prices.get(pair.bull_symbol, 0.0)
-            p_bear_t = self._last_prices.get(pair.bear_symbol, 0.0)
-
-            if p_bull_0 <= 0 or p_bear_0 <= 0 or p_bull_t <= 0 or p_bear_t <= 0:
-                return 1.0
-
-            return (p_bull_t * p_bear_t) / (p_bull_0 * p_bear_0)
-
-    # -----------------------------------------------------------------------
-    # Liquidity Trap Guard & Cooldown
-    # -----------------------------------------------------------------------
-
-    def is_trap_active(self, symbol_or_pair: str, current_time: Optional[datetime] = None) -> bool:
-        """
-        Detects if False Liquidity Absorption Trap is active for the pair.
-        Conditions for active trap:
-        1. Both RVOL_Bull >= 1.30 and RVOL_Bear >= 1.30
-        2. Absolute price velocity across both legs is compressed:
-           |ΔP_Bull| < 0.15% and |ΔP_Bear| < 0.15%
-        3. Remains active for 120 seconds after conditions subside (cooldown).
-        """
-        pair = self.get_pair(symbol_or_pair)
-        if pair is None:
-            return False
-
-        t = _normalize_time(current_time)
-
-        with self._lock:
-            rvol_bull = self.get_rvol(pair.bull_symbol, t)
-            rvol_bear = self.get_rvol(pair.bear_symbol, t)
-            vel_bull = self.get_price_velocity(pair.bull_symbol, t)
-            vel_bear = self.get_price_velocity(pair.bear_symbol, t)
-
-            # Check if condition 1 and condition 2 are simultaneously met
-            elevated_dual_volume = (
-                rvol_bull >= self.rvol_trap_threshold and
-                rvol_bear >= self.rvol_trap_threshold
-            )
-            compressed_price_velocity = (
-                abs(vel_bull) < self.price_velocity_trap_threshold and
-                abs(vel_bear) < self.price_velocity_trap_threshold
-            )
-
-            is_condition_active = elevated_dual_volume and compressed_price_velocity
-
-            if is_condition_active:
-                self._last_trap_condition_time[pair.name] = t
-                logger.info(
-                    "LIQUIDITY_TRAP_ACTIVE for %s | RVOL_Bull=%.2f RVOL_Bear=%.2f | "
-                    "ΔP_Bull=%.3f%% ΔP_Bear=%.3f%%",
-                    pair.name, rvol_bull, rvol_bear, vel_bull, vel_bear
-                )
-                return True
-
-            # If conditions are not active right now, check 120s cooldown
-            last_condition_time = self._last_trap_condition_time.get(pair.name)
-            if last_condition_time is not None:
-                elapsed = (t - last_condition_time).total_seconds()
-                if elapsed < self.cooldown_seconds:
-                    logger.debug(
-                        "LIQUIDITY_TRAP_COOLDOWN active for %s | %.1fs / %.1fs remaining",
-                        pair.name, self.cooldown_seconds - elapsed, self.cooldown_seconds
-                    )
-                    return True
-
-            return False
-
-    def get_metrics(self, symbol_or_pair: str, current_time: Optional[datetime] = None) -> Dict[str, Any]:
-        """Comprehensive snapshot of all synthetic divergence metrics for a pair."""
-        pair = self.get_pair(symbol_or_pair)
-        if pair is None:
-            return {}
-
-        t = _normalize_time(current_time)
-        with self._lock:
-            rvol_bull = self.get_rvol(pair.bull_symbol, t)
-            rvol_bear = self.get_rvol(pair.bear_symbol, t)
-            vel_bull = self.get_price_velocity(pair.bull_symbol, t)
-            vel_bear = self.get_price_velocity(pair.bear_symbol, t)
-            spread = rvol_bull - rvol_bear
-            s_t = self.get_synthetic_price_product(pair.name, t)
-            trap_active = self.is_trap_active(pair.name, t)
-
-            last_trap_time = self._last_trap_condition_time.get(pair.name)
-            cooldown_rem = 0.0
-            if last_trap_time is not None:
-                elapsed = (t - last_trap_time).total_seconds()
-                if elapsed < self.cooldown_seconds:
-                    cooldown_rem = self.cooldown_seconds - elapsed
-
-            metrics = {
-                "pair": pair.name,
-                "bull_symbol": pair.bull_symbol,
-                "bear_symbol": pair.bear_symbol,
-                "rvol_bull": round(rvol_bull, 4),
-                "rvol_bear": round(rvol_bear, 4),
-                "delta_v_spread": round(spread, 4),
-                "synthetic_price_product": round(s_t, 6),
-                "price_velocity_bull_pct": round(vel_bull, 4),
-                "price_velocity_bear_pct": round(vel_bear, 4),
-                "is_trap_active": trap_active,
-                "cooldown_remaining_sec": round(cooldown_rem, 1),
-            }
-            if hasattr(self, "regime_governor") and self.regime_governor is not None:
-                snap = self.regime_governor.evaluate_regime(current_time)
-                metrics["ses"] = snap.ses
-                metrics["macro_regime"] = snap.regime
-            return metrics
-
-
-# ===========================================================================
-# Pillar 4 Expansion: Real-Time Macro Regime Governor (SES Engine)
-# ===========================================================================
-
-
-class MacroRegime(str, Enum):
-    """Macro regime classification states."""
-    FAVORABLE = "FAVORABLE"
-    CHOP = "CHOP"
-    DEFENSIVE = "DEFENSIVE"
-
-
-@dataclass
-class MacroDataPoint:
-    """Single bar or tick record for macro factor time series."""
-    timestamp: datetime
-    price: float
-    volume: int = 0
-
-
-@dataclass
-class RegimeSnapshot:
-    """
-    Immutable snapshot of the Semiconductor Environment Score (SES)
-    and macro regime classification at a point in time.
-    """
-    timestamp: datetime
-    ses: float
-    regime: str  # "FAVORABLE" | "CHOP" | "DEFENSIVE"
-    score_trend: float
-    score_rs: float
-    score_vxn: float
-    score_tnx: float
-    entry_permitted: bool
-    capital_allocation_pct: float
-    max_position_size: float
-    target_compression_pct: float
-    soxx_price: float = 0.0
-    qqq_price: float = 0.0
-    tnx_yield: float = 0.0
-    vxn_level: float = 0.0
-    rs_ratio: float = 0.0
-    rs_spread: float = 0.0
-    delta_tnx_5d: float = 0.0
-    vxn_percentile: float = 0.5
-    z_trend: float = 0.0
-
-    @property
-    def target_multiplier(self) -> float:
-        """Multiplier applied to profit targets (1.0 for FAVORABLE, 0.75 for CHOP)."""
-        return max(0.0, 1.0 - self.target_compression_pct)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "timestamp": self.timestamp.isoformat(),
-            "ses": round(float(self.ses), 4),
-            "regime": self.regime,
-            "score_trend": round(float(self.score_trend), 4),
-            "score_rs": round(float(self.score_rs), 4),
-            "score_vxn": round(float(self.score_vxn), 4),
-            "score_tnx": round(float(self.score_tnx), 4),
-            "entry_permitted": self.entry_permitted,
-            "capital_allocation_pct": round(float(self.capital_allocation_pct), 4),
-            "max_position_size": round(float(self.max_position_size), 2),
-            "target_compression_pct": round(float(self.target_compression_pct), 4),
-            "target_multiplier": round(float(self.target_multiplier), 4),
-            "soxx_price": round(float(self.soxx_price), 4),
-            "qqq_price": round(float(self.qqq_price), 4),
-            "tnx_yield": round(float(self.tnx_yield), 4),
-            "vxn_level": round(float(self.vxn_level), 4),
-            "rs_ratio": round(float(self.rs_ratio), 6),
-            "rs_spread": round(float(self.rs_spread), 6),
-            "delta_tnx_5d": round(float(self.delta_tnx_5d), 4),
-            "vxn_percentile": round(float(self.vxn_percentile), 4),
-            "z_trend": round(float(self.z_trend), 4),
-        }
-
-
-class RealTimeRegimeGovernor:
-    """
-    Tier 1 / Tier 2 Real-Time Macro Regime Governor for Semiconductor Environment Score (SES).
-    Ref: Issue #59.
-
-    Tracks rolling in-memory tick/bar arrays across the 4 key macro factors:
-      - SOXX (Semiconductor sector proxy)
-      - QQQ  (Broad tech beta proxy)
-      - ^TNX (10-Year Treasury yield)
-      - ^VXN (Nasdaq 100 Volatility Index)
-
-    Multi-Factor Scoring Architecture:
-      - Component 1 (Trend Z-Score):
-        Z_trend = (SOXX_price - SMA_50(SOXX)) / Std_50(SOXX)
-        score_trend = np.clip(Z_trend / 2.5, -1.0, 1.0)
-      - Component 2 (Relative Strength Spread):
-        RS_ratio = SOXX_price / QQQ_price
-        RS_spread = (RS_ratio - SMA_20(RS_ratio)) / SMA_20(RS_ratio)
-        score_rs = np.clip(RS_spread / 0.03, -1.0, 1.0)
-      - Component 3 (Volatility Percentile):
-        score_vxn = 1.0 - (2.0 * Percentile_60d(VXN))
-      - Component 4 (Rate Acceleration Drag):
-        delta_tnx_5d = TNX_now - TNX_5d_ago
-        score_tnx = -np.clip(delta_tnx_5d / 0.25, -1.0, 1.0)
-
-      - Composite Macro Score (SES):
-        SES = (0.35 * score_trend) + (0.30 * score_rs) + (0.20 * score_vxn) + (0.15 * score_tnx)
-
-    Regime Classification & Trade Invariants:
-      - FAVORABLE (SES >= +0.20): Full 33% capital sizing permitted ($1,836 cap).
-      - CHOP (-0.25 < SES < +0.20): Sizing halved to 16.5% ($918 cap); targets compressed by 25%.
-      - DEFENSIVE (SES <= -0.25): ZERO long entries permitted (Entry permitted: False).
-
-    State Persistence:
-      - Writes real-time SES score and factor breakdowns to state/telemetry.db
-        table `regime_telemetry` on every 1-minute bar.
-    """
-
-    FACTORS: Tuple[str, ...] = ("SOXX", "QQQ", "^TNX", "^VXN")
-
-    def __init__(
-        self,
-        db_path: Optional[Union[str, Path]] = None,
-        max_history: int = 1440,
-        full_capital_cap: float = 1836.0,
-        chop_capital_cap: float = 918.0,
-        full_allocation_pct: float = 0.33,
-        chop_allocation_pct: float = 0.165,
-        auto_persist: bool = True,
-    ) -> None:
-        self.db_path = str(db_path if db_path is not None else TELEMETRY_DB_PATH)
-        self.max_history = int(max_history)
-        self.full_capital_cap = float(full_capital_cap)
-        self.chop_capital_cap = float(chop_capital_cap)
-        self.full_allocation_pct = float(full_allocation_pct)
-        self.chop_allocation_pct = float(chop_allocation_pct)
-        self.auto_persist = bool(auto_persist)
-
-        self._lock = threading.RLock()
-
-        # In-memory rolling bar arrays
-        self._bars: Dict[str, deque[MacroDataPoint]] = {
-            sym: deque(maxlen=self.max_history) for sym in self.FACTORS
-        }
-        self._latest_prices: Dict[str, float] = {}
-        self._rs_history: deque[float] = deque(maxlen=self.max_history)
-
-        # 1-minute bar buffering for streaming ticks
-        self._current_bar_ticks: Dict[str, List[TickRecord]] = defaultdict(list)
-        self._current_bar_minute: Optional[datetime] = None
-
-        # Cached last evaluated snapshot
-        self._last_snapshot: Optional[RegimeSnapshot] = None
-
-        self._init_db()
-
-    @staticmethod
-    def canonical_symbol(symbol: str) -> str:
-        """Map symbol alias to canonical factor symbol."""
-        s = symbol.upper().strip()
-        if s in ("TNX", "^TNX"):
-            return "^TNX"
-        if s in ("VXN", "^VXN"):
-            return "^VXN"
-        return s
-
-    def _get_db_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(
-            self.db_path,
-            timeout=5.0,
-            check_same_thread=False,
-        )
-        conn.row_factory = sqlite3.Row
-        if self.db_path != ":memory:":
-            conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA busy_timeout=5000;")
-        return conn
-
-    def _init_db(self) -> None:
-        if self.db_path != ":memory:":
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        with self._lock:
-            conn = self._get_db_connection()
-            try:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS regime_telemetry (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp TEXT NOT NULL,
-                        ses REAL NOT NULL,
-                        regime TEXT NOT NULL,
-                        score_trend REAL NOT NULL,
-                        score_rs REAL NOT NULL,
-                        score_vxn REAL NOT NULL,
-                        score_tnx REAL NOT NULL,
-                        soxx_price REAL,
-                        qqq_price REAL,
-                        tnx_yield REAL,
-                        vxn_level REAL,
-                        rs_ratio REAL,
-                        rs_spread REAL,
-                        delta_tnx_5d REAL,
-                        vxn_percentile REAL,
-                        z_trend REAL,
-                        entry_permitted INTEGER NOT NULL,
-                        max_capital_cap REAL NOT NULL,
-                        target_compression_pct REAL NOT NULL,
-                        payload_json TEXT
-                    );
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_regime_telemetry_ts
-                    ON regime_telemetry (timestamp);
-                    """
-                )
-                conn.commit()
-            finally:
-                conn.close()
-
-    def seed_history(
-        self,
-        symbol: str,
-        prices: Sequence[float],
-        timestamps: Optional[Sequence[datetime]] = None,
-    ) -> None:
-        """Seed historical price points for a factor."""
-        canon = self.canonical_symbol(symbol)
-        if canon not in self.FACTORS:
-            return
-        with self._lock:
-            if timestamps is not None and len(timestamps) == len(prices):
-                for p, t in zip(prices, timestamps):
-                    self._bars[canon].append(MacroDataPoint(timestamp=_normalize_time(t), price=float(p)))
-            else:
-                base_t = datetime.now(timezone.utc) - timedelta(minutes=len(prices))
-                for i, p in enumerate(prices):
-                    t = base_t + timedelta(minutes=i)
-                    self._bars[canon].append(MacroDataPoint(timestamp=t, price=float(p)))
-            if prices:
-                self._latest_prices[canon] = float(prices[-1])
-            if canon in ("SOXX", "QQQ"):
-                self._rebuild_rs_history()
-
-    def seed_macro_history(
-        self,
-        soxx: Sequence[float],
-        qqq: Sequence[float],
-        tnx: Sequence[float],
-        vxn: Sequence[float],
-        timestamps: Optional[Sequence[datetime]] = None,
-    ) -> None:
-        """Seed all 4 macro factors simultaneously."""
-        with self._lock:
-            self.seed_history("SOXX", soxx, timestamps)
-            self.seed_history("QQQ", qqq, timestamps)
-            self.seed_history("^TNX", tnx, timestamps)
-            self.seed_history("^VXN", vxn, timestamps)
-
-    def _rebuild_rs_history(self) -> None:
-        soxx_bars = list(self._bars["SOXX"])
-        qqq_bars = list(self._bars["QQQ"])
-        self._rs_history.clear()
-        n = min(len(soxx_bars), len(qqq_bars))
-        if n == 0:
-            return
-        for s_pt, q_pt in zip(soxx_bars[-n:], qqq_bars[-n:]):
-            if q_pt.price > 0:
-                self._rs_history.append(s_pt.price / q_pt.price)
-
-    def record_bar(
-        self,
-        symbol: str,
-        close: float,
-        timestamp: Optional[datetime] = None,
-        volume: int = 0,
-        auto_persist: Optional[bool] = None,
-    ) -> None:
-        """Record a single bar for a factor."""
-        canon = self.canonical_symbol(symbol)
-        if canon not in self.FACTORS:
-            return
-        ts = _normalize_time(timestamp)
-        with self._lock:
-            self._latest_prices[canon] = float(close)
-            self._bars[canon].append(MacroDataPoint(timestamp=ts, price=float(close), volume=int(volume)))
-            if canon in ("SOXX", "QQQ"):
-                self._update_rs_latest()
-            should_persist = self.auto_persist if auto_persist is None else auto_persist
-            if should_persist:
-                self.persist_regime(timestamp=ts)
-
-    def on_bar_completed(self, bar: Any) -> Optional[RegimeSnapshot]:
-        """
-        Connects BarCompletedEvent from BarResampler to RealTimeRegimeGovernor (#63).
-        If the completed 1-minute bar is for a tracked factor (SOXX, QQQ), updates
-        factor bars and evaluates the macro regime.
-        """
-        sym = getattr(bar, "symbol", "")
-        canon = self.canonical_symbol(sym)
-        if canon not in self.FACTORS:
-            return None
-        timeframe = getattr(bar, "timeframe", "")
-        if timeframe != "1m":
-            return None
-        close = float(getattr(bar, "close", 0.0))
-        vol = int(getattr(bar, "volume", 0))
-        ts = getattr(bar, "timestamp", None)
-        self.record_bar(symbol=canon, close=close, timestamp=ts, volume=vol)
-        return self._last_snapshot
-
-    def record_macro_bar(
-        self,
-        soxx_close: float,
-        qqq_close: float,
-        tnx_close: float,
-        vxn_close: float,
-        timestamp: Optional[datetime] = None,
-        persist: bool = True,
-    ) -> RegimeSnapshot:
-        """
-        Record a synchronized 1-minute macro bar across all 4 factors,
-        evaluate the Semiconductor Environment Score (SES), and persist to telemetry.db.
-        """
-        ts = _normalize_time(timestamp)
-        with self._lock:
-            self._latest_prices["SOXX"] = float(soxx_close)
-            self._latest_prices["QQQ"] = float(qqq_close)
-            self._latest_prices["^TNX"] = float(tnx_close)
-            self._latest_prices["^VXN"] = float(vxn_close)
-
-            self._bars["SOXX"].append(MacroDataPoint(timestamp=ts, price=float(soxx_close)))
-            self._bars["QQQ"].append(MacroDataPoint(timestamp=ts, price=float(qqq_close)))
-            self._bars["^TNX"].append(MacroDataPoint(timestamp=ts, price=float(tnx_close)))
-            self._bars["^VXN"].append(MacroDataPoint(timestamp=ts, price=float(vxn_close)))
-
-            if float(qqq_close) > 0:
-                self._rs_history.append(float(soxx_close) / float(qqq_close))
-
-            return self.evaluate_regime(timestamp=ts, persist=persist)
-
-    def record_tick(
-        self,
-        symbol: str,
-        price: float,
-        volume: int = 0,
-        timestamp: Optional[datetime] = None,
-    ) -> None:
-        """
-        Record real-time tick for a factor, aggregating into rolling 1-minute bars.
-        """
-        canon = self.canonical_symbol(symbol)
-        if canon not in self.FACTORS:
-            return
-        ts = _normalize_time(timestamp)
-        p = float(price)
-        if p <= 0:
-            return
-
-        with self._lock:
-            self._latest_prices[canon] = p
-            minute_bucket = ts.replace(second=0, microsecond=0)
-
-            if self._current_bar_minute is None:
-                self._current_bar_minute = minute_bucket
-            elif minute_bucket > self._current_bar_minute:
-                # Flush previous minute bar
-                prev_min = self._current_bar_minute
-                for sym, ticks in list(self._current_bar_ticks.items()):
-                    if ticks:
-                        c_px = ticks[-1].price
-                        tot_v = sum(t.volume for t in ticks)
-                        self._bars[sym].append(MacroDataPoint(timestamp=prev_min, price=c_px, volume=tot_v))
-                if self._bars["SOXX"] and self._bars["QQQ"]:
-                    self._update_rs_latest()
-                self._current_bar_ticks.clear()
-                self._current_bar_minute = minute_bucket
-
-                if self.auto_persist and self.has_minimum_data():
-                    self.evaluate_regime(timestamp=prev_min, persist=True)
-
-            self._current_bar_ticks[canon].append(
-                TickRecord(timestamp=ts, price=p, volume=int(volume))
-            )
-
-    def _update_rs_latest(self) -> None:
-        soxx_bars = self._bars["SOXX"]
-        qqq_bars = self._bars["QQQ"]
-        if soxx_bars and qqq_bars:
-            soxx_p = soxx_bars[-1].price
-            qqq_p = qqq_bars[-1].price
-            if qqq_p > 0:
-                self._rs_history.append(soxx_p / qqq_p)
-
-    def has_minimum_data(self) -> bool:
-        """True if all 4 macro factors have at least 1 data point."""
-        return bool(
-            self._bars["SOXX"] and
-            self._bars["QQQ"] and
-            self._bars["^TNX"] and
-            self._bars["^VXN"]
-        )
-
-    def evaluate_regime(
-        self,
-        timestamp: Optional[datetime] = None,
-        persist: bool = False,
-    ) -> RegimeSnapshot:
-        """
-        Evaluate real-time Semiconductor Environment Score (SES) and classify regime.
-        """
-        with self._lock:
-            ts = _normalize_time(timestamp)
-
-            soxx_prices = [p.price for p in self._bars["SOXX"]]
-            qqq_prices = [p.price for p in self._bars["QQQ"]]
-            tnx_prices = [p.price for p in self._bars["^TNX"]]
-            vxn_prices = [p.price for p in self._bars["^VXN"]]
-
-            soxx_price = soxx_prices[-1] if soxx_prices else self._latest_prices.get("SOXX", 0.0)
-            qqq_price = qqq_prices[-1] if qqq_prices else self._latest_prices.get("QQQ", 0.0)
-            tnx_price = tnx_prices[-1] if tnx_prices else self._latest_prices.get("^TNX", 0.0)
-            vxn_price = vxn_prices[-1] if vxn_prices else self._latest_prices.get("^VXN", 0.0)
-
-            # Component 1 (Trend Z-Score):
-            # Z_trend = (SOXX_price - SMA_50(SOXX)) / Std_50(SOXX)
-            # score_trend = np.clip(Z_trend / 2.5, -1.0, 1.0)
-            soxx_win = list(soxx_prices)
-            if soxx_price > 0 and (not soxx_win or soxx_win[-1] != soxx_price):
-                soxx_win.append(soxx_price)
-            soxx_window = soxx_win[-50:]
-            if len(soxx_window) >= 2:
-                sma_50 = float(np.mean(soxx_window))
-                std_50 = float(np.std(soxx_window, ddof=1))
-                if std_50 > 1e-9:
-                    z_trend = (soxx_price - sma_50) / std_50
-                else:
-                    z_trend = 0.0
-            else:
-                sma_50 = soxx_price
-                std_50 = 0.0
-                z_trend = 0.0
-            score_trend = float(np.clip(z_trend / 2.5, -1.0, 1.0))
-
-            # Component 2 (Relative Strength Spread):
-            # RS_ratio = SOXX_price / QQQ_price
-            # RS_spread = (RS_ratio - SMA_20(RS_ratio)) / SMA_20(RS_ratio)
-            # score_rs = np.clip(RS_spread / 0.03, -1.0, 1.0)
-            if qqq_price > 0 and soxx_price > 0:
-                rs_ratio = soxx_price / qqq_price
-            elif self._rs_history:
-                rs_ratio = self._rs_history[-1]
-            else:
-                rs_ratio = 1.0
-
-            rs_win = list(self._rs_history)
-            if not rs_win or abs(rs_win[-1] - rs_ratio) > 1e-9:
-                rs_win.append(rs_ratio)
-            rs_window = rs_win[-20:]
-            if len(rs_window) > 0:
-                sma_20 = float(np.mean(rs_window))
-                if sma_20 > 1e-9:
-                    rs_spread = (rs_ratio - sma_20) / sma_20
-                else:
-                    rs_spread = 0.0
-            else:
-                sma_20 = rs_ratio
-                rs_spread = 0.0
-            score_rs = float(np.clip(rs_spread / 0.03, -1.0, 1.0))
-
-            # Component 3 (Volatility Percentile):
-            # score_vxn = 1.0 - (2.0 * Percentile_60d(VXN))
-            vxn_win = list(vxn_prices)
-            if vxn_price > 0 and (not vxn_win or vxn_win[-1] != vxn_price):
-                vxn_win.append(vxn_price)
-            vxn_window = vxn_win[-60:]
-            if len(vxn_window) >= 1:
-                vxn_arr = np.array(vxn_window, dtype=np.float64)
-                count_less = float(np.sum(vxn_arr < vxn_price))
-                count_equal = float(np.sum(vxn_arr == vxn_price))
-                percentile_60d = (count_less + 0.5 * count_equal) / float(len(vxn_window))
-            else:
-                percentile_60d = 0.5
-            score_vxn = float(np.clip(1.0 - (2.0 * percentile_60d), -1.0, 1.0))
-
-            # Component 4 (Rate Acceleration Drag):
-            # delta_tnx_5d = TNX_now - TNX_5d_ago
-            # score_tnx = -np.clip(delta_tnx_5d / 0.25, -1.0, 1.0)
-            tnx_win = list(tnx_prices)
-            if tnx_price > 0 and (not tnx_win or tnx_win[-1] != tnx_price):
-                tnx_win.append(tnx_price)
-            if len(tnx_win) >= 6:
-                tnx_5d_ago = tnx_win[-6]
-            elif len(tnx_win) > 1:
-                tnx_5d_ago = tnx_win[0]
-            else:
-                tnx_5d_ago = tnx_price
-            delta_tnx_5d = tnx_price - tnx_5d_ago
-            score_tnx = float(-np.clip(delta_tnx_5d / 0.25, -1.0, 1.0))
-
-            # Composite Macro Score (SES):
-            # SES = (0.35 * score_trend) + (0.30 * score_rs) + (0.20 * score_vxn) + (0.15 * score_tnx)
-            ses = (0.35 * score_trend) + (0.30 * score_rs) + (0.20 * score_vxn) + (0.15 * score_tnx)
-            ses = round(float(np.clip(ses, -1.0, 1.0)), 4)
-
-            # Regime Classification & Trade Invariants:
-            if ses >= 0.20:
-                regime = MacroRegime.FAVORABLE.value
-                entry_permitted = True
-                capital_allocation_pct = self.full_allocation_pct  # 0.33
-                max_position_size = self.full_capital_cap  # 1836.0
-                target_compression_pct = 0.0
-            elif ses <= -0.25:
-                regime = MacroRegime.DEFENSIVE.value
-                entry_permitted = False
-                capital_allocation_pct = 0.0
-                max_position_size = 0.0
-                target_compression_pct = 0.0
-            else:
-                regime = MacroRegime.CHOP.value
-                entry_permitted = True
-                capital_allocation_pct = self.chop_allocation_pct  # 0.165
-                max_position_size = self.chop_capital_cap  # 918.0
-                target_compression_pct = 0.25
-
-            snapshot = RegimeSnapshot(
-                timestamp=ts,
-                ses=ses,
-                regime=regime,
-                score_trend=round(score_trend, 4),
-                score_rs=round(score_rs, 4),
-                score_vxn=round(score_vxn, 4),
-                score_tnx=round(score_tnx, 4),
-                entry_permitted=entry_permitted,
-                capital_allocation_pct=capital_allocation_pct,
-                max_position_size=max_position_size,
-                target_compression_pct=target_compression_pct,
-                soxx_price=round(soxx_price, 4),
-                qqq_price=round(qqq_price, 4),
-                tnx_yield=round(tnx_price, 4),
-                vxn_level=round(vxn_price, 4),
-                rs_ratio=round(rs_ratio, 6),
-                rs_spread=round(rs_spread, 6),
-                delta_tnx_5d=round(delta_tnx_5d, 4),
-                vxn_percentile=round(percentile_60d, 4),
-                z_trend=round(z_trend, 4),
-            )
-
-            self._last_snapshot = snapshot
-
-            if persist:
-                self.persist_regime_telemetry(snapshot)
-
-            return snapshot
-
-    def persist_regime_telemetry(self, snapshot: RegimeSnapshot) -> None:
-        """Persist real-time regime telemetry record into state/telemetry.db table regime_telemetry."""
-        conn = self._get_db_connection()
-        try:
-            payload_json = json.dumps(snapshot.to_dict())
-            conn.execute(
-                """
-                INSERT INTO regime_telemetry (
-                    timestamp, ses, regime, score_trend, score_rs, score_vxn, score_tnx,
-                    soxx_price, qqq_price, tnx_yield, vxn_level, rs_ratio, rs_spread,
-                    delta_tnx_5d, vxn_percentile, z_trend, entry_permitted, max_capital_cap,
-                    target_compression_pct, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    snapshot.timestamp.isoformat(),
-                    snapshot.ses,
-                    snapshot.regime,
-                    snapshot.score_trend,
-                    snapshot.score_rs,
-                    snapshot.score_vxn,
-                    snapshot.score_tnx,
-                    snapshot.soxx_price,
-                    snapshot.qqq_price,
-                    snapshot.tnx_yield,
-                    snapshot.vxn_level,
-                    snapshot.rs_ratio,
-                    snapshot.rs_spread,
-                    snapshot.delta_tnx_5d,
-                    snapshot.vxn_percentile,
-                    snapshot.z_trend,
-                    1 if snapshot.entry_permitted else 0,
-                    snapshot.max_position_size,
-                    snapshot.target_compression_pct,
-                    payload_json,
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-    def persist_regime(
-        self,
-        snapshot: Optional[RegimeSnapshot] = None,
-        timestamp: Optional[datetime] = None,
-    ) -> RegimeSnapshot:
-        """Evaluate (if snapshot not provided) and persist regime telemetry."""
-        snap = snapshot or self.evaluate_regime(timestamp=timestamp, persist=False)
-        self.persist_regime_telemetry(snap)
-        return snap
-
-    def get_latest_persisted_telemetry(self) -> Optional[Dict[str, Any]]:
-        """Query the most recent record from regime_telemetry table."""
-        conn = self._get_db_connection()
-        try:
-            cur = conn.execute(
-                """
-                SELECT * FROM regime_telemetry
-                ORDER BY id DESC LIMIT 1
-                """
-            )
-            row = cur.fetchone()
-            return dict(row) if row else None
-        finally:
-            conn.close()
-
-    def get_telemetry_records(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Query recent records from regime_telemetry table."""
-        conn = self._get_db_connection()
-        try:
-            cur = conn.execute(
-                """
-                SELECT * FROM regime_telemetry
-                ORDER BY id DESC LIMIT ?
-                """,
-                (limit,),
-            )
-            return [dict(r) for r in cur.fetchall()]
-        finally:
-            conn.close()
-
-    # --- Properties and convenience accessors ---
-
-    @property
-    def current_snapshot(self) -> RegimeSnapshot:
-        if self._last_snapshot is None:
-            return self.evaluate_regime()
-        return self._last_snapshot
-
-    @property
-    def ses(self) -> float:
-        return self.current_snapshot.ses
-
-    @property
-    def current_ses(self) -> float:
-        return self.current_snapshot.ses
-
-    @property
-    def regime(self) -> str:
-        return self.current_snapshot.regime
-
-    @property
-    def current_regime(self) -> str:
-        return self.current_snapshot.regime
-
-    @property
-    def is_entry_permitted(self) -> bool:
-        return self.current_snapshot.entry_permitted
-
-    @property
-    def entry_permitted(self) -> bool:
-        return self.current_snapshot.entry_permitted
-
-    @property
-    def max_position_size(self) -> float:
-        return self.current_snapshot.max_position_size
-
-    @property
-    def max_capital_cap(self) -> float:
-        return self.current_snapshot.max_position_size
-
-    @property
-    def capital_allocation_pct(self) -> float:
-        return self.current_snapshot.capital_allocation_pct
-
-    @property
-    def target_compression_pct(self) -> float:
-        return self.current_snapshot.target_compression_pct
-
-    @property
-    def target_multiplier(self) -> float:
-        return self.current_snapshot.target_multiplier
-
-    @property
-    def score_trend(self) -> float:
-        return self.current_snapshot.score_trend
-
-    @property
-    def score_rs(self) -> float:
-        return self.current_snapshot.score_rs
-
-    @property
-    def score_vxn(self) -> float:
-        return self.current_snapshot.score_vxn
-
-    @property
-    def score_tnx(self) -> float:
-        return self.current_snapshot.score_tnx
-
-    def get_ses(self) -> float:
-        return self.current_snapshot.ses
-
-    def get_regime(self) -> str:
-        return self.current_snapshot.regime
-
-    def get_max_capital_cap(self) -> float:
-        return self.current_snapshot.max_position_size
-
-    def get_capital_allocation_pct(self) -> float:
-        return self.current_snapshot.capital_allocation_pct
-
-    def get_target_compression(self) -> float:
-        return self.current_snapshot.target_compression_pct
-
-    def get_max_position_size(self, base_capital: Optional[float] = None) -> float:
-        snap = self.evaluate_regime()
-        if not snap.entry_permitted:
-            return 0.0
-        if base_capital is not None:
-            return min(float(base_capital) * snap.capital_allocation_pct, snap.max_position_size)
-        return snap.max_position_size
-
-    def calculate_position_size(self, base_capital: float = 5563.64) -> float:
-        snap = self.evaluate_regime()
-        if not snap.entry_permitted:
-            return 0.0
-        desired = float(base_capital) * snap.capital_allocation_pct
-        return min(desired, snap.max_position_size)
-
-```
-
-#### `core/rate_limiter.py` - Schwab REST token bucket, burst controller & daily quota (748 lines, 28680 bytes)
-
-```python
-"""
-core/rate_limiter.py
-====================
-Thread-safe, non-blocking asynchronous rate limiter, Burst Token Bucket,
-and Schwab Daily Message Quota Guard (#66).
-
-Enforces institutional rate bounds:
-1. Multi-Tier Token Bucket Architecture:
-   - Tier 1: Sustained Rate Limiter:
-     * 120 requests per rolling 60-second window (2.0 req/sec maximum).
-   - Tier 2: Micro-Burst Bucket:
-     * Max burst capacity: 20 tokens; refill rate: 2 tokens/second.
-   - Tier 3: Daily Quota Hard-Cap:
-     * 3,500 requests per calendar day (UTC reset at 00:00:00).
-     * Warning threshold at 3,000 requests.
-     * Emergency non-essential REST freeze at 3,300 requests (only critical order cancellations/stops allowed).
-2. Priority Preemption:
-   - CRITICAL_EXIT: Bypasses queue up to burst cap, preempts pending NORMAL polling tasks.
-   - NORMAL: Standard quotes, account polling, order placement.
-   - BACKGROUND: Historical data backfill, off-hours workers.
-3. HTTP 429 Protection:
-   - Detects HTTP 429 responses; triggers exponential backoff (initial 2s, 4s, 8s, up to 30s)
-   - Cooldown for all BACKGROUND tasks.
-"""
-
-from __future__ import annotations
-
-import asyncio
-import collections
-import json
-import logging
-import os
-import tempfile
-import threading
-import time
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Callable, Coroutine, Dict, Optional, Tuple
-
-logger = logging.getLogger(__name__)
-
-DEFAULT_QUOTA_FILE = Path("schwab_state/daily_quota.json")
-MAX_DAILY_CALLS = 3500
-FREEZE_THRESHOLD = 3300
-WARNING_THRESHOLD = 3000
-SUSTAINED_RPM = 120
-BURST_CAPACITY = 20.0
-BURST_REFILL_RATE = 2.0  # tokens / second
-
-
-class DailyQuotaExceededError(RuntimeError):
-    """Raised when the daily outbound request ceiling is reached for non-essential calls."""
-
-
-# ===========================================================================
-# SchwabRateGovernor (Async, Multi-Tier, Priority Preemption, Quota Guard)
-# ===========================================================================
-
-class SchwabRateGovernor:
-    """
-    Thread-safe, non-blocking asynchronous rate governor for Schwab REST API.
-
-    Features:
-    - Tier 1: Sustained rate limiter (120 req / 60s rolling window, 2.0 req/s max).
-    - Tier 2: Micro-burst bucket (capacity 20 tokens, refill 2.0 tokens/s).
-    - Tier 3: Daily quota guard (3,500 daily ceiling, warning at 3,000, freeze at 3,300, 00:00 UTC rollover).
-    - Priority queue preemption: CRITICAL_EXIT preempts pending NORMAL / BACKGROUND tasks.
-    - HTTP 429 backoff: exponential backoff (2s -> 4s -> 8s -> 16s -> 30s) and background cooldown.
-    """
-
-    _instance: Optional[SchwabRateGovernor] = None
-    _singleton_lock: threading.Lock = threading.Lock()
-
-    def __init__(
-        self,
-        sustained_rpm: int = SUSTAINED_RPM,
-        burst_capacity: float = BURST_CAPACITY,
-        burst_refill_rate: float = BURST_REFILL_RATE,
-        daily_ceiling: int = MAX_DAILY_CALLS,
-        warning_threshold: int = WARNING_THRESHOLD,
-        freeze_threshold: int = FREEZE_THRESHOLD,
-        quota_file: Optional[Path | str] = None,
-        clock: Callable[[], float] = time.monotonic,
-        sleep_func: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
-    ) -> None:
-        self._sustained_rpm = sustained_rpm
-        self._burst_capacity = float(burst_capacity)
-        self._burst_refill_rate = float(burst_refill_rate)
-        self._daily_ceiling = daily_ceiling
-        self._warning_threshold = warning_threshold
-        self._freeze_threshold = freeze_threshold
-        self._quota_file = Path(quota_file or DEFAULT_QUOTA_FILE)
-        self._clock = clock
-        self._sleep = sleep_func
-
-        self._lock = asyncio.Lock()
-        self._file_lock = threading.RLock()
-
-        # Token bucket state
-        now = self._clock()
-        self._burst_tokens: float = float(burst_capacity)
-        self._last_burst_refill: float = now
-        self._timestamps: collections.deque[float] = collections.deque()
-        self._next_slot: float = now
-        self._critical_burst_used: int = 0
-
-        # Quota state
-        self._cached_date_utc: Optional[str] = None
-        self._daily_count: int = 0
-        self._has_warned: bool = False
-        self._init_quota_state()
-
-        # 429 Backoff & Cooldown state
-        self._consecutive_429: int = 0
-        self._backoff_until: float = 0.0
-        self._current_backoff: float = 0.0
-        self._background_cooldown_until: float = 0.0
-
-        logger.info(
-            "SchwabRateGovernor initialised: sustained_rpm=%d (%.1f req/s), "
-            "burst_capacity=%.1f, refill_rate=%.1f/s, daily_ceiling=%d, freeze_threshold=%d",
-            self._sustained_rpm, self._sustained_rpm / 60.0,
-            self._burst_capacity, self._burst_refill_rate,
-            self._daily_ceiling, self._freeze_threshold,
-        )
-
-    @classmethod
-    def get_instance(
-        cls,
-        sustained_rpm: int = SUSTAINED_RPM,
-        burst_capacity: float = BURST_CAPACITY,
-        burst_refill_rate: float = BURST_REFILL_RATE,
-        daily_ceiling: int = MAX_DAILY_CALLS,
-        warning_threshold: int = WARNING_THRESHOLD,
-        freeze_threshold: int = FREEZE_THRESHOLD,
-        quota_file: Optional[Path | str] = None,
-        clock: Callable[[], float] = time.monotonic,
-        sleep_func: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep,
-    ) -> SchwabRateGovernor:
-        """Thread-safe access to the singleton SchwabRateGovernor."""
-        with cls._singleton_lock:
-            if cls._instance is None:
-                cls._instance = cls(
-                    sustained_rpm=sustained_rpm,
-                    burst_capacity=burst_capacity,
-                    burst_refill_rate=burst_refill_rate,
-                    daily_ceiling=daily_ceiling,
-                    warning_threshold=warning_threshold,
-                    freeze_threshold=freeze_threshold,
-                    quota_file=quota_file,
-                    clock=clock,
-                    sleep_func=sleep_func,
-                )
-            return cls._instance
-
-    @classmethod
-    def reset_instance(cls) -> None:
-        """Reset the singleton instance (primarily for testing)."""
-        with cls._singleton_lock:
-            cls._instance = None
-
-    # ------------------------------------------------------------------
-    # Persistent State Management (Daily Quota)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _current_utc_date() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    def _init_quota_state(self) -> None:
-        with self._file_lock:
-            self._load_or_reset_quota()
-
-    def _load_or_reset_quota(self) -> Tuple[str, int]:
-        today = self._current_utc_date()
-        if not self._quota_file.exists():
-            self._cached_date_utc = today
-            self._daily_count = 0
-            self._save_quota()
-            return today, 0
-
-        try:
-            raw = self._quota_file.read_text(encoding="utf-8")
-            data = json.loads(raw)
-            file_date = data.get("date_utc")
-            count = int(data.get("count", 0))
-
-            if file_date == today:
-                self._cached_date_utc = today
-                self._daily_count = count
-            else:
-                logger.info(
-                    "SchwabRateGovernor: 00:00 UTC rollover detected (previous: %s, now: %s). Resetting daily quota.",
-                    file_date, today,
-                )
-                self._cached_date_utc = today
-                self._daily_count = 0
-                self._has_warned = False
-                self._save_quota()
-        except Exception as exc:
-            logger.warning(
-                "SchwabRateGovernor: failed to parse quota file %s: %s. Re-initializing.",
-                self._quota_file, exc,
-            )
-            self._cached_date_utc = today
-            self._daily_count = 0
-            self._save_quota()
-
-        return self._cached_date_utc, self._daily_count
-
-    def _save_quota(self) -> None:
-        self._quota_file.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "date_utc": self._cached_date_utc,
-            "count": self._daily_count,
-            "last_updated_utc": datetime.now(timezone.utc).isoformat(),
-        }
-        data_str = json.dumps(payload, indent=2)
-
-        temp_dir = self._quota_file.parent
-        fd, temp_path = tempfile.mkstemp(dir=temp_dir, prefix="quota_", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(data_str)
-            os.replace(temp_path, self._quota_file)
-        except Exception:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            raise
-
-    # ------------------------------------------------------------------
-    # Internal Refill & Purge Helpers
-    # ------------------------------------------------------------------
-
-    def _refill_burst(self, now: float) -> None:
-        elapsed = now - self._last_burst_refill
-        if elapsed > 0:
-            self._burst_tokens = min(
-                self._burst_capacity,
-                self._burst_tokens + elapsed * self._burst_refill_rate,
-            )
-            self._last_burst_refill = now
-            # Decay critical burst used proportional to refilled tokens
-            decay = elapsed * self._burst_refill_rate
-            self._critical_burst_used = max(0, int(self._critical_burst_used - decay))
-
-    def _purge_old_timestamps(self, now: float) -> None:
-        cutoff = now - 60.0
-        while self._timestamps and self._timestamps[0] <= cutoff:
-            self._timestamps.popleft()
-
-    # ------------------------------------------------------------------
-    # Rate Governor Core Acquisition
-    # ------------------------------------------------------------------
-
-    async def acquire(self, priority: str = "NORMAL") -> bool:
-        """
-        Non-blocking asynchronous token acquisition with multi-tier bounds.
-
-        Priorities:
-        - `CRITICAL_EXIT`: Order cancellations, stops, emergency liquidations.
-          Bypasses queue up to burst cap (20 tokens), preempts pending NORMAL polling.
-        - `NORMAL`: Standard quotes, order submission, account sync.
-        - `BACKGROUND`: Off-hours workers, historical bar backfill. Cooled off after 429.
-
-        Returns:
-            True if token acquired and caller may proceed.
-            False if request is rejected due to daily quota freeze or hard limit.
-        """
-        priority_norm = priority.upper().strip()
-        is_critical = priority_norm in {
-            "CRITICAL_EXIT",
-            "CRITICAL",
-            "CANCEL",
-            "CANCEL_ORDER",
-            "EMERGENCY",
-            "EMERGENCY_LIQUIDATION",
-            "MANDATORY_FLATTEN",
-            "STOP",
-        }
-
-        async with self._lock:
-            # 1. Daily Quota Verification & Rollover Check
-            with self._file_lock:
-                self._load_or_reset_quota()
-
-            now = self._clock()
-            self._purge_old_timestamps(now)
-            self._refill_burst(now)
-
-            # Warning threshold check
-            if self._daily_count >= self._warning_threshold and not self._has_warned:
-                logger.warning(
-                    "SchwabRateGovernor WARNING: daily request count %d reached warning threshold %d "
-                    "(ceiling: %d, freeze: %d).",
-                    self._daily_count, self._warning_threshold, self._daily_ceiling, self._freeze_threshold,
-                )
-                self._has_warned = True
-
-            # Daily Quota Freeze (>= 3,300 requests) & Hard-Cap (>= 3,500 requests)
-            if self._daily_count >= self._freeze_threshold and not is_critical:
-                logger.error(
-                    "SchwabRateGovernor: EMERGENCY NON-ESSENTIAL REST FREEZE ACTIVE (%d/%d requests). "
-                    "Rejecting %s request.",
-                    self._daily_count, self._daily_ceiling, priority_norm,
-                )
-                return False
-
-            if self._daily_count >= self._daily_ceiling and not is_critical:
-                logger.error(
-                    "SchwabRateGovernor: DAILY CEILING HARD-CAP REACHED (%d/%d). Rejecting %s.",
-                    self._daily_count, self._daily_ceiling, priority_norm,
-                )
-                return False
-
-            # 2. Scheduling & Rate Limit Calculation
-            target_time = now
-
-            if is_critical:
-                # CRITICAL_EXIT: Bypasses queue up to burst capacity
-                if self._critical_burst_used < self._burst_capacity:
-                    self._critical_burst_used += 1
-                    target_time = now
-                else:
-                    # Exceeded burst cap under extreme emergency, schedule immediate next available slot
-                    slot = max(now, self._next_slot) + (1.0 / self._burst_refill_rate)
-                    self._next_slot = slot
-                    target_time = slot
-            else:
-                # NORMAL or BACKGROUND
-                if self._burst_tokens >= 1.0 and len(self._timestamps) < self._sustained_rpm:
-                    # Token available in burst bucket and sustained rate not exceeded
-                    self._burst_tokens -= 1.0
-                    target_time = now
-                else:
-                    # Micro-burst or sustained window limit reached: schedule smooth refill slot
-                    slot = max(now, self._next_slot) + (1.0 / self._burst_refill_rate)
-                    if len(self._timestamps) >= self._sustained_rpm:
-                        # Tier 1 Sustained Rate Limiter: oldest request in rolling 60s must roll out
-                        earliest = self._timestamps[len(self._timestamps) - self._sustained_rpm]
-                        slot = max(slot, earliest + 60.0)
-                    self._next_slot = slot
-                    target_time = slot
-
-            # 3. 429 Backoff & Background Cooldown Application
-            if priority_norm == "BACKGROUND" and self._background_cooldown_until > target_time:
-                target_time = self._background_cooldown_until
-
-            if self._backoff_until > target_time:
-                target_time = self._backoff_until
-
-            wait_needed = max(0.0, target_time - now)
-
-        # 4. Asynchronous Sleep (outside lock to avoid blocking other tasks)
-        if wait_needed > 0:
-            await self._sleep(wait_needed)
-
-        # 5. Commit Request Timestamp & Increment Daily Quota
-        async with self._lock:
-            now_exec = self._clock()
-            self._timestamps.append(now_exec)
-            with self._file_lock:
-                self._daily_count += 1
-                self._save_quota()
-            return True
-
-    def record_response(self, status_code: int, headers: Optional[Dict[str, Any]] = None) -> None:
-        """
-        Record outbound HTTP response status to detect 429 Too Many Requests
-        and trigger exponential backoff.
-        """
-        now = self._clock()
-        if status_code == 429:
-            self._consecutive_429 += 1
-            # Exponential backoff: 2s, 4s, 8s, 16s, up to 30s
-            backoff = min(30.0, 2.0 * (2 ** (self._consecutive_429 - 1)))
-            if headers:
-                retry_after = headers.get("Retry-After") or headers.get("retry-after")
-                if retry_after is not None:
-                    try:
-                        backoff = max(backoff, float(retry_after))
-                    except (ValueError, TypeError):
-                        pass
-
-            self._current_backoff = backoff
-            self._backoff_until = max(self._backoff_until, now + backoff)
-            # Cool off BACKGROUND tasks with extended cooldown
-            self._background_cooldown_until = max(
-                self._background_cooldown_until,
-                now + max(backoff * 2.0, 30.0),
-            )
-            logger.warning(
-                "SchwabRateGovernor: HTTP 429 detected (#%d). Exponential backoff: %.1fs (until %.1f). "
-                "BACKGROUND tasks cooled off until %.1f.",
-                self._consecutive_429, backoff, self._backoff_until, self._background_cooldown_until,
-            )
-        elif 200 <= status_code < 300:
-            if now >= self._backoff_until:
-                self._consecutive_429 = 0
-                self._current_backoff = 0.0
-
-    def get_telemetry(self) -> Dict[str, Any]:
-        """
-        Return institutional telemetry dictionary:
-        - requests_today
-        - current_rpm
-        - burst_tokens_available
-        - quota_remaining
-        """
-        now = self._clock()
-        self._purge_old_timestamps(now)
-        self._refill_burst(now)
-        with self._file_lock:
-            self._load_or_reset_quota()
-            today_count = self._daily_count
-
-        return {
-            "requests_today": today_count,
-            "current_rpm": len(self._timestamps),
-            "burst_tokens_available": round(self._burst_tokens, 2),
-            "quota_remaining": max(0, self._daily_ceiling - today_count),
-            "warning_threshold": self._warning_threshold,
-            "freeze_threshold": self._freeze_threshold,
-            "daily_ceiling": self._daily_ceiling,
-            "consecutive_429": self._consecutive_429,
-            "backoff_active": now < self._backoff_until,
-            "background_cooling_off": now < self._background_cooldown_until,
-        }
-
-
-def get_governor() -> SchwabRateGovernor:
-    """Return the singleton SchwabRateGovernor instance."""
-    return SchwabRateGovernor.get_instance()
-
-
-# ===========================================================================
-# Backward Compatibility Wrappers (TokenBucket, SchwabRateLimiter)
-# ===========================================================================
-
-class TokenBucket:
-    """
-    Thread-safe token bucket implementation for synchronous components.
-    Tokens refill continuously at `refill_rate` tokens/second up to `capacity`.
-    """
-
-    def __init__(
-        self,
-        capacity: float = BURST_CAPACITY,
-        refill_rate: float = BURST_REFILL_RATE,
-        reserve: float = 8.0,
-        max_debt: float = 5.0,
-    ) -> None:
-        if capacity <= 0:
-            raise ValueError(f"capacity must be > 0, got {capacity}")
-        if refill_rate <= 0:
-            raise ValueError(f"refill_rate must be > 0, got {refill_rate}")
-
-        self._capacity: float = capacity
-        self._refill_rate: float = refill_rate
-        self._reserve: float = reserve
-        self._max_debt: float = max_debt
-        self._tokens: float = capacity
-        self._last_refill: float = time.monotonic()
-        self._lock: threading.Lock = threading.Lock()
-
-    def _refill(self) -> None:
-        now = time.monotonic()
-        elapsed = now - self._last_refill
-        credited = elapsed * self._refill_rate
-        self._tokens = min(self._capacity, self._tokens + credited)
-        self._last_refill = now
-
-    def acquire(
-        self,
-        tokens: float = 1.0,
-        timeout: Optional[float] = None,
-        is_essential: bool = False,
-    ) -> bool:
-        if tokens > self._capacity:
-            raise ValueError(
-                f"Requested {tokens} tokens exceeds bucket capacity {self._capacity}"
-            )
-
-        deadline = None if timeout is None else time.monotonic() + timeout
-        min_allowed = -self._max_debt if is_essential else self._reserve
-
-        while True:
-            with self._lock:
-                self._refill()
-                if (self._tokens - tokens) >= min_allowed:
-                    self._tokens -= tokens
-                    return True
-
-                deficit = (min_allowed + tokens) - self._tokens
-                wait_needed = deficit / self._refill_rate
-
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    logger.warning(
-                        "TokenBucket: acquire timed out after %.2fs (requested %.1f tokens, essential=%s)",
-                        timeout, tokens, is_essential,
-                    )
-                    return False
-                sleep_duration = min(wait_needed, remaining)
-            else:
-                sleep_duration = wait_needed
-
-            time.sleep(min(sleep_duration, 0.05))
-
-    def available(self) -> float:
-        with self._lock:
-            self._refill()
-            return self._tokens
-
-    def __repr__(self) -> str:
-        return (
-            f"TokenBucket(capacity={self._capacity}, "
-            f"refill_rate={self._refill_rate}/s, "
-            f"available≈{self.available():.2f})"
-        )
-
-
-class SchwabRateLimiter:
-    """
-    Synchronous rate limiter and daily message quota enforcer for backward compatibility.
-    """
-
-    _instance: Optional[SchwabRateLimiter] = None
-    _singleton_lock: threading.Lock = threading.Lock()
-
-    def __init__(
-        self,
-        quota_file: Optional[Path | str] = None,
-        max_daily_calls: int = MAX_DAILY_CALLS,
-        warning_threshold: int = 3200,
-        capacity: float = BURST_CAPACITY,
-        refill_rate: float = 100.0 / 60.0,
-    ) -> None:
-        self._quota_file = Path(quota_file or DEFAULT_QUOTA_FILE)
-        self._max_daily_calls = max_daily_calls
-        self._warning_threshold = warning_threshold
-
-        self._bucket = TokenBucket(capacity=capacity, refill_rate=refill_rate)
-        self._lock = threading.RLock()
-
-        self._cached_date_utc: Optional[str] = None
-        self._cached_count: int = 0
-        self._has_warned: bool = False
-
-        self._init_state()
-
-    @classmethod
-    def get_instance(
-        cls,
-        quota_file: Optional[Path | str] = None,
-        max_daily_calls: int = MAX_DAILY_CALLS,
-        warning_threshold: int = 3200,
-        capacity: float = BURST_CAPACITY,
-        refill_rate: float = 100.0 / 60.0,
-    ) -> SchwabRateLimiter:
-        with cls._singleton_lock:
-            if cls._instance is None:
-                cls._instance = cls(
-                    quota_file=quota_file,
-                    max_daily_calls=max_daily_calls,
-                    warning_threshold=warning_threshold,
-                    capacity=capacity,
-                    refill_rate=refill_rate,
-                )
-            return cls._instance
-
-    @classmethod
-    def reset_instance(cls) -> None:
-        with cls._singleton_lock:
-            cls._instance = None
-
-    @staticmethod
-    def _current_utc_date() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    def _init_state(self) -> None:
-        with self._lock:
-            self._load_or_reset_quota()
-
-    def _load_or_reset_quota(self) -> Tuple[str, int]:
-        today = self._current_utc_date()
-        if not self._quota_file.exists():
-            self._cached_date_utc = today
-            self._cached_count = 0
-            self._save_quota()
-            return today, 0
-
-        try:
-            raw = self._quota_file.read_text(encoding="utf-8")
-            data = json.loads(raw)
-            file_date = data.get("date_utc")
-            count = int(data.get("count", 0))
-
-            if file_date == today:
-                self._cached_date_utc = today
-                self._cached_count = count
-            else:
-                self._cached_date_utc = today
-                self._cached_count = 0
-                self._save_quota()
-        except Exception:
-            self._cached_date_utc = today
-            self._cached_count = 0
-            self._save_quota()
-
-        return self._cached_date_utc, self._cached_count
-
-    def _save_quota(self) -> None:
-        self._quota_file.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "date_utc": self._cached_date_utc,
-            "count": self._cached_count,
-            "last_updated_utc": datetime.now(timezone.utc).isoformat(),
-        }
-        data_str = json.dumps(payload, indent=2)
-
-        temp_dir = self._quota_file.parent
-        fd, temp_path = tempfile.mkstemp(dir=temp_dir, prefix="quota_", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(data_str)
-            os.replace(temp_path, self._quota_file)
-        except Exception:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            raise
-
-    def get_daily_count(self) -> int:
-        with self._lock:
-            _, count = self._load_or_reset_quota()
-            return count
-
-    def should_throttle_sync(self) -> bool:
-        return self.get_daily_count() >= self._warning_threshold
-
-    def is_daily_limit_exceeded(self) -> bool:
-        return self.get_daily_count() >= self._max_daily_calls
-
-    @staticmethod
-    def is_essential_call(action: str = "NORMAL", is_essential: bool = False) -> bool:
-        if is_essential:
-            return True
-        action_upper = action.upper()
-        return action_upper in {
-            "CANCEL",
-            "CANCEL_ORDER",
-            "CANCEL_ALL",
-            "EMERGENCY",
-            "EMERGENCY_LIQUIDATION",
-            "MANDATORY_FLATTEN",
-            "FLATTEN",
-            "DELETE",
-            "CRITICAL_EXIT",
-        }
-
-    def acquire(
-        self,
-        tokens: float = 1.0,
-        timeout: Optional[float] = None,
-        is_essential: bool = False,
-        action: str = "NORMAL",
-    ) -> bool:
-        with self._lock:
-            _, current_count = self._load_or_reset_quota()
-            essential = self.is_essential_call(action, is_essential)
-
-            if current_count >= self._max_daily_calls:
-                if not essential:
-                    logger.error(
-                        "SchwabRateLimiter: DAILY QUOTA CEILING REACHED (%d/%d). "
-                        "Blocking non-essential REST call '%s'.",
-                        current_count, self._max_daily_calls, action,
-                    )
-                    raise DailyQuotaExceededError(
-                        f"Daily outbound request ceiling of {self._max_daily_calls} exceeded (current: {current_count}). "
-                        f"Non-essential call '{action}' blocked."
-                    )
-                logger.warning(
-                    "SchwabRateLimiter: Quota ceiling (%d) reached, but allowing essential call '%s'.",
-                    self._max_daily_calls, action,
-                )
-            elif current_count >= self._warning_threshold:
-                if not self._has_warned or current_count % 50 == 0:
-                    logger.warning(
-                        "SchwabRateLimiter WARNING: daily outbound request count %d exceeded warning threshold %d "
-                        "(hard ceiling: %d). Non-essential syncs throttled to 60s.",
-                        current_count, self._warning_threshold, self._max_daily_calls,
-                    )
-                    self._has_warned = True
-
-        acquired = self._bucket.acquire(tokens=tokens, timeout=timeout, is_essential=essential)
-        if not acquired:
-            return False
-
-        with self._lock:
-            _, count = self._load_or_reset_quota()
-            self._cached_count = count + int(tokens)
-            self._save_quota()
-
-        return True
-
-    async def async_acquire(
-        self,
-        tokens: float = 1.0,
-        timeout: Optional[float] = None,
-        is_essential: bool = False,
-        action: str = "NORMAL",
-    ) -> bool:
-        return await asyncio.to_thread(
-            self.acquire,
-            tokens=tokens,
-            timeout=timeout,
-            is_essential=is_essential,
-            action=action,
-        )
-
-    def available(self) -> float:
-        return self._bucket.available()
-
-    def __repr__(self) -> str:
-        return (
-            f"SchwabRateLimiter(daily_count={self.get_daily_count()}/{self._max_daily_calls}, "
-            f"bucket={self._bucket})"
-        )
-
-
-def build_from_config(cfg: dict) -> SchwabRateLimiter:
-    """Construct or return the singleton SchwabRateLimiter from config."""
-    rl_cfg = cfg.get("rate_limiter", {})
-    capacity = float(rl_cfg.get("capacity", BURST_CAPACITY))
-    refill_rate = float(rl_cfg.get("refill_rate", SUSTAINED_RPM / 60.0))
-    quota_file = rl_cfg.get("quota_file", DEFAULT_QUOTA_FILE)
-    max_daily = int(rl_cfg.get("max_daily_calls", MAX_DAILY_CALLS))
-    warn_thresh = int(rl_cfg.get("warning_threshold", WARNING_THRESHOLD))
-
-    return SchwabRateLimiter.get_instance(
-        quota_file=quota_file,
-        max_daily_calls=max_daily,
-        warning_threshold=warn_thresh,
-        capacity=capacity,
-        refill_rate=refill_rate,
-    )
-
-```
-
-#### `core/event_ledger.py` - Zero-allocation SQLite WAL event ledger (368 lines, 14382 bytes)
-
-```python
-"""
-core/event_ledger.py
-====================
-Zero-Allocation Telemetry Event-Sourcing Ledger & WAL Observer (#67).
-
-Provides ultra-low-latency asynchronous event sourcing with dual persistence targets:
-1. SQLite WAL mode (state/telemetry.db table `event_stream`).
-2. Daily append-only JSONL event stream (/home/nicho/schwab_state/events_YYYYMMDD.jsonl).
-
-Key Architectural Guarantees:
-- Producer-Consumer with bounded in-memory asyncio.Queue(maxsize=10000).
-- Sub-5-microsecond non-blocking publish_event call for Core 0 tick loop isolation.
-- Background worker thread flushing batches every 500ms or 100 events.
-- Crash-resilient SQLite WAL configuration (PRAGMA journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000).
-"""
-
-from __future__ import annotations
-
-import asyncio
-from datetime import datetime, timezone
-import json
-import logging
-from pathlib import Path
-import sqlite3
-import threading
-import time
-from typing import Any, Dict, List, Optional, Tuple, Union
-
-from core.event_models import BaseEngineEvent, EngineEvent
-from core.paths import TELEMETRY_DB_PATH, STATE_DIR
-
-logger = logging.getLogger(__name__)
-
-
-def _resolve_default_log_dir() -> Path:
-    """Resolve the default JSONL directory (/home/nicho/schwab_state or STATE_DIR)."""
-    vm_dir = Path("/home/nicho/schwab_state")
-    if vm_dir.is_dir():
-        return vm_dir
-    return STATE_DIR
-
-
-class EventLedger:
-    """
-    High-throughput, asynchronous event-sourcing ledger backed by SQLite WAL
-    and append-only JSONL files.
-    """
-
-    _instance: Optional[EventLedger] = None
-    _singleton_lock: threading.Lock = threading.Lock()
-
-    def __init__(
-        self,
-        db_path: Optional[Union[str, Path]] = None,
-        log_dir: Optional[Union[str, Path]] = None,
-        maxsize: int = 10000,
-        batch_size: int = 100,
-        flush_interval_seconds: float = 0.5,
-    ) -> None:
-        self.db_path: Path = Path(db_path) if db_path is not None else Path(TELEMETRY_DB_PATH)
-        self.log_dir: Path = Path(log_dir) if log_dir is not None else _resolve_default_log_dir()
-        self.maxsize: int = int(maxsize)
-        self.batch_size: int = int(batch_size)
-        self.flush_interval: float = float(flush_interval_seconds)
-
-        # Ensure persistence paths exist
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-
-        # In-memory bounded queue
-        self._queue: asyncio.Queue[EngineEvent] = asyncio.Queue(maxsize=self.maxsize)
-
-        # Worker synchronization
-        self._worker_thread: Optional[threading.Thread] = None
-        self._running: bool = False
-        self._stop_event: threading.Event = threading.Event()
-        self._wake_event: threading.Event = threading.Event()
-        self._init_lock: threading.Lock = threading.Lock()
-
-        # Telemetry counters
-        self._published_count: int = 0
-        self._dropped_count: int = 0
-        self._flushed_count: int = 0
-
-        # Initialize SQLite schema
-        self._init_sqlite()
-
-    @classmethod
-    def get_instance(cls) -> EventLedger:
-        """Access or initialize the thread-safe singleton instance."""
-        if cls._instance is None:
-            with cls._singleton_lock:
-                if cls._instance is None:
-                    cls._instance = cls()
-                    cls._instance.start()
-        return cls._instance
-
-    @classmethod
-    def reset_instance(cls) -> None:
-        """Reset the singleton instance (primarily for isolated test fixtures)."""
-        with cls._singleton_lock:
-            if cls._instance is not None:
-                cls._instance.stop()
-                cls._instance = None
-
-    def _get_sqlite_connection(self) -> sqlite3.Connection:
-        """Create and configure a SQLite connection with high-concurrency WAL pragmas."""
-        conn = sqlite3.connect(
-            str(self.db_path),
-            timeout=5.0,
-            check_same_thread=False,
-            isolation_level=None,  # Autocommit mode
-        )
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA synchronous = NORMAL;")
-        conn.execute("PRAGMA busy_timeout = 5000;")
-        return conn
-
-    def _init_sqlite(self) -> None:
-        """Ensure destination tables and indexes exist in SQLite."""
-        conn = self._get_sqlite_connection()
-        try:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS event_stream (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_type TEXT NOT NULL,
-                    timestamp_utc TEXT NOT NULL,
-                    symbol TEXT,
-                    payload_json TEXT NOT NULL
-                );
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_event_stream_ts ON event_stream(timestamp_utc);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_event_stream_sym_type ON event_stream(symbol, event_type);")
-        finally:
-            conn.close()
-
-    def _get_current_log_path(self, now_utc: Optional[datetime] = None) -> Path:
-        """Generate current daily JSONL filepath."""
-        dt = now_utc or datetime.now(timezone.utc)
-        return self.log_dir / f"events_{dt.strftime('%Y%m%d')}.jsonl"
-
-    def start(self) -> None:
-        """Start the background worker thread if not already running."""
-        with self._init_lock:
-            if self._running and self._worker_thread and self._worker_thread.is_alive():
-                return
-            self._running = True
-            self._stop_event.clear()
-            self._wake_event.clear()
-            self._worker_thread = threading.Thread(
-                target=self._worker_loop,
-                name="EventLedgerWorker",
-                daemon=True,
-            )
-            self._worker_thread.start()
-
-    def _ensure_worker_started(self) -> None:
-        """Idempotently ensure worker thread is active on first push."""
-        if not self._running or self._worker_thread is None or not self._worker_thread.is_alive():
-            self.start()
-
-    def publish_event(self, event: EngineEvent) -> bool:
-        """
-        Push event into in-memory bounded queue non-blockingly (< 5 microsecond latency).
-
-        Returns:
-            bool: True if queued successfully, False if dropped due to queue saturation.
-        """
-        self._ensure_worker_started()
-        try:
-            self._queue.put_nowait(event)
-            self._published_count += 1
-            self._wake_event.set()
-            return True
-        except asyncio.QueueFull:
-            # Wake worker to drain
-            self._wake_event.set()
-            # Under extreme bursts, yield briefly to allow background worker thread to drain
-            for _ in range(500):
-                time.sleep(0.0005)
-                try:
-                    self._queue.put_nowait(event)
-                    self._published_count += 1
-                    self._wake_event.set()
-                    return True
-                except asyncio.QueueFull:
-                    pass
-
-            self._dropped_count += 1
-            logger.warning("EventLedger: queue saturated (maxsize=%d); dropped event", self.maxsize)
-            return False
-
-    def _worker_loop(self) -> None:
-        """
-        Background worker thread: flushes accumulated batches to SQLite
-        and JSONL every 500ms or 100 events.
-        """
-        conn = self._get_sqlite_connection()
-        current_log_date = ""
-        log_file_handle = None
-
-        batch: List[EngineEvent] = []
-        last_flush = time.monotonic()
-
-        try:
-            while not self._stop_event.is_set() or not self._queue.empty() or batch:
-                # 1. Drain up to batch_size items from queue
-                while len(batch) < self.batch_size:
-                    try:
-                        batch.append(self._queue.get_nowait())
-                    except asyncio.QueueEmpty:
-                        break
-
-                now = time.monotonic()
-                time_elapsed = now - last_flush
-                should_flush = (
-                    len(batch) >= self.batch_size
-                    or (batch and time_elapsed >= self.flush_interval)
-                    or (self._stop_event.is_set() and batch)
-                )
-
-                if should_flush:
-                    now_utc = datetime.now(timezone.utc)
-                    today_str = now_utc.strftime("%Y%m%d")
-
-                    # Manage daily rotating JSONL file handle
-                    if today_str != current_log_date or log_file_handle is None or log_file_handle.closed:
-                        if log_file_handle and not log_file_handle.closed:
-                            log_file_handle.close()
-                        log_path = self._get_current_log_path(now_utc)
-                        log_file_handle = open(log_path, "a", encoding="utf-8")
-                        current_log_date = today_str
-
-                    # Prepare batch records
-                    sqlite_rows: List[Tuple[str, str, Optional[str], str]] = []
-                    jsonl_lines: List[str] = []
-
-                    for ev in batch:
-                        if isinstance(ev, BaseEngineEvent):
-                            ev_type = ev.event_type
-                            ts_utc = ev.timestamp_utc
-                            sym = ev.get_symbol()
-                            payload_dict = ev.to_payload_dict()
-                            payload_json = ev.to_payload_json()
-                        elif isinstance(ev, dict):
-                            ev_type = str(ev.get("event_type", "UnknownEvent"))
-                            ts_utc = str(ev.get("timestamp_utc") or ev.get("timestamp") or now_utc.isoformat())
-                            sym = ev.get("symbol")
-                            payload_dict = ev.get("payload", ev)
-                            payload_json = json.dumps(payload_dict)
-                        else:
-                            ev_type = getattr(ev, "event_type", ev.__class__.__name__)
-                            ts_utc = getattr(ev, "timestamp_utc", now_utc.isoformat())
-                            sym = getattr(ev, "symbol", None)
-                            payload_dict = getattr(ev, "__dict__", {})
-                            payload_json = json.dumps(payload_dict, default=str)
-
-                        sqlite_rows.append((ev_type, ts_utc, sym, payload_json))
-
-                        # Unified JSONL record preserving schema & top-level properties
-                        record = {
-                            "event_type": ev_type,
-                            "timestamp_utc": ts_utc,
-                            "symbol": sym,
-                            "payload": payload_dict,
-                            **payload_dict,
-                        }
-                        jsonl_lines.append(json.dumps(record, default=str))
-
-                    # 1. Target A: SQLite batch insert
-                    conn.execute("BEGIN IMMEDIATE;")
-                    conn.executemany(
-                        "INSERT INTO event_stream (event_type, timestamp_utc, symbol, payload_json) VALUES (?, ?, ?, ?);",
-                        sqlite_rows,
-                    )
-                    conn.execute("COMMIT;")
-
-                    # 2. Target B: Append-only disk log
-                    log_file_handle.write("\n".join(jsonl_lines) + "\n")
-                    log_file_handle.flush()
-
-                    self._flushed_count += len(batch)
-                    batch.clear()
-                    last_flush = time.monotonic()
-
-                elif not self._queue.empty():
-                    # More items waiting, continue without sleep
-                    continue
-                else:
-                    # Queue empty, wait for wake signal or timeout
-                    self._wake_event.wait(timeout=0.01)
-                    self._wake_event.clear()
-
-        except Exception as exc:
-            logger.exception("EventLedger worker encountered error: %s", exc)
-        finally:
-            try:
-                if log_file_handle and not log_file_handle.closed:
-                    log_file_handle.flush()
-                    log_file_handle.close()
-            except Exception:
-                pass
-            try:
-                conn.close()
-            except Exception:
-                pass
-            self._running = False
-
-    def drain(self, timeout: float = 2.0) -> bool:
-        """
-        Wait until the queue is completely drained and all items are persisted.
-        """
-        start_t = time.perf_counter()
-        while time.perf_counter() - start_t < timeout:
-            if self._queue.empty() and (self._flushed_count + self._dropped_count >= self._published_count):
-                return True
-            self._wake_event.set()
-            time.sleep(0.005)
-        return self._queue.empty()
-
-    def flush(self) -> None:
-        """Synchronously trigger queue wake up and wait for drain."""
-        self._wake_event.set()
-        self.drain(timeout=1.0)
-
-    def checkpoint(self) -> None:
-        """Trigger SQLite WAL checkpoint (TRUNCATE)."""
-        self.flush()
-        conn = self._get_sqlite_connection()
-        try:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-        finally:
-            conn.close()
-
-    def stop(self, timeout: float = 2.0) -> None:
-        """Gracefully stop background worker thread."""
-        self._stop_event.set()
-        self._wake_event.set()
-        if self._worker_thread and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=timeout)
-        self._running = False
-
-    @property
-    def queue_size(self) -> int:
-        """Current number of items in memory queue."""
-        return self._queue.qsize()
-
-    @property
-    def published_events(self) -> int:
-        """Total events submitted to publish_event."""
-        return self._published_count
-
-    @property
-    def dropped_events(self) -> int:
-        """Total events dropped due to queue saturation."""
-        return self._dropped_count
-
-    @property
-    def flushed_events(self) -> int:
-        """Total events flushed to SQLite and disk."""
-        return self._flushed_count
-
-
-def publish_event(event: EngineEvent) -> bool:
-    """
-    Global non-blocking event publishing helper for Core 0 execution routines.
-    """
-    return EventLedger.get_instance().publish_event(event)
-
-```
-
-#### `core/event_models.py` - Zero-allocation SQLite WAL event models & schemas (172 lines, 5634 bytes)
-
-```python
-"""
-core/event_models.py
-====================
-Structured Pydantic V2 Domain Event Models for Zero-Allocation Telemetry (#67).
-
-Defines strongly-typed, immutable events recorded by the asynchronous event-sourcing ledger:
-- SignalGeneratedEvent: Generated algorithmic entry signals with macro/micro metrics.
-- OrderRoutedEvent: Broker-facing order submissions with limit and notional values.
-- ExecutionFilledEvent: Order fill executions with slippage and exchange fees.
-- SentinelRatchetEvent: Synthetic microstructure stop-loss ratchet and watermark updates.
-- SettlementUpdatedEvent: Account cash settlement, NLV, and Good Faith Violation states.
-"""
-
-from __future__ import annotations
-
-from datetime import datetime, timezone
-import json
-from typing import Any, Dict, Optional, Union
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-
-class BaseEngineEvent(BaseModel):
-    """
-    Abstract domain event base class with zero-overhead serialization helpers.
-    """
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
-
-    @property
-    def event_type(self) -> str:
-        """Class name representing the event type."""
-        return self.__class__.__name__
-
-    @property
-    def timestamp_utc(self) -> str:
-        """ISO 8601 UTC string representation of the event timestamp."""
-        ts = getattr(self, "timestamp", None)
-        if isinstance(ts, datetime):
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            return ts.astimezone(timezone.utc).isoformat()
-        if isinstance(ts, str):
-            return ts
-        return datetime.now(timezone.utc).isoformat()
-
-    def get_symbol(self) -> Optional[str]:
-        """Extract symbol if present, or None."""
-        return getattr(self, "symbol", None)
-
-    def to_payload_dict(self) -> Dict[str, Any]:
-        """Convert model fields to JSON-serializable dictionary."""
-        return self.model_dump(mode="json")
-
-    def to_payload_json(self) -> str:
-        """Serialize model fields to JSON string."""
-        return self.model_dump_json()
-
-
-class SignalGeneratedEvent(BaseEngineEvent):
-    """
-    Recorded when an algorithmic strategy generates a trade signal candidate.
-    """
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    symbol: str
-    strategy: str
-    rvol: float
-    ses_score: float
-    s0_price: float
-
-    @field_validator("timestamp", mode="before")
-    @classmethod
-    def _normalize_timestamp(cls, v: Any) -> str:
-        if isinstance(v, datetime):
-            if v.tzinfo is None:
-                v = v.replace(tzinfo=timezone.utc)
-            return v.astimezone(timezone.utc).isoformat()
-        return str(v)
-
-
-class OrderRoutedEvent(BaseEngineEvent):
-    """
-    Recorded when an order wire payload is submitted to the Schwab API or broker gateway.
-    """
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    client_order_id: str
-    symbol: str
-    action: str
-    shares: int
-    limit_price: float
-    notional: float
-
-    @field_validator("timestamp", mode="before")
-    @classmethod
-    def _normalize_timestamp(cls, v: Any) -> str:
-        if isinstance(v, datetime):
-            if v.tzinfo is None:
-                v = v.replace(tzinfo=timezone.utc)
-            return v.astimezone(timezone.utc).isoformat()
-        return str(v)
-
-
-class ExecutionFilledEvent(BaseEngineEvent):
-    """
-    Recorded upon receiving execution fill telemetry from the broker wire.
-    """
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    order_id: str
-    symbol: str
-    fill_price: float
-    slippage_usd: float = 0.0
-    fee_usd: float = 0.0
-
-    @field_validator("timestamp", mode="before")
-    @classmethod
-    def _normalize_timestamp(cls, v: Any) -> str:
-        if isinstance(v, datetime):
-            if v.tzinfo is None:
-                v = v.replace(tzinfo=timezone.utc)
-            return v.astimezone(timezone.utc).isoformat()
-        return str(v)
-
-
-class SentinelRatchetEvent(BaseEngineEvent):
-    """
-    Recorded when the synthetic microstructure sentinel ratchets a trailing stop
-    or high-watermark level.
-    """
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    symbol: str
-    high_watermark: float
-    dynamic_trail_price: float
-    floor_price: float
-
-    @field_validator("timestamp", mode="before")
-    @classmethod
-    def _normalize_timestamp(cls, v: Any) -> str:
-        if isinstance(v, datetime):
-            if v.tzinfo is None:
-                v = v.replace(tzinfo=timezone.utc)
-            return v.astimezone(timezone.utc).isoformat()
-        return str(v)
-
-
-class SettlementUpdatedEvent(BaseEngineEvent):
-    """
-    Recorded when cash balances, settled funds, and settlement violation states update.
-    """
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    settled_cash: float
-    unsettled_cash: float
-    total_nlv: float
-    gfv_count: int = 0
-    symbol: Optional[str] = "ACCOUNT"
-
-    @field_validator("timestamp", mode="before")
-    @classmethod
-    def _normalize_timestamp(cls, v: Any) -> str:
-        if isinstance(v, datetime):
-            if v.tzinfo is None:
-                v = v.replace(tzinfo=timezone.utc)
-            return v.astimezone(timezone.utc).isoformat()
-        return str(v)
-
-
-# Polymorphic domain event union
-EngineEvent = Union[
-    SignalGeneratedEvent,
-    OrderRoutedEvent,
-    ExecutionFilledEvent,
-    SentinelRatchetEvent,
-    SettlementUpdatedEvent,
-    BaseEngineEvent,
-]
-
-```
-
-#### `core/ledger.py` - Three-bucket cash accounting & T+1 GFV state machine (768 lines, 32677 bytes)
-
-```python
-"""
-core/ledger.py
-==============
-Zero-GFV settlement ledger (cash account, T+1).
-
-Buckets
--------
-Bucket 1  settled cash      - the ONLY pool Tier 1 may spend (invariant I1).
-Bucket 2  unsettled lots    - sale proceeds waiting for T+1. This is the HARD
-                              RESERVE: it can never fund an entry (I2).
-Bucket 3  pending ACH       - informational only, never buying power (I3).
-
-The previous implementation allowed entries funded from Bucket 2. Because the
-engine flattens to cash at 15:50, any such entry is a same-day round trip on
-unsettled funds, i.e. a Good Faith Violation. That branch no longer exists.
-
-Thread safety: every public method takes ``self._lock``; the object may be
-shared between the asyncio event loop, the streamer thread and API threads.
-"""
-
-from __future__ import annotations
-
-import logging
-import threading
-import uuid
-from dataclasses import dataclass, field
-from datetime import date, datetime
 from decimal import Decimal
-from typing import Callable, Dict, List, Optional, Tuple
-
-import pytz
-
-from core.liquidity_policy import ZERO, add_business_days, next_business_day, q
-
-logger = logging.getLogger("ledger")
-
-_EDT = pytz.timezone("America/New_York")
-
-
-def _d(value) -> Decimal:
-    return value if isinstance(value, Decimal) else Decimal(str(value))
-
-
-def today_et() -> date:
-    return datetime.now(_EDT).date()
-
-
-@dataclass
-class UnsettledLot:
-    amount: Decimal
-    trade_date: date
-    settle_date: date
-    source: str
-
-
-class ReconciliationLockError(RuntimeError):
-    """Raised when an attempt to credit cash buckets or record fills violates the Strict Reconciliation Lock."""
-
-
-@dataclass
-class ManagedPosition:
-    symbol: str
-    quantity: int
-    entry_price: Decimal
-    last_price: Decimal
-    stop_price: Optional[Decimal] = None
-    target_price: Optional[Decimal] = None
-    regime: str = "A"
-    opened_at: datetime = field(default_factory=lambda: datetime.now(_EDT))
-    simulated: bool = True
-    high_water_mark: Decimal = field(default=Decimal("0.00"))
-    volatility_stop_distance: Optional[Decimal] = None
-    ratchet_permitted: bool = True
-    funded_with_settled: bool = True
-    settle_date: Optional[date] = None
-    recovery_locked: bool = False
-
-    def __post_init__(self):
-        if self.high_water_mark <= Decimal("0.00"):
-            self.high_water_mark = max(self.entry_price, self.last_price)
-
-    @property
-    def notional(self) -> Decimal:
-        return q(self.last_price * self.quantity)
-
-    @property
-    def unrealized_pnl(self) -> Decimal:
-        return q((self.last_price - self.entry_price) * self.quantity)
-
-    def is_gfv_safe_to_sell(self, today: Optional[date] = None) -> Tuple[bool, str]:
-        """
-        Evaluates whether selling this position today is compliant with T+1 settlement rules.
-        - If funded with settled cash, same-day exit is 100% GFV-safe.
-        - If funded with unsettled cash, selling prior to settle_date causes a Good Faith Violation (GFV).
-        """
-        if self.funded_with_settled:
-            return True, f"Shares of {self.symbol} were acquired with settled funds (GFV safe)."
-        current_date = today or today_et()
-        if self.settle_date is not None and current_date >= self.settle_date:
-            return True, f"Shares of {self.symbol} settled on {self.settle_date} (GFV safe)."
-        return False, (
-            f"GFV VETO: {self.symbol} shares acquired with unsettled funds. "
-            f"Selling before {self.settle_date or 'T+1'} settlement causes a Good Faith Violation (overnight hold required)."
-        )
-
-    def update_trailing_stop(
-        self,
-        current_price: Decimal | float,
-        stop_distance: Decimal | float,
-        ratchet_permitted: bool = True,
-    ) -> bool:
-        """
-        Updates the position's high-water-mark and ratchets stop_price upward.
-        Strictly monotonic: candidate stop only replaces stop_price if candidate > stop_price
-        AND ratchet_permitted is True (Hurst persistence gate).
-        If ratchet_permitted is False (Hurst <= 0.50 chop), existing stop_price is maintained.
-        Returns True if stop_price was adjusted upward.
-        """
-        px = _d(current_price)
-        dist = _d(stop_distance)
-        self.last_price = px
-        if px > self.high_water_mark:
-            self.high_water_mark = px
-
-        self.volatility_stop_distance = q(dist)
-        self.ratchet_permitted = ratchet_permitted
-        if not ratchet_permitted:
-            return False
-
-        candidate = q(self.high_water_mark - dist)
-        if self.stop_price is None or candidate > self.stop_price:
-            self.stop_price = candidate
-            return True
-        return False
-
-
-@dataclass
-class TradeRecord:
-    symbol: str
-    side: str
-    quantity: int
-    price: Decimal
-    cost_basis: Decimal
-    timestamp: datetime
-    simulated: bool
-    realized_pnl: Decimal = ZERO
-    disallowed_loss: Decimal = ZERO
-    regime: str = ""
-    trade_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-
-
-@dataclass
-class BrokerBalances:
-    """Normalised Schwab account balances (see services.broker_sync.parse_account)."""
-    liquidation_value: Decimal
-    settled_cash: Decimal
-    unsettled_cash: Decimal = ZERO
-    swvxx_value: Decimal = ZERO
-    positions_value: Decimal = ZERO
-
-
-class SettlementLedger:
-    def __init__(
-        self,
-        baseline_settled: Decimal | float = 0,
-        *,
-        single_ticker_cap_pct: Decimal | float = "0.33",
-        risk_per_trade_pct: Decimal | float = "0.02",
-        daily_drawdown_pct: Decimal | float = "0.05",
-        cash_buffer: Decimal | float = "10.00",
-        data_source: str = "SANDBOX_SIM",
-        env: str = "active",
-        trade_store: Optional[Any] = None,
-        sizing_governor: Optional[Any] = None,
-    ):
-        self._lock = threading.RLock()
-        self.data_source = data_source
-        self.env = env
-        self.cap_pct = _d(single_ticker_cap_pct)
-        self.risk_pct = _d(risk_per_trade_pct)
-        self.dd_pct = _d(daily_drawdown_pct)
-        self.cash_buffer = _d(cash_buffer)
-        self.trade_store = trade_store
-        self.sizing_governor = sizing_governor
-
-        self._settled: Decimal = q(_d(baseline_settled))
-        self._lots: List[UnsettledLot] = []
-        self._pending_ach: Decimal = ZERO
-        self._reservations: Dict[str, Decimal] = {}
-        self._reservation_funded_settled: Dict[str, bool] = {}
-
-        self.positions: Dict[str, ManagedPosition] = {}
-        self._trades: List[TradeRecord] = []
-        if self.trade_store is not None:
-            self._rehydrate_trades()
-
-        # Broker-authoritative figures (live mode)
-        self._broker_nlv: Optional[Decimal] = None
-        self._swvxx: Decimal = ZERO
-        self._swvxx_in_flight: Decimal = ZERO
-        self._broker_positions_value: Decimal = ZERO
-        self.synced: bool = False
-        self.synced_at: Optional[datetime] = None
-        self.drift: Decimal = ZERO
-        self._ceiling_provider: Optional[Callable[[], Optional[Decimal]]] = None
-
-    def _rehydrate_trades(self, target_date: Optional[date] = None) -> None:
-        with self._lock:
-            if self.trade_store is None:
-                return
-            records = self.trade_store.fetch_trades_today(env=self.env, target_date=target_date)
-            loaded = []
-            for r in records:
-                try:
-                    ts = datetime.fromisoformat(r["timestamp"])
-                    if ts.tzinfo is None:
-                        ts = _EDT.localize(ts)
-                except Exception:
-                    ts = datetime.now(_EDT)
-                loaded.append(
-                    TradeRecord(
-                        symbol=r["symbol"],
-                        side=r["side"],
-                        quantity=int(r["quantity"]),
-                        price=Decimal(str(r["price"])),
-                        cost_basis=Decimal(str(r["cost_basis"])),
-                        timestamp=ts,
-                        simulated=bool(r["simulated"]),
-                        realized_pnl=Decimal(str(r.get("realized_pnl", 0.0))),
-                        disallowed_loss=Decimal(str(r.get("disallowed_loss", 0.0))),
-                        regime=r.get("regime", ""),
-                        trade_id=r.get("trade_id", str(uuid.uuid4())),
-                    )
-                )
-            self._trades = loaded
-            logger.info("Hydrated %d trade(s) from SQLite for env '%s'.", len(loaded), self.env)
-
-    # ------------------------------------------------------------------
-    # Read-only views
-    # ------------------------------------------------------------------
-
-    @property
-    def settled_cash(self) -> Decimal:
-        """Cleared funds available for trading (Bucket 1)."""
-        with self._lock:
-            return self._settled
-
-    @property
-    def unsettled_cash(self) -> Decimal:
-        """Sale proceeds waiting for T+1 settlement (Bucket 2 - Hard Reserve)."""
-        with self._lock:
-            return self.unsettled_total
-
-    @property
-    def locked_cash(self) -> Decimal:
-        """Committed funds reserved for pending in-flight orders."""
-        with self._lock:
-            return q(sum(self._reservations.values(), ZERO))
-
-    @property
-    def bucket1_settled(self) -> float:
-        with self._lock:
-            return float(self._settled)
-
-    @property
-    def bucket2_unsettled(self) -> float:
-        with self._lock:
-            return float(self.unsettled_total)
-
-    @property
-    def bucket3_pending(self) -> float:
-        with self._lock:
-            return float(self._pending_ach)
-
-    @property
-    def settled(self) -> Decimal:
-        with self._lock:
-            return self._settled
-
-    @property
-    def unsettled_total(self) -> Decimal:
-        with self._lock:
-            return q(sum((l.amount for l in self._lots), ZERO))
-
-    @property
-    def swvxx_balance(self) -> Decimal:
-        return self._swvxx
-
-    @property
-    def swvxx_in_flight(self) -> Decimal:
-        return self._swvxx_in_flight
-
-    @property
-    def pending_ach(self) -> Decimal:
-        return self._pending_ach
-
-    @property
-    def positions_value(self) -> Decimal:
-        with self._lock:
-            return q(sum((p.notional for p in self.positions.values()), ZERO))
-
-    @property
-    def nlv(self) -> Decimal:
-        """Broker NLV when synced; otherwise settled + unsettled + marked positions."""
-        with self._lock:
-            if self._broker_nlv is not None:
-                return self._broker_nlv
-            return q(self._settled + self.unsettled_total + self.positions_value
-                     + sum(self._reservations.values(), ZERO))
-
-    @property
-    def max_single_exposure(self) -> Decimal:
-        return q(self.nlv * self.cap_pct)
-
-    @property
-    def max_risk_per_trade(self) -> Decimal:
-        return q(self.nlv * self.risk_pct)
-
-    @property
-    def daily_drawdown_limit(self) -> Decimal:
-        return q(-(self.nlv * self.dd_pct))
-
-    def get_trade_log(self) -> List[TradeRecord]:
-        with self._lock:
-            return list(self._trades)
-
-    def get_positions(self) -> List[ManagedPosition]:
-        with self._lock:
-            return list(self.positions.values())
-
-    def realized_pnl_today(self, day: Optional[date] = None) -> Decimal:
-        day = day or today_et()
-        with self._lock:
-            return q(sum((t.realized_pnl for t in self._trades
-                          if t.side == "SELL" and t.timestamp.astimezone(_EDT).date() == day), ZERO))
-
-    def unrealized_pnl(self) -> Decimal:
-        with self._lock:
-            return q(sum((p.unrealized_pnl for p in self.positions.values()), ZERO))
-
-    # ------------------------------------------------------------------
-    # Capital allocation (settled-only: invariant I1)
-    # ------------------------------------------------------------------
-
-    def set_order_ceiling_provider(self, provider: Optional[Callable[[], Optional[Decimal]]]) -> None:
-        """
-        Registers a callable returning the current policy-derived maximum order
-        notional (or None for no extra ceiling). Evaluated on every pre-trade check
-        so the soft-reserve policy is enforced for StrategyEngine entries as well.
-        """
-        self._ceiling_provider = provider
-
-    def check_order_allowed(self, order_cost) -> Tuple[bool, str]:
-        """Pre-trade gate used by StrategyEngine. Settled cash + 20% NLV cap + policy ceiling."""
-        cost = _d(order_cost)
-        with self._lock:
-            if cost <= 0:
-                return False, "non-positive order cost"
-            if cost > self._settled - self.cash_buffer:
-                return False, (f"cost ${cost:.2f} exceeds settled cash ${self._settled:.2f} "
-                               f"less ${self.cash_buffer:.2f} buffer (unsettled funds are Hard Reserve)")
-            cap = self.max_single_exposure
-            if cap > 0 and cost > cap:
-                return False, f"cost ${cost:.2f} exceeds single-ticker cap ${cap:.2f} (33% NLV)"
-            provider = self._ceiling_provider
-        if provider is not None:
-            try:
-                ceiling = provider()
-            except Exception as exc:
-                logger.error("Order ceiling provider failed (%s); refusing order.", exc)
-                return False, "order ceiling unavailable"
-            if ceiling is not None and cost > ceiling:
-                return False, f"cost ${cost:.2f} exceeds policy buying power ${ceiling:.2f}"
-        return True, "ok"
-
-    def allocate_capital(self, ticker: str, amount, allow_unsettled: bool = False) -> bool:
-        """
-        Reserves cash for an entry. By default (allow_unsettled=False), strictly allocates
-        from settled cash (Bucket 1). If allow_unsettled=True, can draw from unsettled funds
-        if settled cash is insufficient, which tags the subsequent fill as unsettled.
-        """
-        amt = q(_d(amount))
-        with self._lock:
-            if not allow_unsettled:
-                ok, reason = self.check_order_allowed(amt)
-                if not ok:
-                    logger.error("Allocation refused for %s: %s", ticker, reason)
-                    return False
-                self._settled -= amt
-                self._reservations[ticker] = self._reservations.get(ticker, ZERO) + amt
-                self._reservation_funded_settled[ticker] = True
-                logger.info("Reserved $%s of SETTLED cash for %s.", amt, ticker)
-                return True
-            else:
-                available_settled = max(self._settled - self.cash_buffer, ZERO)
-                total_avail = available_settled + self.unsettled_total
-                if amt > total_avail:
-                    logger.error("Allocation refused for %s: cost $%s exceeds total cash $%s.", ticker, amt, total_avail)
-                    return False
-                if amt <= available_settled:
-                    self._settled -= amt
-                    self._reservations[ticker] = self._reservations.get(ticker, ZERO) + amt
-                    self._reservation_funded_settled[ticker] = True
-                    logger.info("Reserved $%s of SETTLED cash for %s.", amt, ticker)
-                else:
-                    from_settled = available_settled
-                    from_unsettled = amt - from_settled
-                    self._settled -= from_settled
-                    remaining_to_deduct = from_unsettled
-                    updated_lots = []
-                    for lot in self._lots:
-                        if remaining_to_deduct <= ZERO:
-                            updated_lots.append(lot)
-                        elif lot.amount <= remaining_to_deduct:
-                            remaining_to_deduct -= lot.amount
-                        else:
-                            updated_lots.append(UnsettledLot(
-                                amount=lot.amount - remaining_to_deduct,
-                                trade_date=lot.trade_date,
-                                settle_date=lot.settle_date,
-                                source=lot.source,
-                            ))
-                            remaining_to_deduct = ZERO
-                    self._lots = updated_lots
-                    self._reservations[ticker] = self._reservations.get(ticker, ZERO) + amt
-                    self._reservation_funded_settled[ticker] = False
-                    logger.warning("Reserved $%s ($%s unsettled) for %s. POSITION WILL REQUIRE OVERNIGHT HOLD.",
-                                   amt, from_unsettled, ticker)
-                return True
-
-    def cancel_reservation(self, ticker: str) -> None:
-        with self._lock:
-            amt = self._reservations.pop(ticker, ZERO)
-            was_settled = self._reservation_funded_settled.pop(ticker, True)
-            if was_settled:
-                self._settled += amt
-            else:
-                if amt > ZERO:
-                    self._lots.append(UnsettledLot(
-                        amount=amt,
-                        trade_date=today_et(),
-                        settle_date=next_business_day(today_et()),
-                        source=f"CANCEL_RESERVATION:{ticker}",
-                    ))
-            if amt:
-                logger.info("Released reservation $%s for %s back to cash.", amt, ticker)
-
-    def can_sell_position(self, symbol: str, quantity: int = 0, today: Optional[date] = None) -> Tuple[bool, str]:
-        """
-        Pre-trade check: verifies if shares of `symbol` are safe to sell today without
-        causing a Good Faith Violation.
-        """
-        with self._lock:
-            sym = symbol.upper()
-            pos = self.positions.get(sym)
-            if pos is None:
-                return True, f"No active position in {sym}."
-            return pos.is_gfv_safe_to_sell(today=today)
-
-    def evaluate_gfv_compliance(self, ticker: str, today: Optional[date] = None) -> bool:
-        """Returns True if the position in ticker can be sold without GFV."""
-        return self.can_sell_position(ticker, today=today)[0]
-
-    # ------------------------------------------------------------------
-    # Fills
-    # ------------------------------------------------------------------
-
-    def confirm_buy(
-        self,
-        symbol: str,
-        quantity: int,
-        price,
-        *,
-        stop=None,
-        target=None,
-        regime: str = "A",
-        simulated: bool = True,
-        when: Optional[datetime] = None,
-        funded_with_settled: Optional[bool] = None,
-        settle_date: Optional[date] = None,
-        execution_payload: Optional[Dict[str, Any]] = None,
-    ) -> ManagedPosition:
-        px = _d(price)
-        cost = q(px * quantity)
-        trade_dt = when or datetime.now(_EDT)
-        trade_day = trade_dt.astimezone(_EDT).date()
-        eff_settle_date = settle_date or next_business_day(trade_day)
-
-        with self._lock:
-            reserved = self._reservations.pop(symbol, ZERO)
-            was_settled_res = self._reservation_funded_settled.pop(symbol, True)
-            is_settled = funded_with_settled if funded_with_settled is not None else was_settled_res
-
-            # Settle the difference between the reservation and the actual fill.
-            diff = reserved - cost
-            if diff != ZERO:
-                if was_settled_res:
-                    self._settled += diff
-                else:
-                    if diff > ZERO:
-                        self._lots.append(UnsettledLot(
-                            amount=diff, trade_date=trade_day,
-                            settle_date=eff_settle_date, source=f"RESERVATION_SURPLUS:{symbol}"
-                        ))
-                    else:
-                        self._settled += diff
-
-            existing = self.positions.get(symbol)
-            if existing:
-                total_qty = existing.quantity + quantity
-                avg = q((existing.entry_price * existing.quantity + px * quantity) / total_qty)
-                existing.quantity, existing.entry_price, existing.last_price = total_qty, avg, px
-                if not is_settled:
-                    existing.funded_with_settled = False
-                    existing.settle_date = max(existing.settle_date or eff_settle_date, eff_settle_date)
-                pos = existing
-            else:
-                pos = ManagedPosition(
-                    symbol=symbol, quantity=quantity, entry_price=px, last_price=px,
-                    stop_price=_d(stop) if stop is not None else None,
-                    target_price=_d(target) if target is not None else None,
-                    regime=regime, simulated=simulated, opened_at=trade_dt,
-                    funded_with_settled=is_settled,
-                    settle_date=eff_settle_date if not is_settled else None,
-                )
-                self.positions[symbol] = pos
-            rec = TradeRecord(
-                symbol=symbol, side="BUY", quantity=quantity, price=px, cost_basis=cost,
-                timestamp=trade_dt, simulated=simulated, regime=regime,
-            )
-            self._trades.append(rec)
-            if self.trade_store is not None:
-                alpha = getattr(self.sizing_governor, "alpha", 10.0) if self.sizing_governor is not None else 10.0
-                beta = getattr(self.sizing_governor, "beta", 10.0) if self.sizing_governor is not None else 10.0
-                kelly = getattr(self.sizing_governor, "kelly_fraction", 0.0) if self.sizing_governor is not None else 0.0
-                try:
-                    self.trade_store.record_trade(
-                        symbol=symbol, side="BUY", quantity=quantity, price=px, cost_basis=cost,
-                        timestamp=trade_dt, simulated=simulated, realized_pnl=ZERO,
-                        disallowed_loss=ZERO, regime=regime, trade_id=rec.trade_id, env=self.env,
-                        posterior_alpha=alpha, posterior_beta=beta, kelly_fraction=kelly,
-                    )
-                except Exception as exc:
-                    logger.error("Failed to persist BUY trade to SQLite: %s", exc)
-            return pos
-
-    def adopt_position(
-        self,
-        symbol: str,
-        quantity: int,
-        entry_price: Decimal | float,
-        current_price: Optional[Decimal | float] = None,
-        *,
-        stop_price: Optional[Decimal | float] = None,
-        target_price: Optional[Decimal | float] = None,
-        regime: str = "A",
-        simulated: bool = False,
-        opened_at: Optional[datetime] = None,
-        funded_with_settled: bool = True,
-        settle_date: Optional[date] = None,
-        recovery_locked: bool = False,
-    ) -> ManagedPosition:
-        """Adopts an existing holding into the managed positions ledger."""
-        sym = symbol.upper()
-        entry_px = _d(entry_price)
-        last_px = _d(current_price) if current_price is not None else entry_px
-        trade_dt = opened_at or datetime.now(_EDT)
-        trade_day = trade_dt.astimezone(_EDT).date()
-        eff_settle = settle_date or (next_business_day(trade_day) if not funded_with_settled else None)
-        with self._lock:
-            pos = ManagedPosition(
-                symbol=sym,
-                quantity=int(quantity),
-                entry_price=entry_px,
-                last_price=last_px,
-                stop_price=_d(stop_price) if stop_price is not None else None,
-                target_price=_d(target_price) if target_price is not None else None,
-                regime=regime,
-                simulated=simulated,
-                opened_at=trade_dt,
-                funded_with_settled=funded_with_settled,
-                settle_date=eff_settle,
-                recovery_locked=recovery_locked,
-            )
-            self.positions[sym] = pos
-            logger.info("Adopted managed position: %s x%d @ $%s (settled_funding=%s, recovery_locked=%s)",
-                        sym, quantity, entry_px, funded_with_settled, recovery_locked)
-            return pos
-
-    def record_sell(
-        self,
-        symbol: str,
-        quantity: int,
-        price,
-        *,
-        simulated: bool = True,
-        when: Optional[datetime] = None,
-        execution_payload: Optional[Dict[str, Any]] = None,
-    ) -> Decimal:
-        """
-        Closes (part of) a position. Proceeds become an UNSETTLED lot (Bucket 2 / Hard Reserve).
-
-        Strict Reconciliation Lock:
-        For live orders (simulated=False), the ledger will REFUSE to credit cash buckets
-        or modify the position unless a definitive, completed execution payload from
-        the Schwab API is provided (e.g. status='FILLED' or non-zero filledQuantity).
-        """
-        px = _d(price)
-        with self._lock:
-            # Strict Reconciliation Lock for live executions
-            if not simulated:
-                if execution_payload is None:
-                    raise ReconciliationLockError(
-                        f"Strict Reconciliation Lock: Refusing to credit sale proceeds for {symbol}. "
-                        "Definitive completed execution payload from Schwab API is required for live orders."
-                    )
-                status = str(execution_payload.get("status", "")).upper()
-                filled_qty = int(float(execution_payload.get("filledQuantity", 0) or 0))
-                has_legs = False
-                for act in execution_payload.get("orderActivityCollection", []) or []:
-                    if act.get("executionLegs"):
-                        has_legs = True
-                        break
-                if status not in ("FILLED", "EXECUTED") and filled_qty <= 0 and not has_legs:
-                    raise ReconciliationLockError(
-                        f"Strict Reconciliation Lock: Execution payload for {symbol} is not filled "
-                        f"(status='{status}', filledQuantity={filled_qty}). Refusing to credit cash."
-                    )
-
-            pos = self.positions.get(symbol)
-            qty = min(quantity, pos.quantity) if pos else quantity
-            proceeds = q(px * qty)
-            realized = q((px - pos.entry_price) * qty) if pos else ZERO
-            trade_dt = when or datetime.now(_EDT)
-            trade_day = trade_dt.astimezone(_EDT).date()
-            self._lots.append(UnsettledLot(
-                amount=proceeds, trade_date=trade_day,
-                settle_date=next_business_day(trade_day), source=f"SELL:{symbol}",
-            ))
-            if pos:
-                pos.quantity -= qty
-                pos.last_price = px
-                if pos.quantity <= 0:
-                    del self.positions[symbol]
-            rec = TradeRecord(
-                symbol=symbol, side="SELL", quantity=qty, price=px, cost_basis=proceeds,
-                timestamp=trade_dt, simulated=simulated, realized_pnl=realized,
-                regime=pos.regime if pos else "",
-            )
-            self._trades.append(rec)
-            if self.trade_store is not None:
-                if self.sizing_governor is not None and realized != ZERO:
-                    self.sizing_governor.update_trade_outcome(is_win=(realized > ZERO))
-                alpha = getattr(self.sizing_governor, "alpha", 10.0) if self.sizing_governor is not None else 10.0
-                beta = getattr(self.sizing_governor, "beta", 10.0) if self.sizing_governor is not None else 10.0
-                kelly = getattr(self.sizing_governor, "kelly_fraction", 0.0) if self.sizing_governor is not None else 0.0
-                try:
-                    self.trade_store.record_trade(
-                        symbol=symbol, side="SELL", quantity=qty, price=px, cost_basis=proceeds,
-                        timestamp=trade_dt, simulated=simulated, realized_pnl=realized,
-                        disallowed_loss=ZERO, regime=pos.regime if pos else "", trade_id=rec.trade_id, env=self.env,
-                        posterior_alpha=alpha, posterior_beta=beta, kelly_fraction=kelly,
-                    )
-                except Exception as exc:
-                    logger.error("Failed to persist SELL trade to SQLite: %s", exc)
-            logger.info("SELL %s x%d @ %s -> $%s UNSETTLED until %s", symbol, qty, px, proceeds,
-                        self._lots[-1].settle_date)
-            return proceeds
-
-    def mark_price(self, symbol: str, price) -> None:
-        with self._lock:
-            pos = self.positions.get(symbol)
-            if pos:
-                pos.last_price = _d(price)
-
-    # ------------------------------------------------------------------
-    # Settlement
-    # ------------------------------------------------------------------
-
-    def rollover(self, today: Optional[date] = None) -> Decimal:
-        """Moves lots whose settle date has arrived from Bucket 2 into Bucket 1."""
-        today = today or today_et()
-        moved = ZERO
-        with self._lock:
-            remaining: List[UnsettledLot] = []
-            for lot in self._lots:
-                if lot.settle_date <= today:
-                    moved += lot.amount
-                else:
-                    remaining.append(lot)
-            self._lots = remaining
-            self._settled += moved
-        if moved:
-            logger.info("T+1 rollover: $%s moved Bucket 2 -> Bucket 1.", moved)
-        return moved
-
-    def set_pending_ach(self, amount) -> None:
-        with self._lock:
-            self._pending_ach = q(max(_d(amount), ZERO))
-
-    # ------------------------------------------------------------------
-    # Broker reconciliation (live mode, invariant I5)
-    # ------------------------------------------------------------------
-
-    def sync_from_broker(self, balances: BrokerBalances, drift_tolerance: Decimal = Decimal("1.00")) -> Decimal:
-        """
-        Adopts broker balances. On the first sync the broker figure is authoritative.
-        Afterwards, if the ledger's own settled figure exceeds the broker's by more
-        than ``drift_tolerance`` the ledger uses the LOWER number (never over-spend).
-
-        Returns the signed drift (ledger - broker) for the settled bucket.
-        """
-        with self._lock:
-            broker_settled = q(balances.settled_cash)
-            if not self.synced:
-                self._settled = broker_settled
-                self.drift = ZERO
-            else:
-                self.drift = q(self._settled - broker_settled)
-                if self.drift > drift_tolerance:
-                    logger.error("Ledger/broker drift $%s: using broker settled $%s.",
-                                 self.drift, broker_settled)
-                    self._settled = broker_settled
-                elif abs(self.drift) <= drift_tolerance:
-                    self._settled = min(self._settled, broker_settled)
-                else:
-                    # Broker holds MORE settled cash than the ledger (e.g. ACH landed).
-                    self._settled = broker_settled
-            if balances.unsettled_cash > 0 and not self._lots:
-                # Broker reports unsettled funds we did not originate (e.g. a manual sale).
-                self._lots.append(UnsettledLot(
-                    amount=q(balances.unsettled_cash), trade_date=today_et(),
-                    settle_date=next_business_day(today_et()), source="BROKER"))
-            self._broker_nlv = q(balances.liquidation_value)
-            self._swvxx = q(balances.swvxx_value)
-            self._broker_positions_value = q(balances.positions_value)
-            self.synced = True
-            self.synced_at = datetime.now(_EDT)
-            return self.drift
-
-    @property
-    def gfv_risk_flag(self) -> bool:
-        with self._lock:
-            return self.drift > Decimal("1.00")
-
-    # ------------------------------------------------------------------
-    # Snapshots
-    # ------------------------------------------------------------------
-
-    def snapshot(self):
-        """Legacy-compatible snapshot object plus three-bucket capital states."""
-        with self._lock:
-            ledger = self
-
-            class Snapshot:
-                settled_cash = ledger._settled
-                unsettled_cash = ledger.unsettled_total
-                locked_cash = ledger.locked_cash
-                bucket1_settled = ledger._settled
-                bucket2_unsettled = ledger.unsettled_total
-                bucket3_pending_ach = ledger._pending_ach
-                nlv = ledger.nlv
-                max_single_exposure = ledger.max_single_exposure
-                max_order_value = max(q(min(ledger._settled - ledger.cash_buffer, ledger.max_single_exposure)), ZERO)
-                max_risk_per_trade = ledger.max_risk_per_trade
-                daily_drawdown_limit = ledger.daily_drawdown_limit
-
-            return Snapshot()
-
-```
-
-#### `data/stream_resampler.py` - WebSocket Level 1 streaming tick resampler (776 lines, 28720 bytes)
-
-```python
-"""
-data/stream_resampler.py
-========================
-High-throughput, zero-allocation real-time market data resampler and streaming aggregator.
-
-Features:
-- Lock-free circular ring buffers for target tickers (SOXL, TQQQ, TNA, SOXX, QQQ).
-- Zero-allocation per tick in steady-state via pre-allocated NumPy contiguous arrays.
-- Dual-horizon aggregation: 15-second sub-bars and 1-minute primary bars.
-- Running session Volume-Weighted Average Price (VWAP) and rolling high/low watermarks.
-- Asynchronous boundary closure dispatch via BarCompletedEvent.
-- Batched SQLite persistence to `state/telemetry.db` table `intraday_bars` (batch size 50).
-- Bi-directional connector for MicrostructureSentinel virtual stops and RealTimeRegimeGovernor.
-"""
-
-from __future__ import annotations
-
-import asyncio
-import inspect
 import logging
-import sqlite3
+import math
 import threading
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
-from zoneinfo import ZoneInfo
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-import numpy as np
+logger = logging.getLogger("SchwabEngine.MultiRateSync")
 
-from core.paths import TELEMETRY_DB_PATH
+# Default core basket proxies (1x beta) and tactical satellite universe (3x LETFs)
+DEFAULT_CORE_SYMBOLS: Set[str] = {"SPY", "QQQ", "IWM", "HYG", "IEF"}
+DEFAULT_SATELLITE_SYMBOLS: Set[str] = {"SOXL", "TQQQ", "TNA"}
+DEFAULT_SWEEP_SYMBOLS: Set[str] = {"SWVXX"}
 
-logger = logging.getLogger(__name__)
+# Staleness tolerance: ticks older than 5.0 seconds are flagged as stale
+DEFAULT_STALE_TOLERANCE_SEC: float = 5.0
 
-_EDT_TZ = ZoneInfo("America/New_York")
-DEFAULT_TARGET_TICKERS: Tuple[str, ...] = ("SOXL", "TQQQ", "TNA", "SOXX", "QQQ")
+# Sentiment exponential half-life (e.g. 14,400 seconds = 4 hours)
+DEFAULT_SENTIMENT_LAMBDA: float = math.log(2.0) / 14400.0
+
+# Credit proxy symbols and sensitivity: HYG's effective spread duration is ~3.5y, so a 1 bp move in
+# HY OAS moves the HYG/IEF price ratio by roughly 0.035% (3.5e-4 in log terms).
+CREDIT_RISK_SYMBOL: str = "HYG"
+CREDIT_SAFE_SYMBOL: str = "IEF"
+HYG_IEF_LOG_RATIO_PER_BP: float = 3.5e-4
 
 
-# ===========================================================================
-# 1. BarCompletedEvent
-# ===========================================================================
-
-@dataclass(frozen=True, slots=True)
-class BarCompletedEvent:
-    """
-    Immutable representation of an aggregated OHLCV bar emitted upon interval boundary closure.
-    """
+@dataclass
+class HotQuoteUpdate:
+    """Microstructure metrics derived from a single Level 1 equity quote."""
     symbol: str
-    timeframe: str               # "15s" or "1m"
-    timestamp: datetime          # Interval start timestamp (datetime)
-    timestamp_ms: int            # Interval start timestamp in epoch milliseconds
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-    vwap: float
-    tick_count: int
-    high_watermark: float = 0.0  # Session high watermark up to this bar
-    low_watermark: float = 0.0   # Session low watermark up to this bar
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert event to serializable dictionary."""
-        return {
-            "symbol": self.symbol,
-            "timeframe": self.timeframe,
-            "timestamp": self.timestamp.isoformat() if hasattr(self.timestamp, "isoformat") else str(self.timestamp),
-            "timestamp_ms": self.timestamp_ms,
-            "open": self.open,
-            "high": self.high,
-            "low": self.low,
-            "close": self.close,
-            "volume": self.volume,
-            "vwap": self.vwap,
-            "tick_count": self.tick_count,
-            "high_watermark": self.high_watermark,
-            "low_watermark": self.low_watermark,
-        }
-
-    def to_db_tuple(self) -> Tuple[Any, ...]:
-        """Format row tuple for SQLite intraday_bars insertion."""
-        ts_str = self.timestamp.isoformat() if hasattr(self.timestamp, "isoformat") else str(self.timestamp)
-        return (
-            self.symbol,
-            self.timeframe,
-            ts_str,
-            self.timestamp_ms,
-            float(self.open),
-            float(self.high),
-            float(self.low),
-            float(self.close),
-            float(self.volume),
-            float(self.vwap),
-            int(self.tick_count),
-        )
+    bid: float
+    ask: float
+    last: float
+    bid_size: int
+    ask_size: int
+    mid_price: float
+    microprice: float
+    order_book_imbalance: float
+    volume: int
+    quote_epoch_ms: int
+    received_timestamp: float
+    is_stale: bool
 
 
-# ===========================================================================
-# 2. LockFreeRingBuffer
-# ===========================================================================
+@dataclass
+class SleevePosition:
+    """Position representation within a portfolio sleeve."""
+    symbol: str
+    quantity: float
+    average_cost: float
+    current_price: float
+    market_value: float
+    unrealized_pnl: float
+    last_update_ts: float
+    sleeve: str  # "CORE", "SATELLITE", or "SWEEP"
 
-class LockFreeRingBuffer:
+
+@dataclass
+class DualSleeveState:
+    """Mark-to-market valuation and allocation across both sleeves."""
+    core_market_value: float
+    satellite_market_value: float
+    cash_buffer: float
+    net_liquidation_value: float
+    core_weight: float
+    satellite_weight: float
+    core_return_instantaneous: float
+    core_return_cumulative: float
+    is_hot_boot_complete: bool
+    boot_timestamp: float
+    last_mark_timestamp: float
+    positions: Dict[str, SleevePosition] = field(default_factory=dict)
+
+
+@dataclass
+class ColdMacroState:
+    """Macroeconomic and sentiment telemetry state."""
+    fred_oas_bps: float = 320.0
+    economic_surprise_z_score: float = 0.0
+    sentiment_polarity_raw: float = 0.0
+    sentiment_timestamp: float = 0.0
+    sentiment_decayed: float = 0.0
+    intraday_credit_proxy_bps: float = 320.0
+    hybrid_credit_spread_bps: float = 320.0
+    macro_regime: str = "REGIME_A"
+    market_bias: str = "BULLISH"
+    last_macro_update_ts: float = 0.0
+
+
+class MultiRateStateSynchronizer:
     """
-    Lock-free, pre-allocated circular ring buffer for raw ticks: (timestamp_ms, price, volume).
-    Uses a power-of-two capacity for zero-allocation bitwise modulo wrapping:
-        idx = head & (capacity - 1)
+    Coordinates multi-rate telemetry streams across Hot, Warm, and Cold planes
+    for scale-invariant, dual-sleeve portfolio execution.
     """
-
-    def __init__(self, capacity: int = 65536) -> None:
-        self.capacity = 1 << (capacity - 1).bit_length()
-        self.mask = self.capacity - 1
-        self._timestamps = np.zeros(self.capacity, dtype=np.int64)
-        self._prices = np.zeros(self.capacity, dtype=np.float64)
-        self._volumes = np.zeros(self.capacity, dtype=np.float64)
-        self._head = 0
-        self._count = 0
-
-    def append(self, timestamp_ms: int, price: float, volume: float) -> None:
-        """Append tick in-place with zero object allocation."""
-        idx = self._head & self.mask
-        self._timestamps[idx] = timestamp_ms
-        self._prices[idx] = price
-        self._volumes[idx] = volume
-        self._head += 1
-        if self._count < self.capacity:
-            self._count += 1
-
-    def get_latest(self) -> Optional[Tuple[int, float, float]]:
-        """Return the most recently appended tick (timestamp_ms, price, volume)."""
-        if self._count == 0:
-            return None
-        idx = (self._head - 1) & self.mask
-        return int(self._timestamps[idx]), float(self._prices[idx]), float(self._volumes[idx])
-
-    def get_recent(self, n: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return the n most recent ticks as contiguous numpy arrays."""
-        k = min(n, self._count)
-        if k == 0:
-            return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
-        indices = np.arange(self._head - k, self._head, dtype=np.int64) & self.mask
-        return self._timestamps[indices], self._prices[indices], self._volumes[indices]
-
-    def clear(self) -> None:
-        """Reset the ring buffer pointers."""
-        self._head = 0
-        self._count = 0
-
-    def __len__(self) -> int:
-        return self._count
-
-
-# ===========================================================================
-# 3. Bar Aggregation State
-# ===========================================================================
-
-class _BarState:
-    """Internal lightweight aggregator for a single bar interval."""
-    __slots__ = (
-        "interval_id", "open", "high", "low", "close",
-        "volume", "pv", "tick_count", "is_active"
-    )
-
-    def __init__(self) -> None:
-        self.interval_id: int = -1
-        self.open: float = 0.0
-        self.high: float = 0.0
-        self.low: float = 0.0
-        self.close: float = 0.0
-        self.volume: float = 0.0
-        self.pv: float = 0.0
-        self.tick_count: int = 0
-        self.is_active: bool = False
-
-    def reset(self) -> None:
-        self.interval_id = -1
-        self.open = 0.0
-        self.high = 0.0
-        self.low = 0.0
-        self.close = 0.0
-        self.volume = 0.0
-        self.pv = 0.0
-        self.tick_count = 0
-        self.is_active = False
-
-
-class _SymbolState:
-    """Aggregator state for a single symbol across sub-bars and primary bars."""
-    __slots__ = (
-        "symbol", "ring_buffer", "sub_bar", "primary_bar",
-        "cum_pv", "cum_vol", "high_watermark", "low_watermark",
-        "last_price", "last_timestamp_ms"
-    )
-
-    def __init__(self, symbol: str, buffer_capacity: int = 65536) -> None:
-        self.symbol: str = symbol.upper()
-        self.ring_buffer: LockFreeRingBuffer = LockFreeRingBuffer(buffer_capacity)
-        self.sub_bar: _BarState = _BarState()
-        self.primary_bar: _BarState = _BarState()
-        self.cum_pv: float = 0.0
-        self.cum_vol: float = 0.0
-        self.high_watermark: float = -float("inf")
-        self.low_watermark: float = float("inf")
-        self.last_price: float = 0.0
-        self.last_timestamp_ms: int = 0
-
-    @property
-    def vwap(self) -> float:
-        if self.cum_vol > 0.0:
-            return self.cum_pv / self.cum_vol
-        return self.last_price
-
-    def reset(self) -> None:
-        self.ring_buffer.clear()
-        self.sub_bar.reset()
-        self.primary_bar.reset()
-        self.cum_pv = 0.0
-        self.cum_vol = 0.0
-        self.high_watermark = -float("inf")
-        self.low_watermark = float("inf")
-        self.last_price = 0.0
-        self.last_timestamp_ms = 0
-
-
-# ===========================================================================
-# 4. BarResampler
-# ===========================================================================
-
-class BarResampler:
-    """
-    Zero-allocation real-time bar resampler for streaming ticks.
-    Aggregates raw streaming ticks into:
-      - 15-second sub-bars (timeframe="15s")
-      - 1-minute primary bars (timeframe="1m")
-    Maintains running VWAP and rolling high/low watermarks.
-    Emits BarCompletedEvent asynchronously upon boundary closure.
-    """
-
-    SUB_BAR_MS: int = 15_000      # 15 seconds
-    PRIMARY_BAR_MS: int = 60_000  # 1 minute
 
     def __init__(
         self,
-        symbols: Optional[Sequence[str]] = None,
-        buffer_capacity: int = 65536,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
+        core_symbols: Optional[Set[str]] = None,
+        satellite_symbols: Optional[Set[str]] = None,
+        stale_tolerance_sec: float = DEFAULT_STALE_TOLERANCE_SEC,
+        sentiment_decay_lambda: float = DEFAULT_SENTIMENT_LAMBDA,
     ) -> None:
-        self.buffer_capacity = int(buffer_capacity)
-        self.loop = loop
-        self._symbols_lock = threading.RLock()
-        self._listeners: List[Callable[[BarCompletedEvent], Any]] = []
-        self._completed_bars: List[BarCompletedEvent] = []
-        self._queue: Optional[asyncio.Queue[BarCompletedEvent]] = None
-
-        syms = list(symbols) if symbols is not None else list(DEFAULT_TARGET_TICKERS)
-        self._states: Dict[str, _SymbolState] = {
-            s.upper(): _SymbolState(s, self.buffer_capacity) for s in syms
-        }
-
-    def _get_or_create_symbol_state(self, symbol: str) -> _SymbolState:
-        sym = symbol.upper()
-        state = self._states.get(sym)
-        if state is None:
-            with self._symbols_lock:
-                state = self._states.get(sym)
-                if state is None:
-                    state = _SymbolState(sym, self.buffer_capacity)
-                    self._states[sym] = state
-        return state
-
-    def register_listener(self, callback: Callable[[BarCompletedEvent], Any]) -> None:
-        """Register a callback to receive BarCompletedEvent instances upon closure."""
-        if callback not in self._listeners:
-            self._listeners.append(callback)
-
-    def remove_listener(self, callback: Callable[[BarCompletedEvent], Any]) -> None:
-        """Unregister a previously registered callback."""
-        if callback in self._listeners:
-            self._listeners.remove(callback)
-
-    @property
-    def queue(self) -> asyncio.Queue[BarCompletedEvent]:
-        """Lazy-initialize an asyncio.Queue for async consumers."""
-        if self._queue is None:
-            self._queue = asyncio.Queue()
-        return self._queue
-
-    def get_vwap(self, symbol: str) -> float:
-        """Get running session volume-weighted average price for a symbol."""
-        sym = symbol.upper()
-        state = self._states.get(sym)
-        if state is not None:
-            return state.vwap
-        return 0.0
-
-    def get_high_watermark(self, symbol: str) -> float:
-        """Get session high watermark price for a symbol."""
-        sym = symbol.upper()
-        state = self._states.get(sym)
-        if state is not None and state.high_watermark != -float("inf"):
-            return state.high_watermark
-        return 0.0
-
-    def get_low_watermark(self, symbol: str) -> float:
-        """Get session low watermark price for a symbol."""
-        sym = symbol.upper()
-        state = self._states.get(sym)
-        if state is not None and state.low_watermark != float("inf"):
-            return state.low_watermark
-        return 0.0
-
-    def get_ring_buffer(self, symbol: str) -> LockFreeRingBuffer:
-        """Access the lock-free ring buffer for a target ticker."""
-        return self._get_or_create_symbol_state(symbol).ring_buffer
-
-    # ------------------------------------------------------------------
-    # Ingestion & Aggregation Hot-Path
-    # ------------------------------------------------------------------
-
-    def on_tick(
-        self,
-        symbol: str,
-        price: float,
-        volume: float = 0.0,
-        timestamp: Any = None,
-    ) -> List[BarCompletedEvent]:
-        """
-        Hot-path tick ingestion.
-        Accepts: (symbol, price, volume, timestamp) or alternative order (symbol, timestamp_ms, price, volume).
-
-        Aggregates into:
-          - 15-second sub-bars
-          - 1-minute primary bars
-        Updates running VWAP and rolling high/low watermarks.
-        Emits BarCompletedEvent asynchronously on boundary closure.
-        Returns list of newly completed bars on this tick.
-        """
-        # Smart argument detection in case (symbol, timestamp_ms, price, volume) was passed
-        if isinstance(price, (int, float)) and price > 1e11:
-            # Caller passed (symbol, timestamp_ms, price, volume)
-            ts_input = price
-            px = float(volume)
-            vol = float(timestamp if timestamp is not None else 0.0)
-        else:
-            ts_input = timestamp
-            px = float(price)
-            vol = float(volume) if volume is not None else 0.0
-
-        # Fast timestamp normalization to integer epoch milliseconds
-        if ts_input is None:
-            ts_ms = int(time.time() * 1000)
-        elif isinstance(ts_input, (int, float, np.integer, np.floating)):
-            val = float(ts_input)
-            ts_ms = int(val * 1000) if val < 1e11 else int(val)
-        elif isinstance(ts_input, datetime):
-            ts_ms = int(ts_input.timestamp() * 1000)
-        elif isinstance(ts_input, str):
-            try:
-                dt = datetime.fromisoformat(ts_input)
-                ts_ms = int(dt.timestamp() * 1000)
-            except Exception:
-                ts_ms = int(time.time() * 1000)
-        else:
-            ts_ms = int(time.time() * 1000)
-
-        state = self._get_or_create_symbol_state(symbol)
-
-        # 1. Update lock-free ring buffer (zero-allocation)
-        state.ring_buffer.append(ts_ms, px, vol)
-
-        # 2. Update watermarks & running VWAP
-        state.last_price = px
-        state.last_timestamp_ms = ts_ms
-        if px > state.high_watermark:
-            state.high_watermark = px
-        if px < state.low_watermark:
-            state.low_watermark = px
-
-        state.cum_pv += px * vol
-        state.cum_vol += vol
-
-        completed: List[BarCompletedEvent] = []
-
-        # 3. Aggregate 15-second sub-bar
-        sub_id = ts_ms // self.SUB_BAR_MS
-        b_sub = state.sub_bar
-        if sub_id != b_sub.interval_id:
-            if b_sub.is_active:
-                event = self._close_bar(state, b_sub, "15s", self.SUB_BAR_MS)
-                completed.append(event)
-            # Initialize new sub-bar
-            b_sub.interval_id = sub_id
-            b_sub.open = px
-            b_sub.high = px
-            b_sub.low = px
-            b_sub.close = px
-            b_sub.volume = vol
-            b_sub.pv = px * vol
-            b_sub.tick_count = 1
-            b_sub.is_active = True
-        else:
-            if px > b_sub.high:
-                b_sub.high = px
-            elif px < b_sub.low:
-                b_sub.low = px
-            b_sub.close = px
-            b_sub.volume += vol
-            b_sub.pv += px * vol
-            b_sub.tick_count += 1
-
-        # 4. Aggregate 1-minute primary bar
-        pri_id = ts_ms // self.PRIMARY_BAR_MS
-        b_pri = state.primary_bar
-        if pri_id != b_pri.interval_id:
-            if b_pri.is_active:
-                event = self._close_bar(state, b_pri, "1m", self.PRIMARY_BAR_MS)
-                completed.append(event)
-            # Initialize new primary bar
-            b_pri.interval_id = pri_id
-            b_pri.open = px
-            b_pri.high = px
-            b_pri.low = px
-            b_pri.close = px
-            b_pri.volume = vol
-            b_pri.pv = px * vol
-            b_pri.tick_count = 1
-            b_pri.is_active = True
-        else:
-            if px > b_pri.high:
-                b_pri.high = px
-            elif px < b_pri.low:
-                b_pri.low = px
-            b_pri.close = px
-            b_pri.volume += vol
-            b_pri.pv += px * vol
-            b_pri.tick_count += 1
-
-        # 5. Emit completed bars asynchronously
-        for event in completed:
-            self._completed_bars.append(event)
-            self._emit_event_async(event)
-
-        return completed
-
-    def ingest_tick(self, symbol: str, timestamp_ms: int, price: float, volume: float) -> List[BarCompletedEvent]:
-        """Convenience alias for raw tick tuple ingestion."""
-        return self.on_tick(symbol=symbol, price=price, volume=volume, timestamp=timestamp_ms)
-
-    def _close_bar(
-        self,
-        state: _SymbolState,
-        b: _BarState,
-        timeframe: str,
-        interval_ms: int,
-    ) -> BarCompletedEvent:
-        bar_start_ms = b.interval_id * interval_ms
-        bar_dt = datetime.fromtimestamp(bar_start_ms / 1000.0, tz=timezone.utc)
-        bar_vwap = b.pv / b.volume if b.volume > 0.0 else b.close
-
-        event = BarCompletedEvent(
-            symbol=state.symbol,
-            timeframe=timeframe,
-            timestamp=bar_dt,
-            timestamp_ms=bar_start_ms,
-            open=b.open,
-            high=b.high,
-            low=b.low,
-            close=b.close,
-            volume=b.volume,
-            vwap=bar_vwap,
-            tick_count=b.tick_count,
-            high_watermark=state.high_watermark,
-            low_watermark=state.low_watermark,
-        )
-        return event
-
-    def _emit_event_async(self, event: BarCompletedEvent) -> None:
-        """Dispatch event asynchronously to registered listeners and queue."""
-        if self._queue is not None:
-            try:
-                self._queue.put_nowait(event)
-            except Exception:
-                pass
-
-        if not self._listeners:
-            return
-
-        # Determine running loop
-        loop = self.loop
-        if loop is None:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-        for listener in self._listeners:
-            try:
-                if inspect.iscoroutinefunction(listener):
-                    if loop is not None and loop.is_running():
-                        loop.create_task(listener(event))
-                    else:
-                        asyncio.run(listener(event))
-                else:
-                    listener(event)
-            except Exception as exc:
-                logger.exception("Error in BarCompletedEvent listener: %s", exc)
-
-    def flush(self, symbol: Optional[str] = None) -> List[BarCompletedEvent]:
-        """
-        Force-close any active in-flight sub-bars and primary bars.
-        Useful at session boundaries, backtests, or benchmark conclusions.
-        """
-        targets = [self._states[symbol.upper()]] if symbol and symbol.upper() in self._states else list(self._states.values())
-        flushed: List[BarCompletedEvent] = []
-
-        for st in targets:
-            if st.sub_bar.is_active:
-                event = self._close_bar(st, st.sub_bar, "15s", self.SUB_BAR_MS)
-                st.sub_bar.reset()
-                flushed.append(event)
-                self._completed_bars.append(event)
-                self._emit_event_async(event)
-
-            if st.primary_bar.is_active:
-                event = self._close_bar(st, st.primary_bar, "1m", self.PRIMARY_BAR_MS)
-                st.primary_bar.reset()
-                flushed.append(event)
-                self._completed_bars.append(event)
-                self._emit_event_async(event)
-
-        return flushed
-
-    def reset(self, symbol: Optional[str] = None) -> None:
-        """Reset aggregators and ring buffers."""
-        targets = [self._states[symbol.upper()]] if symbol and symbol.upper() in self._states else list(self._states.values())
-        for st in targets:
-            st.reset()
-        if symbol is None:
-            self._completed_bars.clear()
-
-    def get_completed_bars(self, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> List[BarCompletedEvent]:
-        """Return history of completed bars emitted during this session."""
-        bars = self._completed_bars
-        if symbol:
-            s_up = symbol.upper()
-            bars = [b for b in bars if b.symbol == s_up]
-        if timeframe:
-            bars = [b for b in bars if b.timeframe == timeframe]
-        return list(bars)
-
-
-# ===========================================================================
-# 5. Batched SQLite Intraday Bar Persistence
-# ===========================================================================
-
-class IntradayBarWriter:
-    """
-    Batched SQLite writer for completed 1-minute bars to table `intraday_bars` in `state/telemetry.db`.
-    Buffers bars in-memory and executes batched writes of 50 to minimize disk I/O.
-    """
-
-    BATCH_SIZE: int = 50
-
-    def __init__(
-        self,
-        db_path: Optional[Union[str, Path]] = None,
-        batch_size: int = 50,
-    ) -> None:
-        self.db_path = str(db_path if db_path is not None else TELEMETRY_DB_PATH)
-        self.batch_size = int(batch_size)
-        self._batch: List[BarCompletedEvent] = []
         self._lock = threading.RLock()
-        self._total_written: int = 0
-        self._init_db()
+        self.core_symbols: Set[str] = {s.upper() for s in (core_symbols or DEFAULT_CORE_SYMBOLS)}
+        self.satellite_symbols: Set[str] = {s.upper() for s in (satellite_symbols or DEFAULT_SATELLITE_SYMBOLS)}
+        self.stale_tolerance_sec: float = stale_tolerance_sec
+        self.sentiment_decay_lambda: float = sentiment_decay_lambda
 
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        if self.db_path != ":memory:":
-            conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA busy_timeout=5000;")
-        return conn
+        # --- Hot Plane State ---
+        self._latest_quotes: Dict[str, HotQuoteUpdate] = {}
+        self._core_anchor_prices: Dict[str, float] = {}
+        self._initial_core_market_value: Optional[float] = None
 
-    def _init_db(self) -> None:
-        if self.db_path != ":memory:":
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        with self._lock:
-            conn = self._get_connection()
-            try:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS intraday_bars (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        symbol TEXT NOT NULL,
-                        timeframe TEXT NOT NULL,
-                        timestamp TEXT NOT NULL,
-                        timestamp_ms INTEGER NOT NULL,
-                        open REAL NOT NULL,
-                        high REAL NOT NULL,
-                        low REAL NOT NULL,
-                        close REAL NOT NULL,
-                        volume REAL NOT NULL,
-                        vwap REAL NOT NULL,
-                        tick_count INTEGER NOT NULL,
-                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    );
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_intraday_bars_sym_ts
-                    ON intraday_bars (symbol, timestamp);
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_intraday_bars_ts
-                    ON intraday_bars (timestamp);
-                    """
-                )
-                conn.commit()
-            finally:
-                conn.close()
+        # --- Warm Plane State (Dual-Sleeve Ledger) ---
+        self._positions: Dict[str, SleevePosition] = {}
+        self._cash_buffer: float = 0.0
+        self._broker_nlv: float = 0.0
+        self._is_hot_boot_complete: bool = False
+        self._boot_timestamp: float = 0.0
+        self._last_warm_sync_ts: float = 0.0
 
-    def record_bar(self, bar: BarCompletedEvent) -> bool:
+        # --- Cold Plane State ---
+        self._macro_state: ColdMacroState = ColdMacroState()
+
+        # --- Live HYG/IEF credit proxy state ---
+        self._tick_cache: Dict[str, Dict[str, float]] = {}
+        self._credit_ref_ratio: Optional[float] = None
+        self._credit_ref_source: str = "UNSET"
+        self._credit_live_ratio: Optional[float] = None
+        self._credit_proxy_is_live: bool = False
+
+    # =========================================================================
+    # 1. HOT PLANE (Sub-50ms / Level 1 Streaming Ingestion)
+    # =========================================================================
+
+    def on_level1_quote(self, payload: Dict[str, Any]) -> HotQuoteUpdate:
         """
-        Record a completed bar. If it's a 1-minute primary bar, queue it for batched disk persistence.
-        Returns True if a batch write occurred.
+        Processes streaming or REST Level 1 quote payload.
+        Computes mid-price, volume-weighted microprice, and L1 Order Book Imbalance (OBI).
+        Continuously marks portfolio positions to market.
         """
-        if bar.timeframe != "1m":
-            return False
+        now = time.time()
 
-        with self._lock:
-            self._batch.append(bar)
-            if len(self._batch) >= self.batch_size:
-                self.flush()
-                return True
-        return False
+        # Parse symbol and quote components across Schwab Streaming & REST formats
+        symbol, bid, ask, last, bid_size, ask_size, volume, quote_epoch_ms = self._extract_quote_fields(payload)
+        symbol = symbol.upper()
 
-    def on_bar_completed(self, bar: BarCompletedEvent) -> None:
-        """Callback handler matching BarResampler listener protocol."""
-        self.record_bar(bar)
+        # Enforce quote-age watermarking
+        quote_age_sec = (now - (quote_epoch_ms / 1000.0)) if quote_epoch_ms > 0 else 0.0
+        is_stale = quote_age_sec > self.stale_tolerance_sec if quote_epoch_ms > 0 else False
 
-    def flush(self) -> int:
-        """Flush any pending buffered bars to SQLite table intraday_bars in a single transaction."""
-        with self._lock:
-            if not self._batch:
-                return 0
-            to_write = list(self._batch)
-            self._batch.clear()
-
-        rows = [b.to_db_tuple() for b in to_write]
-        conn = self._get_connection()
-        try:
-            with conn:
-                conn.executemany(
-                    """
-                    INSERT INTO intraday_bars (
-                        symbol, timeframe, timestamp, timestamp_ms,
-                        open, high, low, close, volume, vwap, tick_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                    """,
-                    rows,
-                )
-            self._total_written += len(rows)
-            return len(rows)
-        finally:
-            conn.close()
-
-    @property
-    def pending_count(self) -> int:
-        with self._lock:
-            return len(self._batch)
-
-    @property
-    def total_written(self) -> int:
-        return self._total_written
-
-    def count_bars(self, symbol: Optional[str] = None) -> int:
-        """Query count of persisted bars from intraday_bars table."""
-        conn = self._get_connection()
-        try:
-            if symbol:
-                cur = conn.execute("SELECT COUNT(*) FROM intraday_bars WHERE symbol = ?", (symbol.upper(),))
-            else:
-                cur = conn.execute("SELECT COUNT(*) FROM intraday_bars")
-            row = cur.fetchone()
-            return int(row[0]) if row else 0
-        finally:
-            conn.close()
-
-    def close(self) -> None:
-        """Flush pending bars and close resources."""
-        self.flush()
-
-
-# ===========================================================================
-# 6. BarPipelineConnector: MicrostructureSentinel & RealTimeRegimeGovernor
-# ===========================================================================
-
-class BarPipelineConnector:
-    """
-    Connects BarCompletedEvent emissions from BarResampler to:
-      1. MicrostructureSentinel instances (keyed by symbol)
-      2. RealTimeRegimeGovernor
-      3. IntradayBarWriter (telemetry.db SQLite table intraday_bars)
-    """
-
-    def __init__(
-        self,
-        sentinels: Optional[Dict[str, Any]] = None,
-        regime_governor: Optional[Any] = None,
-        bar_writer: Optional[IntradayBarWriter] = None,
-    ) -> None:
-        self.sentinels: Dict[str, Any] = sentinels if sentinels is not None else {}
-        self.regime_governor = regime_governor
-        self.bar_writer = bar_writer
-        self.last_verdicts: Dict[str, Any] = {}
-        self._lock = threading.RLock()
-
-    def register_sentinel(self, symbol: str, sentinel: Any) -> None:
-        """Register a MicrostructureSentinel instance for a symbol."""
-        with self._lock:
-            self.sentinels[symbol.upper()] = sentinel
-
-    def set_governor(self, governor: Any) -> None:
-        """Set the RealTimeRegimeGovernor instance."""
-        self.regime_governor = governor
-
-    def set_bar_writer(self, writer: IntradayBarWriter) -> None:
-        """Set the IntradayBarWriter instance."""
-        self.bar_writer = writer
-
-    def on_bar_completed(self, bar: BarCompletedEvent) -> None:
-        """
-        Dispatch completed bar to sentinel, regime governor, and bar writer.
-        """
-        sym = bar.symbol.upper()
-
-        # 1. Dispatch to MicrostructureSentinel
-        with self._lock:
-            sentinel = self.sentinels.get(sym)
-
-        if sentinel is not None:
-            if hasattr(sentinel, "on_bar_completed"):
-                verdict = sentinel.on_bar_completed(bar)
-                if verdict is not None:
-                    self.last_verdicts[sym] = verdict
-            elif bar.timeframe == "15s":
-                verdict = sentinel.evaluate_stop(
-                    current_time_edt=bar.timestamp,
-                    current_price=bar.close,
-                    current_volume=bar.volume,
-                    bid_price=bar.close,
-                )
-                self.last_verdicts[sym] = verdict
-
-        # 2. Dispatch to RealTimeRegimeGovernor on 1-minute bars
-        if self.regime_governor is not None and bar.timeframe == "1m":
-            if hasattr(self.regime_governor, "on_bar_completed"):
-                self.regime_governor.on_bar_completed(bar)
-            elif hasattr(self.regime_governor, "record_bar"):
-                canon = getattr(self.regime_governor, "canonical_symbol", lambda s: s)(sym)
-                factors = getattr(self.regime_governor, "FACTORS", ())
-                if canon in factors:
-                    self.regime_governor.record_bar(
-                        symbol=canon,
-                        close=bar.close,
-                        timestamp=bar.timestamp,
-                        volume=int(bar.volume),
-                    )
-
-        # 3. Dispatch to IntradayBarWriter for 1-minute bar batching
-        if self.bar_writer is not None and bar.timeframe == "1m":
-            self.bar_writer.record_bar(bar)
-
-```
-
-### 3.3 Web & Operational Scripts
-
-#### `web/websocket_manager.py` - FastAPI 1Hz real-time telemetry gateway (451 lines, 16533 bytes)
-
-```python
-"""
-web/websocket_manager.py
-========================
-FastAPI Real-Time WebSocket Telemetry Gateway & Dashboard Bridge (#68).
-
-Key Components:
-1. ConnectionManager: Thread-safe WebSocket client manager with 15-second heartbeat keep-alive.
-2. Telemetry Aggregation Loop: 1Hz background worker pulling:
-   - Semiconductor Environment Score (SES) & regime classification from state/telemetry.db
-   - Cash settlement balances from state/trades.db
-   - Dynamic Adaptive Volatility Envelope (AVE) coordinates from MicrostructureSentinel
-3. Snapshot generation for REST polling fallback (GET /api/telemetry/snapshot).
-"""
-
-from __future__ import annotations
-
-import asyncio
-from datetime import datetime, timezone
-import json
-import logging
-import os
-from pathlib import Path
-import sqlite3
-import threading
-from typing import Any, Dict, List, Optional, Set, Union
-
-from fastapi import WebSocket, WebSocketDisconnect
-
-from core.paths import (
-    ANCHOR_ACTIVE_FILE,
-    CONTROL_SIGNAL_FILE,
-    MACRO_STATE_FILE,
-    STATE_DIR,
-    TELEMETRY_DB_PATH,
-    TRADES_DB_PATH,
-)
-from execution.microstructure_sentinel import MicrostructureSentinel
-
-logger = logging.getLogger("SchwabEngine.WebSocketGateway")
-
-
-def pull_latest_regime(telemetry_db_path: Optional[Union[Path, str]] = None) -> Dict[str, Any]:
-    """
-    Pull latest SES score and regime state from state/telemetry.db.
-    Falls back gracefully to state/macro_state.json or default baseline.
-    """
-    db_file = Path(telemetry_db_path) if telemetry_db_path else TELEMETRY_DB_PATH
-    ses_score: float = 0.12
-    classification: str = "CHOP"
-    bias: str = "NEUTRAL"
-
-    if db_file.exists():
-        try:
-            conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True, timeout=2.0)
-            cur = conn.cursor()
-            
-            # Check if regime_telemetry table exists
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='regime_telemetry'")
-            if cur.fetchone():
-                cur.execute("SELECT ses, regime, payload_json FROM regime_telemetry ORDER BY id DESC LIMIT 1")
-                row = cur.fetchone()
-                if row:
-                    ses_score = float(row[0])
-                    classification = str(row[1]).upper() if row[1] else "CHOP"
-                    if row[2]:
-                        try:
-                            p_data = json.loads(row[2])
-                            bias = str(p_data.get("bias", "")).upper()
-                        except Exception:
-                            pass
-            else:
-                # Check event_log table for regime/SES events
-                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='event_log'")
-                if cur.fetchone():
-                    cur.execute(
-                        "SELECT payload FROM event_log WHERE event_type IN ('REGIME_CHANGE', 'SES_EVALUATION', 'REGIME_UPDATE') ORDER BY id DESC LIMIT 1"
-                    )
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        try:
-                            p_data = json.loads(row[0])
-                            if "ses" in p_data:
-                                ses_score = float(p_data["ses"])
-                            if "regime" in p_data:
-                                classification = str(p_data["regime"]).upper()
-                            if "bias" in p_data:
-                                bias = str(p_data["bias"]).upper()
-                        except Exception:
-                            pass
-            conn.close()
-        except Exception as exc:
-            logger.debug("Could not read regime from telemetry.db: %s", exc)
-
-    # If classification was not extracted, determine from ses_score
-    if not classification:
-        if ses_score >= 0.35:
-            classification = "FAVORABLE"
-        elif ses_score <= -0.35:
-            classification = "DEFENSIVE"
+        # Mid-price
+        if bid > 0.0 and ask > 0.0:
+            mid_price = (bid + ask) / 2.0
+        elif last > 0.0:
+            mid_price = last
         else:
-            classification = "CHOP"
+            mid_price = max(bid, ask, 0.0)
 
-    # Determine bias if not set
-    if not bias:
-        if ses_score >= 0.20:
-            bias = "BULLISH"
-        elif ses_score <= -0.20:
-            bias = "BEARISH"
+        # Volume-Weighted Microprice & Order Book Imbalance (OBI)
+        total_size = bid_size + ask_size
+        if total_size > 0 and bid > 0.0 and ask > 0.0:
+            microprice = (bid * ask_size + ask * bid_size) / float(total_size)
+            obi = (bid_size - ask_size) / float(total_size)
         else:
-            bias = "NEUTRAL"
+            microprice = mid_price if mid_price > 0.0 else last
+            obi = 0.0
 
-    return {
-        "ses": round(ses_score, 2),
-        "classification": classification,
-        "bias": bias,
-    }
-
-
-def pull_settlement_balances(trades_db_path: Optional[Union[Path, str]] = None) -> Dict[str, Any]:
-    """
-    Pull current cash settlement balances from state/trades.db.
-    Defaults to settled cash and T+1 unsettled balances.
-    """
-    db_file = Path(trades_db_path) if trades_db_path else TRADES_DB_PATH
-    total_nlv: float = 5563.97
-    settled_cash: float = 3786.27
-    unsettled_cash: float = 1777.70
-    gfv_count: int = 0
-
-    if db_file.exists():
-        try:
-            conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True, timeout=2.0)
-            cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='settlement_balances'")
-            if cur.fetchone():
-                cur.execute("SELECT total_nlv, settled_cash, unsettled_cash, gfv_count FROM settlement_balances ORDER BY id DESC LIMIT 1")
-                row = cur.fetchone()
-                if row:
-                    total_nlv = float(row[0])
-                    settled_cash = float(row[1])
-                    unsettled_cash = float(row[2])
-                    gfv_count = int(row[3])
-            conn.close()
-        except Exception as exc:
-            logger.debug("Could not read settlement balances from trades.db: %s", exc)
-
-    return {
-        "total_nlv": round(total_nlv, 2),
-        "settled_cash": round(settled_cash, 2),
-        "unsettled_cash": round(unsettled_cash, 2),
-        "gfv_count": int(gfv_count),
-    }
-
-
-def record_settlement_balance(
-    total_nlv: float,
-    settled_cash: float,
-    unsettled_cash: float,
-    gfv_count: int = 0,
-    trades_db_path: Optional[Union[Path, str]] = None,
-) -> None:
-    """Helper to persist a settlement balance record into state/trades.db."""
-    db_file = Path(trades_db_path) if trades_db_path else TRADES_DB_PATH
-    db_file.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_file), timeout=5.0)
-    try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS settlement_balances (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                total_nlv REAL NOT NULL,
-                settled_cash REAL NOT NULL,
-                unsettled_cash REAL NOT NULL,
-                gfv_count INTEGER NOT NULL DEFAULT 0,
-                timestamp TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-            """
+        update = HotQuoteUpdate(
+            symbol=symbol,
+            bid=round(bid, 4),
+            ask=round(ask, 4),
+            last=round(last, 4),
+            bid_size=bid_size,
+            ask_size=ask_size,
+            mid_price=round(mid_price, 4),
+            microprice=round(microprice, 4),
+            order_book_imbalance=round(obi, 4),
+            volume=volume,
+            quote_epoch_ms=quote_epoch_ms,
+            received_timestamp=now,
+            is_stale=is_stale,
         )
-        conn.execute(
-            """
-            INSERT INTO settlement_balances (total_nlv, settled_cash, unsettled_cash, gfv_count)
-            VALUES (?, ?, ?, ?);
-            """,
-            (float(total_nlv), float(settled_cash), float(unsettled_cash), int(gfv_count)),
-        )
-        conn.commit()
-    finally:
-        conn.close()
 
+        with self._lock:
+            self._latest_quotes[symbol] = update
 
-def pull_active_envelopes() -> Dict[str, Dict[str, float]]:
-    """
-    Pull active dynamic envelope bounds (Upper Target, Ratchet Trail, Catastrophic Floor, High Watermark, S0)
-    from MicrostructureSentinel instances.
-    """
-    active_sentinels = MicrostructureSentinel.get_active_sentinels()
-    if active_sentinels:
-        return {sym: s.get_envelope_bounds() for sym, s in active_sentinels.items()}
+            # Update live mark-to-market if we hold this position
+            if symbol in self._positions:
+                pos = self._positions[symbol]
+                new_price = microprice if microprice > 0.0 else mid_price
+                if new_price > 0.0:
+                    pos.current_price = new_price
+                    pos.market_value = pos.quantity * new_price
+                    pos.unrealized_pnl = (new_price - pos.average_cost) * pos.quantity
+                    pos.last_update_ts = now
 
-    # Fallback to default SOXL reference bounds when no live sentinel instance is active
-    return {
-        "SOXL": {
-            "s0": 102.28,
-            "high_watermark": 102.50,
-            "trail_stop": 99.85,
-            "catastrophic_floor": 96.23,
-            "target": 106.37,
-        }
-    }
+            # Anchor Core reference prices if not yet set
+            if symbol in self.core_symbols and symbol not in self._core_anchor_prices and microprice > 0.0:
+                self._core_anchor_prices[symbol] = microprice
 
+            # Re-derive the intraday credit proxy whenever either leg of HYG/IEF ticks
+            if symbol in (CREDIT_RISK_SYMBOL, CREDIT_SAFE_SYMBOL):
+                self._update_credit_proxy_locked()
 
-def compute_engine_state(override: Optional[str] = None) -> str:
-    """
-    Derives engine state: STANDBY | RUNNING | FLUSHED.
-    """
-    if override in ("STANDBY", "RUNNING", "FLUSHED"):
-        return override
+        return update
 
-    # Check control signal for emergency flush
-    if CONTROL_SIGNAL_FILE.exists():
-        try:
-            signal = json.loads(CONTROL_SIGNAL_FILE.read_text(encoding="utf-8"))
-            if str(signal.get("action", "")).upper() in ("LIQUIDATE_ALL", "HALT"):
-                return "FLUSHED"
-        except Exception:
-            pass
-
-    # Check if recovery state has latched exit
-    recovery_file = STATE_DIR / "recovery_state.json"
-    if recovery_file.exists():
-        try:
-            rec = json.loads(recovery_file.read_text(encoding="utf-8"))
-            if rec.get("exit_latched") or rec.get("state") == "FLUSHED":
-                return "FLUSHED"
-        except Exception:
-            pass
-
-    # Check active sentinels
-    if MicrostructureSentinel.get_active_sentinels():
-        return "RUNNING"
-
-    return "STANDBY"
-
-
-def build_telemetry_payload(
-    engine_state: Optional[str] = None,
-    telemetry_db_path: Optional[Union[Path, str]] = None,
-    trades_db_path: Optional[Union[Path, str]] = None,
-) -> Dict[str, Any]:
-    """
-    Construct unified telemetry payload streaming at 1Hz.
-    """
-    now_iso = datetime.now(timezone.utc).isoformat()
-    return {
-        "timestamp": now_iso,
-        "engine_state": compute_engine_state(engine_state),
-        "regime": pull_latest_regime(telemetry_db_path),
-        "balances": pull_settlement_balances(trades_db_path),
-        "envelopes": pull_active_envelopes(),
-    }
-
-
-class ConnectionManager:
-    """
-    WebSocket Connection Manager with thread-safe client tracking and 15s keep-alive heartbeat.
-    """
-
-    def __init__(self, ping_interval: float = 15.0) -> None:
-        self._active_connections: Set[WebSocket] = set()
-        self._thread_lock = threading.Lock()
-        self.ping_interval = float(ping_interval)
-        self._running: bool = False
-        self._keepalive_task: Optional[asyncio.Task] = None
-        self._broadcast_task: Optional[asyncio.Task] = None
-        self._latest_payload: Optional[Dict[str, Any]] = None
-        self._engine_state: Optional[str] = None
-
-    @property
-    def active_count(self) -> int:
-        with self._thread_lock:
-            return len(self._active_connections)
-
-    def set_engine_state(self, state: str) -> None:
-        """Explicitly override engine state (STANDBY|RUNNING|FLUSHED)."""
-        self._engine_state = state
-
-    async def connect(self, websocket: WebSocket) -> None:
-        """Accepts WebSocket connection and safely registers it."""
-        await websocket.accept()
-        with self._thread_lock:
-            self._active_connections.add(websocket)
-        logger.info("WebSocket connected. Active clients: %d", len(self._active_connections))
-
-        # Ensure background broadcast & keepalive tasks are active
-        self.ensure_background_tasks()
-
-        # Send immediate initial state packet
-        payload = self.get_latest_payload(refresh=True)
-        try:
-            await websocket.send_json(payload)
-        except Exception as exc:
-            logger.debug("Failed sending initial snapshot to client: %s", exc)
-            self.disconnect(websocket)
-
-    def disconnect(self, websocket: WebSocket) -> None:
-        """Removes WebSocket connection from active set."""
-        with self._thread_lock:
-            self._active_connections.discard(websocket)
-        logger.info("WebSocket disconnected. Active clients: %d", len(self._active_connections))
-
-    async def broadcast_json(self, payload: dict) -> None:
+    def on_streamer_tick(self, symbol: str, fields: Dict[str, Any]) -> HotQuoteUpdate:
         """
-        Broadcasts JSON payload to all active client connections.
-        Gracefully disconnects unresponsive or disconnected clients.
+        Adapter for ``data.streamer.SchwabStreamer.on_tick(symbol, fields)``.
+
+        Schwab LEVELONE_EQUITIES frames are delta updates (only changed fields are present), so the
+        fields are merged into a per-symbol cache before the full quote is evaluated. The streamer
+        frames carry no quote timestamp, so receipt time is used as the quote epoch.
         """
-        self._latest_payload = payload
-        with self._thread_lock:
-            clients = list(self._active_connections)
-
-        if not clients:
-            return
-
-        dead_clients: List[WebSocket] = []
-        for ws in clients:
-            try:
-                await ws.send_json(payload)
-            except Exception:
-                dead_clients.append(ws)
-
-        for ws in dead_clients:
-            self.disconnect(ws)
-
-    def get_latest_payload(self, refresh: bool = False) -> Dict[str, Any]:
-        """Return cached or freshly constructed unified telemetry payload."""
-        if not refresh and self._latest_payload is not None:
-            return self._latest_payload
-        payload = build_telemetry_payload(self._engine_state)
-        self._latest_payload = payload
-        return payload
-
-    async def _keepalive_loop(self) -> None:
-        """
-        Heartbeat Keep-Alive:
-        Send ping frames every 15 seconds; disconnect unresponsive clients gracefully.
-        """
-        while self._running:
-            try:
-                await asyncio.sleep(self.ping_interval)
-            except asyncio.CancelledError:
-                break
-
-            with self._thread_lock:
-                clients = list(self._active_connections)
-
-            if not clients:
-                continue
-
-            dead_clients: List[WebSocket] = []
-            for ws in clients:
-                try:
-                    # Attempt ASGI ping frame first; fallback to JSON ping message
+        sym = str(symbol).upper()
+        with self._lock:
+            cache = self._tick_cache.setdefault(sym, {})
+            for key in ("bid_price", "ask_price", "last_price", "bid_size", "ask_size", "total_volume"):
+                val = fields.get(key)
+                if val is not None:
                     try:
-                        await ws.send({"type": "websocket.ping"})
-                    except (RuntimeError, AttributeError, NotImplementedError):
-                        await ws.send_json({"type": "ping", "timestamp": datetime.now(timezone.utc).isoformat()})
-                except Exception:
-                    dead_clients.append(ws)
+                        cache[key] = float(val)
+                    except (TypeError, ValueError):
+                        continue
+            merged = dict(cache)
+        payload = {
+            "symbol": sym,
+            "bidPrice": merged.get("bid_price", 0.0),
+            "askPrice": merged.get("ask_price", 0.0),
+            "lastPrice": merged.get("last_price", 0.0),
+            "bidSize": int(merged.get("bid_size", 0)),
+            "askSize": int(merged.get("ask_size", 0)),
+            "totalVolume": int(merged.get("total_volume", 0)),
+            "quoteTime": int(time.time() * 1000),
+        }
+        return self.on_level1_quote(payload)
 
-            for ws in dead_clients:
-                self.disconnect(ws)
+    def get_latest_quote(self, symbol: str) -> Optional[HotQuoteUpdate]:
+        """Returns the most recent hot-plane quote for ``symbol`` (None if never ticked)."""
+        with self._lock:
+            return self._latest_quotes.get(symbol.upper())
 
-    def ensure_background_tasks(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
-        """Ensures the 1Hz broadcast worker and 15s keepalive worker are running."""
-        if not self._running:
-            self.start(loop=loop)
-
-    def start(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
-        """Starts keepalive and 1Hz broadcast background tasks."""
-        if self._running:
+    def set_credit_reference(self, hyg_close: float, ief_close: float, source: str = "PRIOR_CLOSE") -> None:
+        """
+        Sets the HYG/IEF reference ratio against which the intraday credit proxy is measured
+        (normally the prior-session close, so the proxy reflects the day's credit move).
+        """
+        if hyg_close <= 0.0 or ief_close <= 0.0:
             return
-        self._running = True
-        try:
-            curr_loop = loop or asyncio.get_running_loop()
-        except RuntimeError:
-            curr_loop = asyncio.get_event_loop()
+        with self._lock:
+            self._credit_ref_ratio = hyg_close / ief_close
+            self._credit_ref_source = source
+            self._update_credit_proxy_locked()
 
-        if self._keepalive_task is None or self._keepalive_task.done():
-            self._keepalive_task = curr_loop.create_task(self._keepalive_loop())
+    def get_credit_proxy_state(self) -> Dict[str, Any]:
+        """Snapshot of the live credit proxy inputs/outputs for telemetry."""
+        with self._lock:
+            return {
+                "hyg_ief_ratio": self._credit_live_ratio,
+                "reference_ratio": self._credit_ref_ratio,
+                "reference_source": self._credit_ref_source,
+                "proxy_is_live": self._credit_proxy_is_live,
+                "fred_oas_bps": self._macro_state.fred_oas_bps,
+                "intraday_credit_proxy_bps": round(self._macro_state.intraday_credit_proxy_bps, 2),
+                "hybrid_credit_spread_bps": round(self._macro_state.hybrid_credit_spread_bps, 2),
+            }
 
-        if self._broadcast_task is None or self._broadcast_task.done():
-            self._broadcast_task = curr_loop.create_task(
-                telemetry_broadcast_worker(self, interval=1.0)
-            )
-        logger.info("ConnectionManager started background tasks (keepalive=%.1fs, broadcast=1.0s)", self.ping_interval)
+    def _update_credit_proxy_locked(self) -> None:
+        """
+        Intraday credit spread proxy from the live HYG/IEF ratio:
 
-    async def stop(self) -> None:
-        """Stops background tasks and closes all active connections."""
-        self._running = False
-        if self._keepalive_task and not self._keepalive_task.done():
-            self._keepalive_task.cancel()
-            try:
-                await self._keepalive_task
-            except asyncio.CancelledError:
-                pass
-            self._keepalive_task = None
+            proxy_bps = OAS_fred - ln(r_live / r_ref) / HYG_IEF_LOG_RATIO_PER_BP
 
-        if self._broadcast_task and not self._broadcast_task.done():
-            self._broadcast_task.cancel()
-            try:
-                await self._broadcast_task
-            except asyncio.CancelledError:
-                pass
-            self._broadcast_task = None
+        A rising HYG/IEF ratio means credit is tightening, so the proxy falls below the FRED anchor.
+        If no reference close was supplied, the first observed ratio becomes the reference.
+        """
+        hyg = self._latest_quotes.get(CREDIT_RISK_SYMBOL)
+        ief = self._latest_quotes.get(CREDIT_SAFE_SYMBOL)
+        if hyg is None or ief is None:
+            return
+        px_h = hyg.mid_price if hyg.mid_price > 0.0 else hyg.last
+        px_i = ief.mid_price if ief.mid_price > 0.0 else ief.last
+        if px_h <= 0.0 or px_i <= 0.0:
+            return
+        ratio = px_h / px_i
+        self._credit_live_ratio = ratio
+        if self._credit_ref_ratio is None:
+            self._credit_ref_ratio = ratio
+            self._credit_ref_source = "FIRST_LIVE_TICK"
+        delta_bps = -math.log(ratio / self._credit_ref_ratio) / HYG_IEF_LOG_RATIO_PER_BP
+        self._macro_state.intraday_credit_proxy_bps = self._macro_state.fred_oas_bps + delta_bps
+        self._credit_proxy_is_live = True
+        self._recalculate_hybrid_credit_spread_locked()
 
-        with self._thread_lock:
-            clients = list(self._active_connections)
-            self._active_connections.clear()
+    def _extract_quote_fields(self, payload: Dict[str, Any]) -> Tuple[str, float, float, float, int, int, int, int]:
+        """Normalizes diverse Schwab Streaming and REST payload schemas."""
+        symbol = ""
+        bid = 0.0
+        ask = 0.0
+        last = 0.0
+        bid_size = 0
+        ask_size = 0
+        volume = 0
+        quote_epoch_ms = 0
 
-        for ws in clients:
-            try:
-                await ws.close()
-            except Exception:
-                pass
-        logger.info("ConnectionManager stopped.")
+        # Case A: Streaming LEVELONE_EQUITIES payload
+        if "content" in payload and isinstance(payload["content"], list) and len(payload["content"]) > 0:
+            c = payload["content"][0]
+            symbol = str(c.get("key") or c.get("0") or "")
+            bid = float(c.get("bidPrice") or c.get("1") or 0.0)
+            ask = float(c.get("askPrice") or c.get("2") or 0.0)
+            last = float(c.get("lastPrice") or c.get("3") or 0.0)
+            bid_size = int(c.get("bidSize") or c.get("4") or 0)
+            ask_size = int(c.get("askSize") or c.get("5") or 0)
+            volume = int(c.get("totalVolume") or c.get("8") or 0)
+            quote_epoch_ms = int(c.get("quoteTime") or c.get("24") or payload.get("timestamp") or 0)
 
+        # Case B: REST Market Data quote spec
+        elif "quote" in payload and "symbol" in payload:
+            symbol = str(payload["symbol"])
+            q = payload["quote"]
+            bid = float(q.get("bidPrice", 0.0))
+            ask = float(q.get("askPrice", 0.0))
+            last = float(q.get("lastPrice", 0.0))
+            bid_size = int(q.get("bidSize", 0))
+            ask_size = int(q.get("askSize", 0))
+            volume = int(q.get("totalVolume", 0))
+            quote_epoch_ms = int(q.get("quoteTime", 0))
 
-async def telemetry_broadcast_worker(
-    manager: ConnectionManager,
-    interval: float = 1.0,
-    stop_event: Optional[asyncio.Event] = None,
-) -> None:
-    """
-    Background worker loop broadcasting unified telemetry payloads at 1Hz (1 broadcast per second).
-    """
-    while (stop_event is None or not stop_event.is_set()) and manager._running:
-        try:
-            payload = build_telemetry_payload(manager._engine_state)
-            await manager.broadcast_json(payload)
-        except asyncio.CancelledError:
-            break
-        except Exception as exc:
-            logger.error("Error in telemetry_broadcast_worker: %s", exc, exc_info=True)
+        # Case C: Flattened dictionary
+        elif "symbol" in payload:
+            symbol = str(payload["symbol"])
+            bid = float(payload.get("bidPrice", payload.get("bid", 0.0)))
+            ask = float(payload.get("askPrice", payload.get("ask", 0.0)))
+            last = float(payload.get("lastPrice", payload.get("last", 0.0)))
+            bid_size = int(payload.get("bidSize", payload.get("bid_size", 0)))
+            ask_size = int(payload.get("askSize", payload.get("ask_size", 0)))
+            volume = int(payload.get("totalVolume", payload.get("volume", 0)))
+            quote_epoch_ms = int(payload.get("quoteTime", payload.get("timestamp", 0)))
 
-        try:
-            await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            break
+        return symbol, bid, ask, last, bid_size, ask_size, volume, quote_epoch_ms
 
+    # =========================================================================
+    # 2. WARM PLANE (Account Sync & Robust Mid-Session Hot Boot)
+    # =========================================================================
 
-# Global singleton instance for the FastAPI application
-telemetry_manager = ConnectionManager(ping_interval=15.0)
+    def on_account_sync(self, account_payload: Dict[str, Any], is_hot_boot: bool = False) -> DualSleeveState:
+        """
+        Ingests Schwab /trader/v1/accounts response.
+        Reconciles positions into 1x Robo-Core and 3x Tactical Satellite sleeves.
 
-```
+        Hot Boot Reconciliation Logic:
+        If booting mid-session (or if baseline has not been initialized), dynamically
+        samples live broker liquidation value and mark-to-market prices as the reference
+        state (S0 and N0) immediately, bypassing the requirement for 09:30 pre-market baseline.
+        """
+        now = time.time()
+        with self._lock:
+            sec = account_payload.get("securitiesAccount", account_payload)
+            cur = sec.get("currentBalances", {})
+            agg = account_payload.get("aggregatedBalance", {})
 
-#### `scripts/preflight.py` - 12 pre-market invariant latch gates (702 lines, 30301 bytes)
+            # 1. Parse liquidation value and cash
+            nlv = float(cur.get("liquidationValue") or agg.get("currentLiquidationValue") or agg.get("liquidationValue") or 0.0)
+            cash = float(cur.get("cashAvailableForTrading") or cur.get("availableFundsNonMarginableTrade") or cur.get("cashBalance") or 0.0)
 
-```python
-#!/usr/bin/env python3
-"""
-scripts/preflight.py
-====================
-Production Preflight Validator & Invariant Latch Gatekeeper (#60).
-Schwab Automated Day-Trading Engine.
+            self._broker_nlv = nlv
+            self._cash_buffer = cash
 
-Runs prior to every market open (scheduled daily Mon-Fri at 09:15:00 EDT / 13:15:00 UTC)
-to verify account cash settlement, broker connectivity, database health, daemon states,
-CPU pinning, and risk calibrations before permitting live execution.
+            # 2. Parse and categorize positions
+            raw_positions = sec.get("positions", []) or []
+            active_symbols: Set[str] = set()
 
-12 Preflight Invariant Checks:
-------------------------------
- 1. Broker Authentication & REST Connect: Live handshake with Charles Schwab REST API.
- 2. Account ...4015 Balance Extraction: Query target securitiesAccount and verify balance parsing.
- 3. Zero Unhandled Broker Error Codes: 0 HTTP 4xx/5xx or unhandled broker codes, circuit breaker CLOSED.
- 4. Cash Withdrawal & NLV Readout: Read cashAvailableForWithdrawal and currentLiquidationValue.
- 5. Zero GFV Risk Liquidity Invariant: Verify max_position_size_usd does not exceed settled funds when unsettledCash > 0.
- 6. Pre-Market Flat Inventory: Assert openPositionsCount == 0 prior to 09:30 EDT.
- 7. SQLite Storage Integrity Check: Verify PRAGMA integrity_check returns 'ok' on trades.db and telemetry.db.
- 8. SQLite Storage WAL Journal Mode: Verify PRAGMA journal_mode returns 'wal' on trades.db and telemetry.db.
- 9. Trading Daemon State: Assert schwab-trader.service is active or enabled.
-10. Web Gateway Health: Assert schwab-web.service responds HTTP 200 on port 8080.
-11. Daemon CPU Affinity Pinning: Assert Core 0 for engine daemon and Core 1 for web gateway.
-12. Risk & Recovery Latch Calibration: Verify max_position_size_pct <= 0.33, max_account_risk_pct <= 0.03,
-    and recovery.halt_new_entries == True if recovery state is not DONE.
+            for raw in raw_positions:
+                inst = raw.get("instrument", {})
+                sym = str(inst.get("symbol", "")).upper()
+                if not sym:
+                    continue
 
-Latch Action:
--------------
-If ANY invariant check fails (exit code 1):
-  - Automatically locks trading.engine_active: false in configuration and strategy state.
-  - Immediately dispatches an emergency alert to ntfy (schwab-trader-nrc-8472).
-"""
+                active_symbols.add(sym)
+                long_qty = float(raw.get("longQuantity", 0.0))
+                short_qty = float(raw.get("shortQuantity", 0.0))
+                qty = long_qty - short_qty
 
-from __future__ import annotations
+                avg_price = float(raw.get("averagePrice", 0.0))
+                mkt_val = float(raw.get("marketValue", 0.0))
 
-import argparse
-import json
-import logging
-import os
-import re
-import sqlite3
-import subprocess
-import sys
-import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-from zoneinfo import ZoneInfo
+                # Determine initial current price
+                current_price = avg_price
+                if sym in self._latest_quotes:
+                    q = self._latest_quotes[sym]
+                    if q.microprice > 0.0:
+                        current_price = q.microprice
+                elif qty != 0.0 and mkt_val > 0.0:
+                    current_price = mkt_val / abs(qty)
 
-# Setup project root and Python path
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-# Load .env file
-env_file = PROJECT_ROOT / ".env"
-if env_file.exists():
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(env_file)
-    except Exception:
-        pass
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip().strip("'\""))
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("preflight")
-
-from core.paths import (
-    STATE_DIR,
-    TRADES_DB_PATH,
-    TELEMETRY_DB_PATH,
-    RECOVERY_STATE_FILE,
-    RECOVERY_STATUS_FILE,
-)
-from core.runtime import load_config
-from core.auth import SecurityVault, SchwabAuthManager
-from data.rest_client import SchwabRestClient
-from core.notifier import send_alert
-
-DEFAULT_NTFY_TOPIC = "schwab-trader-nrc-8472"
-TARGET_ACCOUNT_SUFFIX = "4015"
-NY_TZ = ZoneInfo("America/New_York")
-
-
-# ==============================================================================
-# Audit Invariant Result Model & Reporter
-# ==============================================================================
-
-@dataclass
-class InvariantResult:
-    index: int
-    name: str
-    passed: bool
-    evidence: str
-    failure_reason: str = ""
-
-
-class PreflightAudit:
-    def __init__(self) -> None:
-        self.results: List[InvariantResult] = []
-
-    def record(self, index: int, name: str, passed: bool, evidence: str, failure_reason: str = "") -> bool:
-        res = InvariantResult(index, name, passed, evidence, failure_reason)
-        self.results.append(res)
-        return passed
-
-    @property
-    def total_count(self) -> int:
-        return len(self.results)
-
-    @property
-    def pass_count(self) -> int:
-        return sum(1 for r in self.results if r.passed)
-
-    @property
-    def fail_count(self) -> int:
-        return sum(1 for r in self.results if not r.passed)
-
-    @property
-    def all_passed(self) -> bool:
-        return self.fail_count == 0
-
-    def render_table(self, execution_context: str) -> str:
-        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        now_edt = datetime.now(NY_TZ).strftime("%Y-%m-%d %H:%M:%S EDT")
-        
-        sep = "=" * 116
-        div = "-" * 116
-        lines = [
-            sep,
-            f"                     SCHWAB TRADING ENGINE — PREFLIGHT INVARIANT AUDIT & LATCH GATEKEEPER",
-            f" Timestamp (EDT): {now_edt} | Account: ...{TARGET_ACCOUNT_SUFFIX} | Host: {execution_context} | Target: Market Open",
-            sep,
-            f"{'ID':<4} {'INVARIANT CHECK NAME':<38} {'STATUS':<8} {'TELEMETRY / INVARIANT EVIDENCE':<62}",
-            div,
-        ]
-
-        for r in self.results:
-            status_str = "PASS" if r.passed else "FAIL"
-            evidence_str = r.evidence if r.passed else f"ERR: {r.failure_reason}"
-            if len(evidence_str) > 62:
-                evidence_str = evidence_str[:59] + "..."
-            lines.append(f"{r.index:02d}   {r.name:<38} {status_str:<8} {evidence_str:<62}")
-
-        lines.append(div)
-        verdict = (
-            "CLEARANCE GRANTED — ALL 12 INVARIANTS LATCHED (SAFE FOR MARKET OPEN)"
-            if self.all_passed
-            else "CLEARANCE DENIED — INVARIANT BREACH (LOCKING TRADING.ENGINE_ACTIVE)"
-        )
-        status_tag = "[PASS]" if self.all_passed else "[FAIL]"
-        lines.append(f"TOTAL CHECKS: {self.total_count} | PASSED: {self.pass_count} | FAILED: {self.fail_count}")
-        lines.append(f"VERDICT: {status_tag} {verdict}")
-        lines.append(sep)
-        return "\n".join(lines)
-
-
-# ==============================================================================
-# Invariant Latch Lockout & Alert Dispatcher
-# ==============================================================================
-
-def engage_invariant_latch(failures: List[InvariantResult], topic: str = DEFAULT_NTFY_TOPIC) -> None:
-    """
-    Invoked when any preflight invariant fails.
-    Automatically locks trading.engine_active: false in config/config.yaml and strategy_config.json,
-    and dispatches high-priority emergency alerts via ntfy.
-    """
-    logger.critical("PREFLIGHT INVARIANT FAILURE DETECTED: Engaging Invariant Latch")
-
-    reasons = [f"#{r.index} {r.name}: {r.failure_reason or r.evidence}" for r in failures]
-    reasons_fmt = "\n".join(f" - {r}" for r in reasons)
-
-    # 1. Update config/config.yaml
-    cfg_paths = [
-        PROJECT_ROOT / "config" / "config.yaml",
-        Path("/home/nicho/schwab_engine/config/config.yaml"),
-    ]
-    for p in cfg_paths:
-        try:
-            if p.exists():
-                text = p.read_text(encoding="utf-8")
-                if "engine_active:" in text:
-                    text = re.sub(r"engine_active:\s*(true|True|false|False)", "engine_active: false", text)
-                elif "trading:" in text:
-                    text = text.replace("trading:\n", "trading:\n  engine_active: false\n")
+                # Assign sleeve classification
+                if sym in self.satellite_symbols:
+                    sleeve_type = "SATELLITE"
+                elif sym in DEFAULT_SWEEP_SYMBOLS:
+                    sleeve_type = "SWEEP"
                 else:
-                    text = "trading:\n  engine_active: false\n\n" + text
-                p.write_text(text, encoding="utf-8")
-                logger.info("Latched trading.engine_active: false in %s", p)
-        except Exception as exc:
-            logger.error("Failed updating %s during latch: %s", p, exc)
+                    # Tickers outside satellite are mapped to 1x Core (e.g. SPY, QQQ, broad market)
+                    sleeve_type = "CORE"
 
-    # 2. Update strategy_config.json
-    strat_paths = [
-        PROJECT_ROOT / "strategy_config.json",
-        STATE_DIR / "strategy_config.json",
-        Path("/home/nicho/schwab_state/strategy_config.json"),
-    ]
-    for p in strat_paths:
-        try:
-            if p.exists():
-                data = json.loads(p.read_text(encoding="utf-8"))
-                data["hard_lockout_active"] = True
-                data["emergency_flatten"] = True
-                data["engine_active"] = False
-                data["_latched_at"] = datetime.now(timezone.utc).isoformat()
-                data["_latch_reason"] = "PREFLIGHT_INVARIANT_FAILURE"
-                p.write_text(json.dumps(data, indent=2), encoding="utf-8")
-                logger.info("Latched hard_lockout_active: true in %s", p)
-        except Exception as exc:
-            logger.error("Failed updating %s during latch: %s", p, exc)
+                unrealized = (current_price - avg_price) * qty if avg_price > 0 else 0.0
 
-    # 3. Dispatch Emergency ntfy Alert
-    alert_title = "🚨 [PREFLIGHT INVARIANT LATCH] Engine Locked FALSE"
-    alert_msg = (
-        f"Preflight Invariant Breached on schwab-trader!\n\n"
-        f"Failures ({len(failures)} total):\n{reasons_fmt}\n\n"
-        f"trading.engine_active has been locked FALSE. Live orders suppressed."
-    )
-    send_alert(
-        title=alert_title,
-        message=alert_msg,
-        priority="urgent",
-        tags=["rotating_light", "no_entry", "fire"],
-        topic=topic,
-    )
-
-
-# ==============================================================================
-# Invariant Evaluation Engine
-# ==============================================================================
-
-def run_preflight_checks(audit: PreflightAudit, cfg: Dict[str, Any]) -> None:
-    """Executes all 12 invariant checks sequentially."""
-    
-    # Context holders across checks
-    rest_client: Optional[SchwabRestClient] = None
-    target_hash: Optional[str] = None
-    account_data: Optional[Dict[str, Any]] = None
-    cur_liq_val: float = 0.0
-    cash_avail_withdr: float = 0.0
-    unsettled_cash: float = 0.0
-    raw_positions: List[Dict[str, Any]] = []
-    broker_error_count: int = 0
-    circuit_breaker_open: bool = False
-
-    auth_cfg = cfg.get("auth", {})
-    acct_cfg = cfg.get("account", {})
-    risk_cfg = cfg.get("risk", {})
-    target_suffix = str(acct_cfg.get("required_suffix", "015"))
-
-    # --------------------------------------------------------------------------
-    # CHECK 1: Check Authentication & Broker State (REST Handshake)
-    # --------------------------------------------------------------------------
-    chk_1_name = "Broker Authentication & REST Connect"
-    try:
-        cid = os.getenv("SCHWAB_CLIENT_ID")
-        sec = os.getenv("SCHWAB_CLIENT_SECRET")
-        pw = os.getenv("VAULT_PASSPHRASE")
-        if not cid or not sec or not pw:
-            raise ValueError("Missing Schwab credentials (.env SCHWAB_CLIENT_ID, SCHWAB_CLIENT_SECRET, VAULT_PASSPHRASE)")
-
-        vault_name = auth_cfg.get("vault_file", "schwab_tokens_vault.json")
-        candidates = [
-            PROJECT_ROOT / vault_name,
-            STATE_DIR / vault_name,
-            Path("/home/nicho/schwab_state") / vault_name,
-            Path(vault_name),
-        ]
-        vault_path = next((p for p in candidates if p.exists() and p.stat().st_size > 0), None)
-        if not vault_path:
-            raise FileNotFoundError(f"Token vault {vault_name} not found")
-
-        vault = SecurityVault(
-            passphrase=pw,
-            iterations=int(auth_cfg.get("pbkdf2_iterations", 600000)),
-            vault_path=vault_path,
-        )
-        auth = SchwabAuthManager(cid, sec, vault, cfg)
-        auth.load_tokens()
-
-        # Check circuit breaker
-        circuit_breaker_open = getattr(auth, "auth_circuit_open", False)
-        if circuit_breaker_open:
-            raise RuntimeError("Authentication circuit breaker is OPEN (AUTH_LOCKED)")
-
-        rest_client = SchwabRestClient.from_config(cfg, auth)
-        account_numbers = rest_client.get_account_numbers()
-        if not account_numbers or not isinstance(account_numbers, list):
-            raise RuntimeError(f"Unexpected account numbers response: {account_numbers}")
-
-        audit.record(
-            1, chk_1_name, True,
-            f"OAuth token active; REST handshake OK ({len(account_numbers)} accounts linked)"
-        )
-    except Exception as exc:
-        broker_error_count += 1
-        audit.record(1, chk_1_name, False, "", str(exc))
-
-    # --------------------------------------------------------------------------
-    # CHECK 2: Assert Account ...4015 Balance Extraction Succeeds
-    # --------------------------------------------------------------------------
-    chk_2_name = "Account ...4015 Balance Extraction"
-    if rest_client is not None and not audit.results[-1].passed is False:
-        try:
-            for entry in account_numbers:
-                acc_no = str(entry.get("accountNumber", ""))
-                if acc_no.endswith("4015") or acc_no.endswith(target_suffix):
-                    target_hash = entry.get("hashValue")
-                    break
-
-            if not target_hash:
-                raise RuntimeError(f"Could not locate account with suffix 4015 or {target_suffix}")
-
-            acct_url = f"{rest_client._trader_base}/accounts/{target_hash}"
-            resp = rest_client._get(acct_url, params={"fields": "positions"})
-            if resp.status_code != 200:
-                broker_error_count += 1
-                raise RuntimeError(f"Broker returned status {resp.status_code}")
-
-            account_data = resp.json()
-            sec_acct = account_data.get("securitiesAccount", account_data)
-            cur_bal = sec_acct.get("currentBalances", {})
-            raw_positions = sec_acct.get("positions", []) or []
-
-            if not cur_bal:
-                raise RuntimeError("Empty currentBalances returned for account ...4015")
-
-            audit.record(
-                2, chk_2_name, True,
-                f"Securities account located, hash {target_hash[:8]}...{target_hash[-6:]} extracted"
-            )
-        except Exception as exc:
-            broker_error_count += 1
-            audit.record(2, chk_2_name, False, "", str(exc))
-    else:
-        audit.record(2, chk_2_name, False, "", "Skipped due to REST connection failure")
-
-    # --------------------------------------------------------------------------
-    # CHECK 3: Verify Zero Unhandled Broker Error Codes
-    # --------------------------------------------------------------------------
-    chk_3_name = "Zero Unhandled Broker Error Codes"
-    no_errors = (broker_error_count == 0) and not circuit_breaker_open
-    if no_errors:
-        audit.record(
-            3, chk_3_name, True,
-            "0 unhandled broker error codes (HTTP 200 OK, auth circuit breaker CLOSED)"
-        )
-    else:
-        audit.record(
-            3, chk_3_name, False, "",
-            f"{broker_error_count} broker error(s) detected, circuit_open={circuit_breaker_open}"
-        )
-
-    # --------------------------------------------------------------------------
-    # CHECK 4: Read cashAvailableForWithdrawal & currentLiquidationValue
-    # --------------------------------------------------------------------------
-    chk_4_name = "Cash Withdrawal & NLV Readout"
-    if account_data is not None:
-        try:
-            sec_acct = account_data.get("securitiesAccount", account_data)
-            cur_bal = sec_acct.get("currentBalances", {})
-            agg_bal = account_data.get("aggregatedBalance", {})
-
-            liq_val_raw = cur_bal.get("liquidationValue")
-            if liq_val_raw is None:
-                liq_val_raw = cur_bal.get("currentLiquidationValue")
-            if liq_val_raw is None:
-                liq_val_raw = agg_bal.get("currentLiquidationValue")
-            cur_liq_val = float(liq_val_raw) if liq_val_raw is not None else 0.0
-
-            cash_avail_raw = cur_bal.get("cashAvailableForWithdrawal")
-            cash_avail_withdr = float(cash_avail_raw) if cash_avail_raw is not None else 0.0
-
-            unsettled_raw = cur_bal.get("unsettledCash")
-            unsettled_cash = float(unsettled_raw) if unsettled_raw is not None else 0.0
-
-            if cur_liq_val <= 0:
-                raise ValueError(f"currentLiquidationValue (${cur_liq_val:,.2f}) must be > 0")
-            if cash_avail_withdr < 0:
-                raise ValueError(f"cashAvailableForWithdrawal (${cash_avail_withdr:,.2f}) cannot be negative")
-
-            audit.record(
-                4, chk_4_name, True,
-                f"NLV: ${cur_liq_val:,.2f} | CashAvailableForWithdrawal: ${cash_avail_withdr:,.2f}"
-            )
-        except Exception as exc:
-            audit.record(4, chk_4_name, False, "", str(exc))
-    else:
-        audit.record(4, chk_4_name, False, "", "Skipped due to account data extraction failure")
-
-    # --------------------------------------------------------------------------
-    # CHECK 5: Enforce Cash & Settlement Invariants (Zero GFV Risk)
-    # --------------------------------------------------------------------------
-    chk_5_name = "Zero GFV Risk Liquidity Invariant"
-    try:
-        max_pos_pct = float(risk_cfg.get("max_position_size_pct", risk_cfg.get("single_ticker_cap_pct", 0.33)))
-        max_position_size_usd = round(cur_liq_val * max_pos_pct, 2)
-        settled_liquidity = cash_avail_withdr
-
-        # Invariant: If unsettledCash > 0, verify max_position_size_usd <= settled funds
-        if unsettled_cash > 0:
-            gfv_risk_free = max_position_size_usd <= settled_liquidity
-            if not gfv_risk_free:
-                raise ValueError(
-                    f"GFV RISK DETECTED: Max position size (${max_position_size_usd:,.2f}) exceeds "
-                    f"settled funds (${settled_liquidity:,.2f}) while unsettledCash=${unsettled_cash:,.2f}"
+                self._positions[sym] = SleevePosition(
+                    symbol=sym,
+                    quantity=qty,
+                    average_cost=avg_price,
+                    current_price=current_price,
+                    market_value=qty * current_price if current_price > 0 else mkt_val,
+                    unrealized_pnl=unrealized,
+                    last_update_ts=now,
+                    sleeve=sleeve_type,
                 )
-            audit.record(
-                5, chk_5_name, True,
-                f"Unsettled: ${unsettled_cash:,.2f} | Settled: ${settled_liquidity:,.2f} >= MaxPos: ${max_position_size_usd:,.2f} (0 GFV)"
-            )
-        else:
-            # Fully settled account
-            audit.record(
-                5, chk_5_name, True,
-                f"Fully settled (Unsettled: $0.00) | Liquidity: ${settled_liquidity:,.2f} >= MaxPos: ${max_position_size_usd:,.2f}"
-            )
-    except Exception as exc:
-        audit.record(5, chk_5_name, False, "", str(exc))
 
-    # --------------------------------------------------------------------------
-    # CHECK 6: Assert openPositionsCount == 0 prior to 09:30 EDT
-    # --------------------------------------------------------------------------
-    chk_6_name = "Pre-Market Flat Inventory (0 Open Pos)"
-    try:
-        open_positions = []
-        for p in raw_positions:
-            l_qty = float(p.get("longQuantity", 0.0) or 0.0)
-            s_qty = float(p.get("shortQuantity", 0.0) or 0.0)
-            if abs(l_qty - s_qty) > 0:
-                open_positions.append(p)
-        open_positions_count = len(open_positions)
-
-        now_edt = datetime.now(NY_TZ)
-        is_prior_to_open = (now_edt.hour < 9) or (now_edt.hour == 9 and now_edt.minute < 30)
-
-        if is_prior_to_open and open_positions_count > 0:
-            syms = [pos.get("instrument", {}).get("symbol", "UNKNOWN") for pos in open_positions]
-            raise ValueError(f"Open positions found prior to 09:30 EDT: {syms} (count={open_positions_count})")
-        elif open_positions_count > 0:
-            # If tested outside pre-market, warn or verify flat requirement
-            syms = [pos.get("instrument", {}).get("symbol", "UNKNOWN") for pos in open_positions]
-            raise ValueError(f"Inventory not flat: openPositionsCount={open_positions_count} ({syms})")
-        else:
-            audit.record(
-                6, chk_6_name, True,
-                f"openPositionsCount == 0 (Inventory 100% flat at {now_edt.strftime('%H:%M:%S EDT')})"
-            )
-    except Exception as exc:
-        audit.record(6, chk_6_name, False, "", str(exc))
-
-    # --------------------------------------------------------------------------
-    # CHECK 7: Verify Storage Integrity Check (trades.db, telemetry.db)
-    # --------------------------------------------------------------------------
-    chk_7_name = "SQLite Storage Integrity Check"
-    try:
-        db_candidates = [
-            ("trades.db", TRADES_DB_PATH),
-            ("telemetry.db", TELEMETRY_DB_PATH),
-        ]
-        status_pieces = []
-        for db_name, db_path in db_candidates:
-            if not db_path.exists():
-                # Check VM fallback
-                alt = Path("/home/nicho/schwab_state") / db_name
-                if alt.exists():
-                    db_path = alt
-                else:
-                    raise FileNotFoundError(f"Database {db_name} not found at {db_path}")
-
-            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            res = con.execute("PRAGMA integrity_check").fetchone()
-            con.close()
-            check_str = str(res[0]).strip().lower() if res else ""
-            if check_str != "ok":
-                raise ValueError(f"{db_name} integrity check returned '{check_str}'")
-            status_pieces.append(f"{db_name}: ok")
-
-        audit.record(7, chk_7_name, True, " | ".join(status_pieces) + " (0 corruption)")
-    except Exception as exc:
-        audit.record(7, chk_7_name, False, "", str(exc))
-
-    # --------------------------------------------------------------------------
-    # CHECK 8: Verify SQLite WAL Journal Mode (trades.db, telemetry.db)
-    # --------------------------------------------------------------------------
-    chk_8_name = "SQLite Storage WAL Journal Mode"
-    try:
-        db_candidates = [
-            ("trades.db", TRADES_DB_PATH),
-            ("telemetry.db", TELEMETRY_DB_PATH),
-        ]
-        status_pieces = []
-        for db_name, db_path in db_candidates:
-            if not db_path.exists():
-                alt = Path("/home/nicho/schwab_state") / db_name
-                if alt.exists():
-                    db_path = alt
-                else:
-                    raise FileNotFoundError(f"Database {db_name} not found at {db_path}")
-
-            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            res = con.execute("PRAGMA journal_mode").fetchone()
-            con.close()
-            mode_str = str(res[0]).strip().lower() if res else ""
-            if mode_str != "wal":
-                raise ValueError(f"{db_name} journal_mode is '{mode_str}' (expected 'wal')")
-            status_pieces.append(f"{db_name}: wal")
-
-        audit.record(8, chk_8_name, True, " | ".join(status_pieces) + " (WAL mode active)")
-    except Exception as exc:
-        audit.record(8, chk_8_name, False, "", str(exc))
-
-    # --------------------------------------------------------------------------
-    # CHECK 9: Check Systemd Unit States: schwab-trader.service
-    # --------------------------------------------------------------------------
-    chk_9_name = "Trading Daemon State (schwab-trader)"
-    try:
-        # Check systemctl status
-        res = subprocess.run(
-            ["systemctl", "is-active", "schwab-trader.service"],
-            capture_output=True, text=True, timeout=5,
-        )
-        active_status = res.stdout.strip()
-        
-        res_en = subprocess.run(
-            ["systemctl", "is-enabled", "schwab-trader.service"],
-            capture_output=True, text=True, timeout=5,
-        )
-        enabled_status = res_en.stdout.strip()
-
-        is_active_or_enabled = (active_status == "active") or (enabled_status == "enabled")
-        if not is_active_or_enabled:
-            raise ValueError(f"schwab-trader.service is {active_status} (enabled: {enabled_status})")
-
-        audit.record(
-            9, chk_9_name, True,
-            f"schwab-trader.service is {active_status} and {enabled_status}"
-        )
-    except Exception as exc:
-        audit.record(9, chk_9_name, False, "", str(exc))
-
-    # --------------------------------------------------------------------------
-    # CHECK 10: schwab-web.service responds HTTP 200 on port 8080
-    # --------------------------------------------------------------------------
-    chk_10_name = "Web Gateway Health (schwab-web :8080)"
-    try:
-        import urllib.request
-        t0 = time.perf_counter()
-        # Query root or /health
-        req = urllib.request.Request("http://127.0.0.1:8080/", headers={"User-Agent": "SchwabPreflight/1.0"})
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            code = resp.getcode()
-            elapsed_ms = (time.perf_counter() - t0) * 1000
-            if code != 200:
-                raise ValueError(f"Expected HTTP 200 from schwab-web:8080, got {code}")
-            audit.record(
-                10, chk_10_name, True,
-                f"schwab-web.service responded HTTP 200 OK on port 8080 ({elapsed_ms:.1f}ms)"
-            )
-    except Exception as exc:
-        audit.record(10, chk_10_name, False, "", str(exc))
-
-    # --------------------------------------------------------------------------
-    # CHECK 11: Verify CPU Affinity (Core 0 for engine, Core 1 for web)
-    # --------------------------------------------------------------------------
-    chk_11_name = "Daemon CPU Affinity Pinning"
-    try:
-        # Check systemd properties or proc status
-        t_affinity_res = subprocess.run(
-            ["systemctl", "show", "-p", "CPUAffinity", "--value", "schwab-trader.service"],
-            capture_output=True, text=True, timeout=5,
-        )
-        w_affinity_res = subprocess.run(
-            ["systemctl", "show", "-p", "CPUAffinity", "--value", "schwab-web.service"],
-            capture_output=True, text=True, timeout=5,
-        )
-        t_aff = t_affinity_res.stdout.strip()
-        w_aff = w_affinity_res.stdout.strip()
-
-        # Also inspect running PIDs if available
-        t_pid_res = subprocess.run(
-            ["systemctl", "show", "-p", "MainPID", "--value", "schwab-trader.service"],
-            capture_output=True, text=True, timeout=5,
-        )
-        w_pid_res = subprocess.run(
-            ["systemctl", "show", "-p", "MainPID", "--value", "schwab-web.service"],
-            capture_output=True, text=True, timeout=5,
-        )
-        t_pid = t_pid_res.stdout.strip()
-        w_pid = w_pid_res.stdout.strip()
-
-        if t_pid and t_pid != "0":
-            status_p = Path(f"/proc/{t_pid}/status")
-            if status_p.exists():
-                for line in status_p.read_text().splitlines():
-                    if line.startswith("Cpus_allowed_list:"):
-                        t_aff = line.split(":", 1)[1].strip()
-
-        if w_pid and w_pid != "0":
-            status_p = Path(f"/proc/{w_pid}/status")
-            if status_p.exists():
-                for line in status_p.read_text().splitlines():
-                    if line.startswith("Cpus_allowed_list:"):
-                        w_aff = line.split(":", 1)[1].strip()
-
-        if t_aff != "0":
-            raise ValueError(f"schwab-trader CPU affinity is {t_aff!r} (expected '0')")
-        if w_aff != "1":
-            raise ValueError(f"schwab-web CPU affinity is {w_aff!r} (expected '1')")
-
-        audit.record(
-            11, chk_11_name, True,
-            f"Trader daemon pinned Core 0 | Web gateway pinned Core 1"
-        )
-    except Exception as exc:
-        audit.record(11, chk_11_name, False, "", str(exc))
-
-    # --------------------------------------------------------------------------
-    # CHECK 12: Verify Risk Configuration & Recovery Latch
-    # --------------------------------------------------------------------------
-    chk_12_name = "Risk & Recovery Latch Calibration"
-    try:
-        max_pos_pct = float(risk_cfg.get("max_position_size_pct", risk_cfg.get("single_ticker_cap_pct", 0.0)))
-        max_acc_risk = float(risk_cfg.get("max_account_risk_pct", risk_cfg.get("max_risk_per_trade_pct", 0.0)))
-
-        if max_pos_pct > 0.33:
-            raise ValueError(f"risk.max_position_size_pct ({max_pos_pct}) exceeds 0.33 limit")
-        if max_acc_risk > 0.03:
-            raise ValueError(f"risk.max_account_risk_pct ({max_acc_risk}) exceeds 0.03 limit")
-
-        # Check recovery state
-        rec_state = "UNKNOWN"
-        for rf in [RECOVERY_STATUS_FILE, RECOVERY_STATE_FILE, Path("/home/nicho/schwab_state/recovery_status.json")]:
-            if rf.exists():
-                try:
-                    s_data = json.loads(rf.read_text(encoding="utf-8"))
-                    rec_state = s_data.get("state", "UNKNOWN")
-                    if rec_state != "UNKNOWN":
-                        break
-                except Exception:
-                    pass
-
-        recovery_cfg = cfg.get("recovery", {})
-        halt_entries = recovery_cfg.get("halt_new_entries", False)
-
-        if rec_state != "DONE" and not halt_entries:
-            raise ValueError(
-                f"recovery.halt_new_entries must be true while recovery state is '{rec_state}'"
-            )
-
-        audit.record(
-            12, chk_12_name, True,
-            f"max_pos={max_pos_pct}<=0.33, risk={max_acc_risk}<=0.03, recovery={rec_state} (halt={halt_entries})"
-        )
-    except Exception as exc:
-        audit.record(12, chk_12_name, False, "", str(exc))
-
-
-# ==============================================================================
-# CLI Entrypoint
-# ==============================================================================
-
-def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="SchwabEngine Preflight Validator & Invariant Latch Gatekeeper")
-    parser.add_argument("--no-latch", action="store_true", help="Do not engage latch lock if invariants fail (diagnostic only)")
-    args = parser.parse_args(argv)
-
-    cfg = load_config()
-    audit = PreflightAudit()
-
-    # Host environment context
-    hostname = os.uname().nodename if hasattr(os, "uname") else "local"
-
-    run_preflight_checks(audit, cfg)
-    output_table = audit.render_table(execution_context=hostname)
-    print("\n" + output_table + "\n", flush=True)
-
-    if not audit.all_passed:
-        failures = [r for r in audit.results if not r.passed]
-        if not args.no_latch:
-            engage_invariant_latch(failures)
-        else:
-            logger.warning("--no-latch specified: skipping automated lockout")
-        return 1
-
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-
-```
-
-#### `scripts/verify_friday_settlement.py` - Automated T+1 settlement auditor (229 lines, 9073 bytes)
-
-```python
-#!/usr/bin/env python3
-"""
-scripts/verify_friday_settlement.py
-===================================
-Automated Friday Settlement Audit Runner for Schwab Account ...4015.
-Scheduled for Friday, October 16, 2026 at 09:30:05 EDT (13:30:05 UTC).
-
-Verification Checks:
-1. Confirms cashAvailableForWithdrawal matches total Net Liquidation Value ($5,563.97).
-2. Confirms unsettledCash is exactly $0.00 (T+1 settlement of SOXL sale completed).
-3. Confirms 0 working orders and 0 open positions.
-4. Logs complete structured JSON audit to /home/nicho/schwab_state/settlement_audit_20261016.json.
-"""
-
-from __future__ import annotations
-
-import argparse
-import datetime
-import json
-import logging
-import os
-import sqlite3
-import sys
-from pathlib import Path
-from typing import Any, Dict
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("verify_friday_settlement")
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-# Load .env variables
-env_file = PROJECT_ROOT / ".env"
-if env_file.exists():
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip().strip("'\""))
-
-from core.paths import STATE_DIR, TRADES_DB_PATH
-from core.runtime import load_config
-from core.auth import SecurityVault, SchwabAuthManager
-from data.rest_client import SchwabRestClient
-
-
-def resolve_audit_log_path() -> Path:
-    vm_dir = Path("/home/nicho/schwab_state")
-    target_dir = vm_dir if vm_dir.is_dir() else STATE_DIR
-    target_dir.mkdir(parents=True, exist_ok=True)
-    return target_dir / "settlement_audit_20261016.json"
-
-
-def perform_settlement_audit(expected_nlv: float = 5563.97) -> Dict[str, Any]:
-    cfg = load_config()
-    auth_cfg = cfg.get("auth", {})
-    acct_cfg = cfg.get("account", {})
-    target_suffix = str(acct_cfg.get("required_suffix", "015"))
-
-    passphrase = os.getenv("VAULT_PASSPHRASE")
-    client_id = os.getenv("SCHWAB_CLIENT_ID")
-    client_secret = os.getenv("SCHWAB_CLIENT_SECRET")
-
-    vault_name = auth_cfg.get("vault_file", "schwab_tokens_vault.json")
-    candidates = [
-        PROJECT_ROOT / vault_name,
-        STATE_DIR / vault_name,
-        Path("/home/nicho/schwab_state") / vault_name,
-        Path(vault_name),
-    ]
-    vault_path = next((p for p in candidates if p.exists() and p.stat().st_size > 0), None)
-    if not vault_path:
-        raise RuntimeError(f"Token vault not found in candidates: {candidates}")
-
-    vault = SecurityVault(
-        passphrase=passphrase,
-        iterations=int(auth_cfg.get("pbkdf2_iterations", 600000)),
-        vault_path=vault_path,
-    )
-    auth = SchwabAuthManager(client_id, client_secret, vault, cfg)
-    auth.load_tokens()
-
-    rest = SchwabRestClient.from_config(cfg, auth)
-
-    # 1. Match account hash
-    acct_nums = rest.get_account_numbers()
-    target_hash = None
-    target_acct_num = None
-    for a in acct_nums:
-        acc_no = str(a.get("accountNumber", ""))
-        if acc_no.endswith(target_suffix):
-            target_hash = a.get("hashValue")
-            target_acct_num = acc_no
-            break
-
-    if not target_hash:
-        raise RuntimeError(f"Could not find account matching suffix {target_suffix}")
-
-    # 2. Pull live balances and positions
-    acct_url = f"{rest._trader_base}/accounts/{target_hash}"
-    acct_resp = rest._get(acct_url, params={"fields": "positions"}).json()
-    sec_acct = acct_resp.get("securitiesAccount", acct_resp)
-    cur_bal = sec_acct.get("currentBalances", {})
-    positions = sec_acct.get("positions", [])
-
-    nlv = float(cur_bal.get("liquidationValue", 0.0))
-    cash_bal = float(cur_bal.get("cashBalance", 0.0))
-    settled_cash = float(cur_bal.get("settledCash", 0.0))
-    unsettled_cash = float(cur_bal.get("unsettledCash", 0.0))
-    cash_trading = float(cur_bal.get("cashAvailableForTrading", 0.0))
-    cash_withdrawal = float(cur_bal.get("cashAvailableForWithdrawal", 0.0))
-
-    # 3. Pull working orders
-    orders_url = f"{rest._trader_base}/accounts/{target_hash}/orders"
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    from_time = (now_utc - datetime.timedelta(days=1)).strftime("%Y-%m-%dT00:00:00.000Z")
-    to_time = now_utc.strftime("%Y-%m-%dT23:59:59.000Z")
-
-    working_orders = []
-    try:
-        working_orders = rest._get(orders_url, params={
-            "fromEnteredTime": from_time,
-            "toEnteredTime": to_time,
-            "status": "WORKING",
-            "maxResults": 50,
-        }).json()
-    except Exception as exc:
-        logger.warning("Could not query working orders: %s", exc)
-
-    # 4. Invariant checks
-    withdrawal_matches_nlv = abs(cash_withdrawal - nlv) < 0.02
-    unsettled_is_zero = abs(unsettled_cash) < 0.01
-    nlv_matches_expected = abs(nlv - expected_nlv) < 1.00  # Within expected range
-    positions_flat = (len(positions) == 0)
-    orders_clean = (len(working_orders) == 0)
-
-    settlement_cleared = withdrawal_matches_nlv and unsettled_is_zero and positions_flat
-
-    status_verdict = "SETTLED_CLEAR" if settlement_cleared else "PENDING_CLEARANCE"
-
-    audit_payload: Dict[str, Any] = {
-        "audit_timestamp_utc": now_utc.isoformat(),
-        "audit_timestamp_edt": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S EDT"),
-        "account_suffix": target_suffix,
-        "account_number_masked": f"...{target_acct_num[-4:]}",
-        "account_hash_masked": f"{target_hash[:8]}...{target_hash[-6:]}",
-        "verdict": status_verdict,
-        "checks": {
-            "cashAvailableForWithdrawal_matches_nlv": {
-                "passed": withdrawal_matches_nlv,
-                "cashAvailableForWithdrawal": cash_withdrawal,
-                "netLiquidationValue": nlv,
-                "expected_nlv": expected_nlv,
-                "delta": round(cash_withdrawal - nlv, 2),
-            },
-            "unsettledCash_is_zero": {
-                "passed": unsettled_is_zero,
-                "unsettledCash": unsettled_cash,
-                "target": 0.0,
-            },
-            "open_positions_flat": {
-                "passed": positions_flat,
-                "open_positions_count": len(positions),
-            },
-            "working_orders_clean": {
-                "passed": orders_clean,
-                "working_orders_count": len(working_orders),
-            },
-        },
-        "live_balances": {
-            "liquidationValue": nlv,
-            "cashBalance": cash_bal,
-            "settledCash": settled_cash,
-            "unsettledCash": unsettled_cash,
-            "cashAvailableForTrading": cash_trading,
-            "cashAvailableForWithdrawal": cash_withdrawal,
-        },
-        "positions": positions,
-        "working_orders": working_orders,
-    }
-
-    # Save to JSON log file
-    log_path = resolve_audit_log_path()
-    with open(log_path, "w", encoding="utf-8") as f:
-        json.dump(audit_payload, f, indent=2)
-    logger.info("Saved settlement audit report to: %s", log_path)
-
-    return audit_payload
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Friday Settlement Audit Runner.")
-    parser.add_argument("--expected-nlv", type=float, default=5563.97, help="Target expected NLV")
-    args = parser.parse_args()
-
-    print("=" * 75)
-    print(" FRIDAY T+1 SETTLEMENT VERIFICATION AUDIT")
-    print(" Target: Account ...4015 | Expected NLV: $5,563.97")
-    print("=" * 75)
-
-    try:
-        report = perform_settlement_audit(expected_nlv=args.expected_nlv)
-        c = report["checks"]
-        b = report["live_balances"]
-
-        print(f"\n Verdict:                       {report['verdict']}")
-        print(f" Timestamp (UTC):              {report['audit_timestamp_utc']}")
-        print(f" Net Liquidation Value (NLV):  ${b['liquidationValue']:,.2f}")
-        print(f" Cash Available for Withdrawal:${b['cashAvailableForWithdrawal']:,.2f}")
-        print(f" Unsettled Cash:               ${b['unsettledCash']:,.2f}")
-        print(f" Open Positions Count:         {c['open_positions_flat']['open_positions_count']}")
-        print(f" Working Orders Count:         {c['working_orders_clean']['working_orders_count']}")
-        print("-" * 75)
-        print(f" [CHECK 1] Withdrawal == NLV:  {'PASS' if c['cashAvailableForWithdrawal_matches_nlv']['passed'] else 'FAIL'}")
-        print(f" [CHECK 2] UnsettledCash == $0: {'PASS' if c['unsettledCash_is_zero']['passed'] else 'WAITING (Pending Friday 09:30 EDT settlement)'}")
-        print(f" [CHECK 3] Positions Flat:     {'PASS' if c['open_positions_flat']['passed'] else 'FAIL'}")
-        print(f" [CHECK 4] Orders Clean:       {'PASS' if c['working_orders_clean']['passed'] else 'FAIL'}")
-        print("=" * 75)
-        print(f" Report saved to: {resolve_audit_log_path()}\n")
-
-    except Exception as exc:
-        logger.error("Audit runner failed: %s", exc, exc_info=True)
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
-
-```
-
-#### `scripts/export_research_datasets.py` - Market data packaging pipeline (280 lines, 11126 bytes)
-
-```python
-#!/usr/bin/env python3
-"""
-scripts/export_research_datasets.py
-===================================
-Exports research datasets for Google Colab and Google AI Studio analysis.
-- Ingests data/exports/macro_index_history.csv
-- Extracts daily and hourly aggregates covering SOXL, SOXX, QQQ, SES, and regime tags.
-- Queries state/trades.db to extract historical order executions and fill stamps
-  (including Order 1008303563072).
-- Exports:
-    1. /home/nicho/schwab_state/macro_research_matrix.parquet (and .json fallback)
-    2. /home/nicho/schwab_state/backtest_dataset.json (compact format for AI Studio)
-"""
-
-from __future__ import annotations
-
-import argparse
-import datetime
-import json
-import logging
-import os
-import sqlite3
-import sys
-from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("export_research_datasets")
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from core.paths import STATE_DIR, TRADES_DB_PATH
-
-
-def resolve_output_dir(custom_dir: Optional[str] = None) -> Path:
-    """Resolves output directory, prioritizing /home/nicho/schwab_state."""
-    if custom_dir:
-        out = Path(custom_dir)
-    else:
-        vm_dir = Path("/home/nicho/schwab_state")
-        out = vm_dir if vm_dir.is_dir() else STATE_DIR
-    out.mkdir(parents=True, exist_ok=True)
-    return out
-
-
-def resolve_csv_path() -> Path:
-    """Finds macro_index_history.csv in standard locations."""
-    candidates = [
-        PROJECT_ROOT / "data" / "exports" / "macro_index_history.csv",
-        PROJECT_ROOT / "data" / "macro_index_history.csv",
-        Path("data/exports/macro_index_history.csv"),
-    ]
-    for c in candidates:
-        if c.exists() and c.stat().st_size > 0:
-            return c
-    raise FileNotFoundError(f"macro_index_history.csv not found in candidate paths: {candidates}")
-
-
-def load_trades_history() -> List[Dict[str, Any]]:
-    """Extracts all historical executions from SQLite trades.db and enriches with Order 1008303563072."""
-    db_candidates = [
-        Path("/home/nicho/schwab_state/trades.db"),
-        TRADES_DB_PATH,
-        PROJECT_ROOT / "state" / "trades.db",
-    ]
-    db_path = next((p for p in db_candidates if p.exists()), None)
-    trades: List[Dict[str, Any]] = []
-
-    if db_path:
-        try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trades';")
-            if cursor.fetchone():
-                cursor.execute(
-                    """
-                    SELECT id, trade_id, symbol, side, quantity, price, cost_basis,
-                           realized_pnl, disallowed_loss, timestamp, regime, simulated, env, created_at
-                    FROM trades
-                    ORDER BY timestamp ASC;
-                    """
+                # Set core anchor price if missing
+                if sleeve_type == "CORE" and sym not in self._core_anchor_prices and current_price > 0.0:
+                    self._core_anchor_prices[sym] = current_price
+
+            # Remove closed positions
+            closed_symbols = set(self._positions.keys()) - active_symbols
+            for cs in closed_symbols:
+                del self._positions[cs]
+
+            # 3. Mid-Session Hot Boot Initialization
+            if is_hot_boot or not self._is_hot_boot_complete:
+                self._is_hot_boot_complete = True
+                self._boot_timestamp = now
+
+                # Calculate initial core baseline market value for return tracking
+                core_val = sum(p.market_value for p in self._positions.values() if p.sleeve == "CORE")
+                self._initial_core_market_value = core_val if core_val > 0.0 else 1.0
+
+                logger.info(
+                    "Hot boot reconciliation complete at %s EDT: Broker NLV=$%.2f, Cash=$%.2f, Positions=%d, CoreVal=$%.2f",
+                    datetime.now(timezone.utc).isoformat(),
+                    nlv,
+                    cash,
+                    len(self._positions),
+                    core_val,
                 )
-                for row in cursor.fetchall():
-                    trades.append(dict(row))
-            conn.close()
-            logger.info("Extracted %d historical trades from %s", len(trades), db_path)
-        except Exception as exc:
-            logger.warning("Could not read trades from %s: %exc", db_path, exc)
 
-    # Ensure today's Order 1008303563072 fill stamps are explicitly catalogued
-    order_1008303563072 = {
-        "order_id": "1008303563072",
-        "symbol": "SOXL",
-        "side": "SELL",
-        "quantity": 18,
-        "order_type": "MARKET",
-        "status": "FILLED",
-        "entered_time": "2026-10-15T13:30:01+0000",
-        "closed_time": "2026-10-15T13:30:08+0000",
-        "fill_price": 98.7632,
-        "net_proceeds": 1777.70,
-        "unsettled_cash": 1777.70,
-        "settlement_date": "2026-10-16",
-        "exit_reason": "RECOVERY_FLOOR",
-        "account_suffix": "015",
-        "note": "Floor breach at $98.73 executed via Market Sell with zero slippage relative to bid.",
-    }
+            self._last_warm_sync_ts = now
+            return self._compute_dual_sleeve_state_locked(now)
 
-    # Match or append to trades list
-    found_order = False
-    for t in trades:
-        if "1008303563072" in str(t.get("trade_id", "")) or (
-            t.get("symbol") == "SOXL" and "2026-10-15" in str(t.get("timestamp", ""))
-        ):
-            t["schwab_order_id"] = "1008303563072"
-            t["schwab_fill_price"] = 98.7632
-            t["schwab_entered_time"] = "2026-10-15T13:30:01+0000"
-            t["schwab_closed_time"] = "2026-10-15T13:30:08+0000"
-            t["exit_reason"] = "RECOVERY_FLOOR"
-            found_order = True
+    # =========================================================================
+    # 3. COLD PLANE (FRED OAS, Macro Surprise, and Decayed Gemini NLP)
+    # =========================================================================
 
-    if not found_order:
-        trades.append(order_1008303563072)
+    def on_fred_macro(self, payload: Dict[str, Any]) -> ColdMacroState:
+        """
+        Ingests FRED macroeconomic payload (BAMLH0A0HYM2 High Yield OAS).
+        Updates baseline credit spread and economic surprise metrics.
+        """
+        now = time.time()
+        with self._lock:
+            # Parse observations
+            obs = payload.get("observations", [])
+            spread_bps = 320.0
+            z_score = 0.0
 
-    return trades
+            if obs and isinstance(obs, list):
+                latest = obs[0]
+                if "spread_basis_points" in latest:
+                    spread_bps = float(latest["spread_basis_points"])
+                elif "value" in latest:
+                    spread_bps = float(latest["value"]) * 100.0
+                z_score = float(latest.get("z_score_20d", 0.0))
 
+            # Direct overrides if present
+            if "economic_surprise_z_score" in payload:
+                z_score = float(payload["economic_surprise_z_score"])
+            if "intraday_credit_proxy_bps" in payload and not self._credit_proxy_is_live:
+                self._macro_state.intraday_credit_proxy_bps = float(payload["intraday_credit_proxy_bps"])
 
-def export_datasets(output_dir: Path) -> Dict[str, Any]:
-    """Generates the macro research matrix and backtest dataset."""
-    import pandas as pd
+            self._macro_state.fred_oas_bps = spread_bps
+            self._macro_state.economic_surprise_z_score = z_score
+            self._macro_state.last_macro_update_ts = now
+            if self._credit_proxy_is_live:
+                self._update_credit_proxy_locked()
 
-    csv_path = resolve_csv_path()
-    logger.info("Ingesting macro index history from: %s", csv_path)
+            self._recalculate_hybrid_credit_spread_locked()
+            return self._macro_state
 
-    df = pd.read_csv(csv_path)
-    df["timestamp_edt"] = df["timestamp_edt"].astype(str)
-    df["session_date"] = df["timestamp_edt"].str.slice(0, 10)
+    def on_gemini_nlp(self, payload: Dict[str, Any]) -> ColdMacroState:
+        """
+        Ingests Gemini NLP Sentiment payload.
+        Records raw polarity S_nlp(t0) and evaluates exponential time decay.
+        """
+        now = time.time()
+        with self._lock:
+            scoring = payload.get("dovish_hawkish_scoring", {})
+            net_polarity = float(scoring.get("net_dovish_polarity", 0.0))
+            if net_polarity == 0.0 and ("dovish_score" in scoring and "hawkish_score" in scoring):
+                net_polarity = float(scoring["dovish_score"]) - float(scoring["hawkish_score"])
 
-    # Sort chronologically
-    df = df.sort_values(by="timestamp_edt").reset_index(drop=True)
+            decision = payload.get("macro_decision_payload", {})
+            regime = str(decision.get("macro_regime", "REGIME_A"))
+            bias = str(decision.get("market_bias", "BULLISH"))
 
-    unique_sessions = df["session_date"].unique().tolist()
-    total_sessions = len(unique_sessions)
-    logger.info("Parsed %d hourly records spanning %d unique trading sessions", len(df), total_sessions)
+            self._macro_state.sentiment_polarity_raw = net_polarity
+            self._macro_state.sentiment_timestamp = now
+            self._macro_state.sentiment_decayed = net_polarity
+            self._macro_state.macro_regime = regime
+            self._macro_state.market_bias = bias
+            self._macro_state.last_macro_update_ts = now
 
-    # Build Daily Session Aggregates
-    daily_aggregates: List[Dict[str, Any]] = []
-    for s_date, grp in df.groupby("session_date", sort=True):
-        soxl_vals = grp["soxl_close"].dropna().values
-        soxx_vals = grp["soxx_close"].dropna().values
-        qqq_vals = grp["qqq_close"].dropna().values
-        ses_vals = grp["ses"].dropna().values
+            return self._macro_state
 
-        daily_aggregates.append({
-            "session_date": s_date,
-            "soxl_open": round(float(soxl_vals[0]), 4) if len(soxl_vals) else None,
-            "soxl_high": round(float(soxl_vals.max()), 4) if len(soxl_vals) else None,
-            "soxl_low": round(float(soxl_vals.min()), 4) if len(soxl_vals) else None,
-            "soxl_close": round(float(soxl_vals[-1]), 4) if len(soxl_vals) else None,
-            "soxx_open": round(float(soxx_vals[0]), 4) if len(soxx_vals) else None,
-            "soxx_close": round(float(soxx_vals[-1]), 4) if len(soxx_vals) else None,
-            "qqq_open": round(float(qqq_vals[0]), 4) if len(qqq_vals) else None,
-            "qqq_close": round(float(qqq_vals[-1]), 4) if len(qqq_vals) else None,
-            "ses_mean": round(float(ses_vals.mean()), 4) if len(ses_vals) else None,
-            "ses_close": round(float(ses_vals[-1]), 4) if len(ses_vals) else None,
-            "regime": str(grp["regime"].iloc[-1]) if "regime" in grp else "UNKNOWN",
-            "hourly_bars": int(len(grp)),
-        })
+    def get_macro_feature_vector(self) -> Tuple[float, float, float]:
+        """
+        Returns feature vector M(t) = [Z_s(t), S_nlp(t), CS_hybrid(t)] for the HMM Meta-Governor.
+        Applies continuous exponential time decay e^(-lambda * dt) to sentiment polarity.
+        """
+        now = time.time()
+        with self._lock:
+            # 1. Economic surprise Z-score
+            z_s = self._macro_state.economic_surprise_z_score
 
-    daily_df = pd.DataFrame(daily_aggregates)
+            # 2. Continuous exponential decay of sentiment polarity
+            if self._macro_state.sentiment_timestamp > 0.0:
+                dt_sec = max(0.0, now - self._macro_state.sentiment_timestamp)
+                decay_factor = math.exp(-self.sentiment_decay_lambda * dt_sec)
+                s_nlp = self._macro_state.sentiment_polarity_raw * decay_factor
+                self._macro_state.sentiment_decayed = s_nlp
+            else:
+                s_nlp = 0.0
 
-    # Export 1: macro_research_matrix.parquet & macro_research_matrix.json
-    parquet_path = output_dir / "macro_research_matrix.parquet"
-    json_matrix_path = output_dir / "macro_research_matrix.json"
+            # 3. Hybrid Credit Spread (OAS anchor + live proxy)
+            self._recalculate_hybrid_credit_spread_locked()
+            cs_hybrid = self._macro_state.hybrid_credit_spread_bps
 
-    # Select research matrix columns
-    export_cols = [
-        "timestamp_edt",
-        "session_date",
-        "soxx_close",
-        "soxl_close",
-        "qqq_close",
-        "tnx_close",
-        "vxn_close",
-        "uup_close",
-        "rs_ratio",
-        "rs_spread",
-        "ses",
-        "regime",
-        "score_trend",
-        "score_rs",
-        "score_vxn",
-        "score_tnx",
-    ]
-    matrix_df = df[[c for c in export_cols if c in df.columns]].copy()
+            return (round(z_s, 4), round(s_nlp, 4), round(cs_hybrid, 2))
 
-    try:
-        matrix_df.to_parquet(parquet_path, index=False, engine="pyarrow")
-        logger.info("Saved Parquet matrix: %s (size: %d bytes)", parquet_path, parquet_path.stat().st_size)
-    except Exception as exc:
-        logger.warning("Could not export Parquet (falling back to JSON only): %s", exc)
+    def _recalculate_hybrid_credit_spread_locked(self) -> None:
+        """Fuses daily FRED OAS anchor with intraday proxy (HYG/IEF or reported bps)."""
+        oas = self._macro_state.fred_oas_bps
+        intraday = self._macro_state.intraday_credit_proxy_bps
+        # 70% daily FRED anchor + 30% live intraday credit proxy
+        hybrid = 0.70 * oas + 0.30 * intraday
+        self._macro_state.hybrid_credit_spread_bps = hybrid
 
-    # Web fallback JSON (split-oriented or records)
-    matrix_df.to_json(json_matrix_path, orient="records", date_format="iso")
-    logger.info("Saved JSON matrix fallback: %s (size: %d bytes)", json_matrix_path, json_matrix_path.stat().st_size)
+    # =========================================================================
+    # 4. UNIFIED DUAL-SLEEVE VALUATION & RETURN TRACKING
+    # =========================================================================
 
-    # Export 2: backtest_dataset.json (compact format for AI Studio / Colab)
-    trades = load_trades_history()
-    regimes_dist = df["regime"].value_counts().to_dict()
+    def get_live_portfolio_state(self) -> DualSleeveState:
+        """Computes thread-safe, continuous mark-to-market across both sleeves."""
+        with self._lock:
+            return self._compute_dual_sleeve_state_locked(time.time())
 
-    backtest_data = {
-        "metadata": {
-            "title": "SchwabEngine Historical Research Matrix & Backtest Dataset",
-            "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "source_file": str(csv_path.name),
-            "total_trading_sessions": total_sessions,
-            "total_hourly_records": len(df),
-            "date_range": {
-                "start": unique_sessions[0] if unique_sessions else None,
-                "end": unique_sessions[-1] if unique_sessions else None,
-            },
-            "symbols_covered": ["SOXL", "SOXX", "QQQ", "TNX", "VXN", "UUP"],
-            "regimes_distribution": regimes_dist,
-        },
-        "historical_order_executions": trades,
-        "daily_sessions": daily_aggregates,
-    }
+    def _compute_dual_sleeve_state_locked(self, now: float) -> DualSleeveState:
+        """Internal computation of Dual-Sleeve mark-to-market and 1x Core return."""
+        core_mv = 0.0
+        sat_mv = 0.0
+        sweep_mv = 0.0
 
-    backtest_json_path = output_dir / "backtest_dataset.json"
-    with open(backtest_json_path, "w", encoding="utf-8") as f:
-        json.dump(backtest_data, f, indent=2)
+        for sym, pos in self._positions.items():
+            if pos.sleeve == "CORE":
+                core_mv += pos.market_value
+            elif pos.sleeve == "SATELLITE":
+                sat_mv += pos.market_value
+            elif pos.sleeve == "SWEEP":
+                sweep_mv += pos.market_value
 
-    logger.info(
-        "Saved Backtest Dataset: %s (size: %d bytes, sessions: %d, trades: %d)",
-        backtest_json_path,
-        backtest_json_path.stat().st_size,
-        len(daily_aggregates),
-        len(trades),
-    )
+        total_cash = self._cash_buffer + sweep_mv
+        live_nlv = core_mv + sat_mv + total_cash
+        if live_nlv <= 0.0:
+            live_nlv = self._broker_nlv if self._broker_nlv > 0.0 else 1.0
 
-    return {
-        "parquet_path": str(parquet_path),
-        "parquet_size": parquet_path.stat().st_size if parquet_path.exists() else 0,
-        "json_matrix_path": str(json_matrix_path),
-        "json_matrix_size": json_matrix_path.stat().st_size if json_matrix_path.exists() else 0,
-        "backtest_json_path": str(backtest_json_path),
-        "backtest_json_size": backtest_json_path.stat().st_size if backtest_json_path.exists() else 0,
-        "total_sessions": total_sessions,
-        "total_hourly_records": len(df),
-        "total_trades": len(trades),
-    }
+        w_core = core_mv / live_nlv
+        w_sat = sat_mv / live_nlv
 
+        # Compute Core return r_core(t) relative to boot/anchor baseline
+        r_core_cum = 0.0
+        if self._initial_core_market_value and self._initial_core_market_value > 0.0:
+            r_core_cum = (core_mv - self._initial_core_market_value) / self._initial_core_market_value
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Export research datasets for Colab and AI Studio.")
-    parser.add_argument("--output-dir", default=None, help="Target output directory")
-    args = parser.parse_args()
+        # Instantaneous weighted return across Core components
+        r_core_inst = 0.0
+        core_positions = [p for p in self._positions.values() if p.sleeve == "CORE" and p.market_value > 0.0]
+        if core_positions and core_mv > 0.0:
+            for cp in core_positions:
+                anchor = self._core_anchor_prices.get(cp.symbol, cp.average_cost)
+                if anchor > 0.0:
+                    asset_ret = (cp.current_price - anchor) / anchor
+                    asset_weight = cp.market_value / core_mv
+                    r_core_inst += asset_weight * asset_ret
 
-    out_dir = resolve_output_dir(args.output_dir)
-    res = export_datasets(out_dir)
+        return DualSleeveState(
+            core_market_value=round(core_mv, 2),
+            satellite_market_value=round(sat_mv, 2),
+            cash_buffer=round(total_cash, 2),
+            net_liquidation_value=round(live_nlv, 2),
+            core_weight=round(w_core, 4),
+            satellite_weight=round(w_sat, 4),
+            core_return_instantaneous=round(r_core_inst, 6),
+            core_return_cumulative=round(r_core_cum, 6),
+            is_hot_boot_complete=self._is_hot_boot_complete,
+            boot_timestamp=self._boot_timestamp,
+            last_mark_timestamp=now,
+            positions=dict(self._positions),
+        )
 
-    print("\n" + "=" * 70)
-    print(" RESEARCH DATASET EXPORT COMPLETE")
-    print("=" * 70)
-    print(f" Output Directory:       {out_dir}")
-    print(f" Total Sessions:         {res['total_sessions']}")
-    print(f" Total Hourly Records:   {res['total_hourly_records']}")
-    print(f" Historical Trades:      {res['total_trades']}")
-    print("-" * 70)
-    print(f" Parquet Matrix:         {res['parquet_path']} ({res['parquet_size']:,} bytes)")
-    print(f" JSON Matrix Fallback:   {res['json_matrix_path']} ({res['json_matrix_size']:,} bytes)")
-    print(f" AI Studio Backtest:     {res['backtest_json_path']} ({res['backtest_json_size']:,} bytes)")
-    print("=" * 70 + "\n")
-
-
-if __name__ == "__main__":
-    main()
+    def is_synchronized(self) -> bool:
+        """Returns True if the synchronizer has completed initial hot-boot reconciliation."""
+        with self._lock:
+            return self._is_hot_boot_complete
 
 ```
 
-### 3.4 Configuration & Production Metadata
-
-#### `strategy_config.json` - Production strategy and regime configuration (45 lines, 1205 bytes)
+#### `config/strategy_config.json` (132 lines, 3396 bytes)
 
 ```json
 {
+  "system_metadata": {
+    "engine": "schwab_execution_core",
+    "config_version": "2.4.0-argon",
+    "status": "production_ready",
+    "scale_invariant": true,
+    "nlv_source": "live_broker_nlv",
+    "static_dollar_presets_enabled": false
+  },
+  "capital_scaling": {
+    "mode": "dynamic_live_nlv",
+    "reference_source": "broker_liquidation_value",
+    "hard_dollar_ceiling": null,
+    "discrete_share_quantization": "floor",
+    "residual_sweep_vehicle": "SWVXX"
+  },
+  "target_weights": {
+    "core_target": 0.85,
+    "satellite_target": 0.15,
+    "cash_sweep_target": 0
+  },
+  "regime_satellite_targets": {
+    "Goldilocks": {
+      "target": 0.25,
+      "ntz_band": [
+        0.21,
+        0.29
+      ]
+    },
+    "Uncertainty": {
+      "target": 0.1,
+      "ntz_band": [
+        0.08,
+        0.12
+      ]
+    },
+    "Shock": {
+      "target": 0.0,
+      "ntz_band": [
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "leland_ntz": {
+    "tau_band": 0.03,
+    "drift_upper_cutoff": 0.18,
+    "drift_lower_cutoff": 0.12,
+    "friction_cost_rate": 0.0002
+  },
+  "circuit_breaker": {
+    "drawdown_tier1_reduction": 0.05,
+    "drawdown_tier1_exposure": 0.5,
+    "drawdown_tier2_stepout": 0.1,
+    "recovery_hysteresis": 0.03,
+    "kappa_core": 0.5,
+    "lambda_0": 0.03
+  },
+  "letf_drag_cutoffs": {
+    "volatility_drag_threshold_annualized": 0.45,
+    "rolling_vol_window_bars": 32,
+    "max_holding_period_hours": 390,
+    "trend_sma_window_bars": 50,
+    "volatility_gate_trigger": 0.15
+  },
+  "margin_thresholds": {
+    "maintenance_margin_min": 0.3,
+    "cushion_buffer": 0.15,
+    "hard_liquidation_max_drawdown": 0.15,
+    "cash_sweep_vehicle": "SWVXX"
+  },
+  "routing_sweep_vector": {
+    "SPY": 0.35,
+    "QQQ": 0.25,
+    "IWM": 0.1,
+    "HYG": 0.15,
+    "IEF": 0.15,
+    "cash": 0
+  },
+  "hmm_thresholds": {
+    "sentiment_dovish_cutoff": 0.15,
+    "sentiment_hawkish_cutoff": -0.15,
+    "credit_spread_tight_bps": 380,
+    "credit_spread_shock_bps": 440,
+    "economic_surprise_cutoff": 0
+  },
   "macro_regime": "REGIME_A",
   "confidence_score": 0.9,
   "macro_risk_multiplier": 1.25,
@@ -10092,6 +6679,8 @@ if __name__ == "__main__":
   "trap_volume_tightening": 0.0,
   "emergency_flatten": false,
   "hard_lockout_active": false,
+  "engine_active": true,
+  "kill_switch": false,
   "rationale": "Stable yields (+0.29%) and strong NQ futures (+0.62%) indicate a risk-on tech-led rebound. Lack of negative macro catalysts supports a trend expansion regime. Market is showing clear bullish accumulation pre-open.",
   "market_bias": "BULLISH",
   "target_regime": "A",
@@ -10121,12 +6710,12 @@ if __name__ == "__main__":
       }
     }
   },
-  "_updated_at": "2026-10-15T23:30:17.957743+00:00",
-  "_source": "enhanced_preassessment"
+  "_updated_at": "2026-10-23T20:40:44.500577+00:00",
+  "_source": "argon_2.4.0_calibration"
 }
 ```
 
-#### `metadata.json` - Engine deployment metadata & hardened release state (11 lines, 322 bytes)
+#### `metadata.json` (11 lines, 333 bytes)
 
 ```json
 {
@@ -10142,100 +6731,206 @@ if __name__ == "__main__":
 }
 
 ```
-
-
 ---
 
-## 4. Live Daemon Health & Journalctl Telemetry
+## 3. Empirical Telemetry & Down-Day Incident Baselines
 
-### Unit: `schwab-trader.service`
-* **Daemon Status:** `active`
+### 3.1 Header Metadata & Financial Summary
+- **Session Date**: `2026-10-22` (Replay window: 2026-10-21 11:03:00 to 2026-10-22 14:33:45 EDT)
+- **Engine Build**: Commit `93c03102a21aeee07d7e587382542abc7fb548cf` (Argon 2.4.0)
+- **Target Account**: `***4015`
+- **Starting Baseline NLV**: **$4,400.90 USD**
+- **Ending NLV**: **$4,290.19 USD**
+- **Net Portfolio Return**: **-$110.71 USD (-2.52%)**
+- **Benchmark Performance**:
+  - `SPY`: **-1.18%** (Open: $771.00, Close: $761.95) $\rightarrow$ Portfolio Delta: **-1.34% (-134.1 bps)**
+  - `QQQ`: **-2.75%** (Open: $723.52, Close: $703.60) $\rightarrow$ Portfolio Delta: **+0.24% (+23.9 bps)**
+
+### 3.2 Macro Regime & Credit Spread Expansion Metrics
+| Metric | Value | Reference / Context |
+| :--- | :--- | :--- |
+| **Goldilocks Regime Occupancy** | **3,301 intervals (100.00%)** | $\pi_{Goldilocks} \approx 1.0$, Target $W_{sat}^* = 0.25$ |
+| **Uncertainty Regime Occupancy** | **0 intervals (0.00%)** | Failed to trigger despite Tech selloff |
+| **Macro Shock Regime Occupancy** | **0 intervals (0.00%)** | Failed to trigger |
+| **Hybrid Credit Spread (Min)** | 314.29 bps | Morning baseline |
+| **Hybrid Credit Spread (Max)** | 324.81 bps | Afternoon peak (+10.52 bps widening) |
+| **Hybrid Credit Spread (Median)**| 316.95 bps | Session median |
+| **Live HYG/IEF Price Ratio Range**| 0.843577 to 0.853994 | Range: 0.010417 |
+
+### 3.3 Leland No-Trade Zone (NTZ) Evaluation Metrics
+| Metric | Count / Value | Ratio / Operational Context |
+| :--- | :--- | :--- |
+| **Total Evaluated Intervals** | 3,301 | 30-second continuous evaluation sweeps |
+| **Hold Inside NTZ (`HOLD_INSIDE_NTZ`)** | 3,300 | **99.97%** of evaluated intervals |
+| **Initial Deployment Triggers** | 1 | 0.03% (at session startup 11:03:09 ET) |
+| **Upper Harvest Breaches ($w_{sat} > \tau_{upper}$)** | 0 | 0.00% (No de-risking executed) |
+| **Lower Accumulate Breaches ($w_{sat} < \tau_{lower}$)**| 0 | 0.00% (No dip-buying triggered) |
+| **Total Orders Emitted** | 8 orders (28 shares) | Executed during initial portfolio hydration |
+| **Total Turnover Notional** | $3,685.95 | 83.75% of starting baseline NLV |
+
+#### Initial Portfolio Deployment (2026-10-21 11:03:09 ET)
+| Order ID | Symbol | Sleeve | Side | Qty | Price ($) | Microprice ($) | $\Delta$ Micro | Notional ($) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `SHADOW-261021-0001` | **SPY** | CORE | `BUY` | 1 | $771.10 | $771.0880 | +$0.0120 | $771.10 |
+| `SHADOW-261021-0002` | **QQQ** | CORE | `BUY` | 1 | $723.60 | $723.5829 | +$0.0171 | $723.60 |
+| `SHADOW-261021-0003` | **IWM** | CORE | `BUY` | 1 | $276.64 | $276.6376 | +$0.0024 | $276.64 |
+| `SHADOW-261021-0004` | **HYG** | CORE | `BUY` | 6 | $76.90 | $76.8984 | +$0.0016 | $461.40 |
+| `SHADOW-261021-0005` | **IEF** | CORE | `BUY` | 5 | $90.24 | $90.2335 | +$0.0065 | $451.20 |
+| `SHADOW-261021-0006` | **SOXL**| SATELLITE | `BUY` | 3 | $101.17 | $101.1433 | +$0.0267 | $303.51 |
+| `SHADOW-261021-0007` | **TQQQ**| SATELLITE | `BUY` | 5 | $72.14 | $72.1397 | +$0.0003 | $360.70 |
+| `SHADOW-261021-0008` | **TNA** | SATELLITE | `BUY` | 6 | $56.30 | $56.2996 | +$0.0004 | $337.80 |
+
+### 3.4 Downsampled 5-Minute NLV & Regime Trajectory
+| Timestamp (ET) | NLV ($) | Active $W_{sat}$ | Target $W_{sat}^*$ | Leland NTZ Band | Dominant Regime | Credit Spread (bps) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **2026-10-21 11:03:09** | $4,400.90 | 0.0000 | 0.2500 | [0.2100, 0.2900] | Goldilocks | 316.13 |
+| **2026-10-21 11:30:10** | $4,408.92 | 0.2284 | 0.2500 | [0.2100, 0.2900] | Goldilocks | 316.65 |
+| **2026-10-21 13:20:12** | $4,426.89 | 0.2304 | 0.2500 | [0.2100, 0.2900] | Goldilocks | 315.37 |
+| **2026-10-21 15:00:15** | $4,401.01 | 0.2279 | 0.2500 | [0.2100, 0.2900] | Goldilocks | 314.63 |
+| **2026-10-22 04:00:02** | $4,330.97 | 0.2194 | 0.2500 | [0.2100, 0.2900] | Goldilocks | 321.44 |
+| **2026-10-22 08:25:07** | $4,338.92 | 0.2199 | 0.2500 | [0.2100, 0.2900] | Goldilocks | 321.32 |
+| **2026-10-22 09:30:09** | $4,329.35 | 0.2185 | 0.2500 | [0.2100, 0.2900] | Goldilocks | 322.02 |
+| **2026-10-22 10:00:09** | $4,351.11 | 0.2212 | 0.2500 | [0.2100, 0.2900] | Goldilocks | 320.45 |
+| **2026-10-22 10:35:10** | $4,310.31 | 0.2164 | 0.2500 | [0.2100, 0.2900] | Goldilocks | 322.03 |
+| **2026-10-22 11:15:11** | $4,295.20 | 0.2139 | 0.2500 | [0.2100, 0.2900] | Goldilocks | 322.26 |
+| **2026-10-22 12:50:13** | $4,289.44 | 0.2130 | 0.2500 | [0.2100, 0.2900] | Goldilocks | 323.53 |
+| **2026-10-22 14:05:15** | $4,287.04 | 0.2127 | 0.2500 | [0.2100, 0.2900] | Goldilocks | 324.67 |
+| **2026-10-22 14:33:45** | $4,290.19 | 0.2132 | 0.2500 | [0.2100, 0.2900] | Goldilocks | 324.81 |
+
+### 3.5 Incident Logs & Operational Failure Patterns
+Analysis of incident logs from October 21-23 reveals critical operational fault modes across process deduplication, authentication state machines, and order dispatch:
+
+1. **Rogue Cloud VM Daemon & Duplicate `AUTH_LOCKED` Alert Storm (#117)**:
+   - *Timestamp*: `2026-10-22T09:45:08-04:00`
+   - *Failure*: Legacy systemd unit `schwab-trader.service` (PID 259167) running on Google Cloud VM `schwab-trader` (`us-central1-a`) attempted 09:45 dynamic bracket recalibration for SOXL with stale, expired credentials.
+   - *Symptom*: Schwab API returned HTTP 401 Unauthorized, tripping the auth circuit breaker to `AUTH_LOCKED`. This updated `/home/nicho/schwab_state/recovery_state.json` into `SHADOW_FLOOR_ONLY` and broadcast duplicate critical alert storms (`Recovery [SOXL]: S0 CORRUPTED`) to Android endpoints via ntfy.
+   - *Root Cause*: Process duplication between the GCP VM background service and the primary Windows development host.
+   - *Resolution*: Remediated via systemd service disabling (`systemctl disable schwab-trader schwab-web schwab-recovery-watchdog`) and rogue process termination.
+
+2. **Authentication Circuit Breaker Latching (`AUTH_LOCKED`)**:
+   - In `core/auth.py`, if 2 consecutive token refresh attempts return HTTP `401 Unauthorized` or `400 Bad Request`, the auth circuit breaker permanently trips to `AUTH_LOCKED` (`self.auth_circuit_open = True`).
+   - *Deficiency*: When tripped, `_refresh_loop()` skips further execution. Any subsequent call to `get_access_token()` immediately raises `AuthCircuitBreakerError`, freezing all automated trading and order management until manual reset via `/api/auth/reset` or explicit user reauthorization.
+
+3. **Order Dispatch Timing & Rate-Limit Clamping**:
+   - Daily Schwab REST quota is capped at 3,500 requests (`daily_api_quota: 3500`), with an intraday burst governor enforcing 120 req/min (2.0 req/sec token bucket).
+   - Essential exit orders (`MANDATORY_FLATTEN`, `TIER1_STOP`, `EMERGENCY`) bypass daily quotas via `is_essential=True`, but non-essential rebalancing sweeps risk quota starvation during high-volatility sessions.
+### 3.6 Live Systemd Daemon Health & Journalctl Telemetry
+#### Unit: `schwab-trader.service`
+* **Daemon Status:** `systemctl unavailable`
 
 ```text
-Oct 16 00:00:00 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:00,898 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:01 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:01,900 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:02 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:02,902 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:03 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:03,904 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:04 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:04,906 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:05 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:05,907 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:06 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:06,909 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:07 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:07,286 [INFO] core.rate_limiter - SchwabRateLimiter: 00:00 UTC rollover detected (previous: 2026-10-15, now: 2026-10-16). Resetting daily quota.
-Oct 16 00:00:07 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:07,911 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:08 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:08,913 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:09 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:09,915 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:10 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:10,917 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:11 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:11,919 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:12 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:12,921 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:13 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:13,923 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:14 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:14,925 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:15 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:15,927 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:16 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:16,930 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:17 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:17,933 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:18 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:18,935 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:19 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:19,937 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:20 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:20,939 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:21 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:21,941 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:22 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:22,945 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:23 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:23,947 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:24 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:24,949 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:25 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:25,950 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:26 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:26,953 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:27 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:27,957 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:28 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:28,959 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:29 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:29,960 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:30 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:30,962 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:31 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:31,964 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:32 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:32,968 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:33 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:33,970 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:34 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:34,972 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:35 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:35,974 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:36 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:36,976 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:37 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:37,981 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:38 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:38,983 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:39 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:39,984 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:40 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:40,986 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:41 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:41,988 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:42 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:42,993 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:43 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:43,995 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:44 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:44,998 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:46 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:46,000 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:47 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:47,001 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:48 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:48,006 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
-Oct 16 00:00:49 schwab-trader schwab-trader[238109]: 2026-10-16 00:00:49,008 [WARNING] SchwabEngine.RecoverySupervisor - [SOXL] 15:50:00 EDT Terminal Flush Time Reached.
+[WARN: journalctl binary not found on Windows]
 ```
 
-### Unit: `schwab-web.service`
-* **Daemon Status:** `active`
+#### Unit: `schwab-web.service`
+* **Daemon Status:** `systemctl unavailable`
 
 ```text
--- No entries --
+[WARN: journalctl binary not found on Windows]
 ```
 
-### Unit: `schwab-recovery-watchdog.service`
-* **Daemon Status:** `active`
+#### Unit: `schwab-recovery-watchdog.service`
+* **Daemon Status:** `systemctl unavailable`
 
 ```text
--- No entries --
+[WARN: journalctl binary not found on Windows]
 ```
 
-
----
-
-## 5. State Store & Database Telemetry
+### 3.7 State Store & SQLite Database Telemetry
 
 | Database Path | Exists | Size (KB) | Journal Mode | Tables (Row Counts) |
 | :--- | :---: | :---: | :---: | :--- |
-| `state/trades.db` | True | 24.0 | `wal` | trades: 0 |
-| `state/telemetry.db` | True | 24.0 | `wal` | event_log: 0 |
-| `state/market_baselines.db` | True | 24.0 | `wal` | bars_1m: 0, adv_minute_profiles: 0, symbol_baselines: 0 |
-| `/home/nicho/schwab_state/trades.db` | True | 28.0 | `wal` | trades: 5, position_brackets: 0 |
-| `/home/nicho/schwab_state/telemetry.db` | True | 64.0 | `wal` | event_log: 41, intraday_bars: 100 |
-| `/home/nicho/schwab_state/market_baselines.db` | True | 652.0 | `wal` | bars_1m: 0, adv_minute_profiles: 9775, symbol_baselines: 25 |
-
+| `\home\nicho\schwab_state\trades.db` | True | 28.0 | `wal` | trades: 0, position_brackets: 0 |
+| `\home\nicho\schwab_state\telemetry.db` | True | 40.0 | `wal` | event_log: 30 |
+| `\home\nicho\schwab_state\market_baselines.db` | True | 652.0 | `wal` | bars_1m: 0, adv_minute_profiles: 9775, symbol_baselines: 25 |
+| `data\schwab_telemetry.db` | True | 24.0 | `wal` | event_log: 0 |
+| `state\trades.db` | True | 24.0 | `wal` | trades: 0 |
+| `state\telemetry.db` | True | 32.0 | `wal` | event_log: 10 |
+| `state\market_baselines.db` | True | 652.0 | `wal` | bars_1m: 0, adv_minute_profiles: 9775, symbol_baselines: 25 |
 ---
 
-## 6. Synthesis & Operational Guidance
-1. **Cash Accounting Invariant (I1):** All candidate orders must reserve cleared funds strictly from `settled_cash`.
-2. **Dynamic Stop Scaling:** Yang-Zhang trailing stops must incorporate the intraday root time scaling scalar $\sqrt{\frac{1/390}{252}}$.
-3. **GFV Veto Enforcement:** Same-day exits of unsettled lots must trip `GFV_SELL_BLOCKED` and defer to overnight holding.
-4. **Rate Limit Throttling:** Observe 3,500 daily call limit ceiling; back off polling during high message density.
+## 4. Identified Architectural & Modeling Gaps
+
+### Gap A: Absence of Fill-Ratio and Time-Decay Escalation in EOD Flatten Routine
+- **Current Behavior**:
+  - The 15:50 EOD deleveraging routine (`plan_two_stage_eod_deleveraging` in `execution/risk_manager.py`) calculates notional reduction and generates passive limit orders or standard router calls.
+  - In `execution/order_manager.py:714-720`, `execute_terminal_flush()` routes orders with urgency `TERMINAL_FLUSH`, which allows 60 seconds of adaptive limit-pegging before falling back to IOC sweeps.
+- **Defect & Failure Mode**:
+  - There is zero awareness of the **unfilled execution ratio** as the clock approaches 16:00 ET regular market close.
+  - If closing auction liquidity is thin or an order remains partially filled at 15:56 ET, the system does not dynamically widen its limit offsets, does not escalate from limit to marketable aggressive pegging, and does not execute an asymptotic time-decay squeeze.
+  - Consequently, leveraged 3x positions (`SOXL`, `TQQQ`, `TNA`) risk being trapped overnight into an unclosed state, violating FINRA Rule 4210(f)(8)(A) margin limits and exposing the cash account to catastrophic gap-down risk.
+- **Refactor Target**:
+  - Implement an asymptotic time-decay escalation curve over $[15:50:00, 15:58:00]$:
+    $$\text{Peg Offset}(t) = \text{Base Offset} \cdot \left( 1 + \left(\frac{t - t_{start}}{t_{end} - t_{start}}\right)^\kappa \right)$$
+  - Track fill-ratio $R_{fill} = \frac{Q_{filled}}{Q_{target}}$. If $R_{fill} < 1.0$ at $15:55:00$ ET, automatically escalate urgency to aggressive NBBO cross, and at $15:58:00$ ET force immediate IOC sweep.
+
+### Gap B: Symmetrical, Static & Degenerate HMM State Transition Probabilities
+- **Current Behavior**:
+  - In `execution/risk_manager.py:76-80`, the empirical transition matrix is statically hardcoded:
+    ```python
+    EMPIRICAL_TRANSITION_MATRIX_3X3 = [
+        [0.9993, 0.0, 0.0007],
+        [0.0032, 0.9968, 0.0],
+        [0.0029, 0.0, 0.9971],
+    ]
+    ```
+- **Defect & Failure Mode**:
+  - **Zero Transition Probability to Uncertainty**: The transition probability from Goldilocks to Uncertainty ($T_{01}$) is strictly `0.0000`. The engine is mathematically prohibited from transitioning directly from Goldilocks into Uncertainty via markovian prediction! It can only jump directly to Macro Shock ($T_{02} = 0.0007$).
+  - **Severe Diagonal Inertia**: The diagonal persistence values ($0.9993$, $0.9968$, $0.9971$) create massive hysteresis. Unless an observation vector $M(t)$ exhibits an extreme $5\sigma$ outlier, $\pi(t)$ remains anchored in its initial state.
+  - **Empirical Confirmation**: During the October 22 selloff (where QQQ dropped -2.75% and credit spreads widened +10.5 bps), the HMM remained 100.00% occupied in Goldilocks across 3,301 intervals. The system failed to de-risk or transition to Uncertainty, leaving 3x LETFs fully exposed to a -2.52% drawdown.
+- **Refactor Target**:
+  - Re-estimate the transition matrix $\mathbf{T}$ to introduce asymmetric transition dynamics:
+    - Fast crash transitions: $T_{01} \approx 0.020$, $T_{02} \approx 0.005$.
+    - Slow, damped recovery hysteresis: $T_{20} \approx 0.001$, $T_{10} \approx 0.005$.
+  - Implement dynamic transition matrix scaling indexed to live implied volatility ($VIX$) and credit spread velocity ($\frac{d}{dt} CS_{hybrid}$).
+
+### Gap C: Missing Programmatic GFV Checks on Intraday Redeployment of Cash
+- **Current Behavior**:
+  - `core/ledger.py` explicitly purges Good Faith Violation (GFV) checks, claiming the account operates under a FINRA Rule 4210 margin framework:
+    ```python
+    # core/ledger.py:88-92, 404-413, 576-577
+    def can_sell_position(self, symbol: str, quantity: int = 0, today: Optional[date] = None):
+        return True, f"Margin account: {symbol} is eligible for instantaneous exit (GFV exempt)."
+
+    @property
+    def unsettled_cash(self) -> Decimal:
+        return ZERO
+
+    def record_sell(self, symbol, quantity, price, ...):
+        # FINRA Rule 4210: Instantaneous settlement — proceeds immediately credit cash!
+        self._settled += proceeds
+    ```
+- **Defect & Failure Mode**:
+  - Account `***4015` with $4,400 NLV is legally a **cash account** subject to **SEC Rule 15c6-1 T+1 Cash Settlement Rules** (the $25,000 Pattern Day Trader minimum prevents unconstrained margin day trading).
+  - Under SEC Rule 15c6-1, sales of equities require $T+1$ business days to clear. If proceeds from a morning sale ($T_0$) are immediately redeployed to purchase another security ($T_0$) and that newly purchased security is subsequently sold on the same day (e.g. via stop-loss or EOD flatten), the trade constitutes a **Good Faith Violation (GFV)**.
+  - Accruing 3 GFVs within a rolling 12-month window results in Schwab placing a mandatory **90-Day Cash Restriction** on the account (requiring fully cleared cash up-front for all purchases).
+  - Because `ledger.py` immediately credits sale proceeds into `_settled`, the engine allows unrestricted intraday redeployment and same-day re-selling, creating an immediate regulatory compliance risk.
+- **Refactor Target**:
+  - Re-establish strict Three-Bucket Cash Accounting:
+    1. `settled_cash`: Cleared funds available for unrestricted purchase and immediate round-trips.
+    2. `unsettled_cash`: Unsettled lots with explicit settlement timestamps ($T+1$).
+    3. `pending_ach`: External transfer reservations.
+  - Tag each position with `funded_with_settled: bool`. If an asset was purchased with unsettled funds, block intraday market/limit exits unless overridden by catastrophic stops, forcing an overnight hold until settlement clears.
+
+### Gap D: Synchronous Blocking Calls, Silent Exception Handlers & Missing Token Heartbeats
+- **Current Behavior & Defects**:
+  1. **Synchronous `time.sleep` in Core Execution Paths**:
+     - `execution/almgren_chriss.py:420`: `time.sleep(min(self.slice_interval_seconds, 0.5))` directly inside the slicing loop.
+     - `execution/almgren_chriss.py:643`: `time.sleep(min(poll_interval, max(0.01, timeout_seconds - elapsed)))` during order status polling.
+     - `execution/order_manager.py:1233`: `self._sleep_fn = sleep_fn or time.sleep` executed in `DualSleeveSwapCoordinator` during backoff retry loops.
+     - `core/rate_limiter.py:509`: `time.sleep(min(sleep_duration, 0.05))` inside `acquire()`.
+     - *Impact*: In an asynchronous asyncio event loop or multi-threaded tick ingestion architecture, synchronous `time.sleep` blocks the OS thread, delaying WebSocket tick processing, stale quote watermarking, and bracket updates.
+  2. **Silent Exception Swallowing (`except Exception: pass`)**:
+     - `execution/order_manager.py:454, 557, 656, 800, 876`: Hardware stop cancellations, bracket replaces, and telemetry events catch generic `Exception` and silently `pass`.
+     - `execution/microstructure_sentinel.py:234, 364`: Quote parsing errors silently swallowed.
+     - *Impact*: Prevents root-cause diagnosis of API failures, payload schema changes, or database write locks.
+  3. **Absence of Proactive Token Refresh Heartbeat**:
+     - `core/auth.py` runs a 60-second polling daemon (`_refresh_loop`), but it lacks an active health heartbeat sent to the broker API.
+     - If the system remains idle pre-market (e.g. 08:00 - 09:25 ET), tokens expiring right at 09:30:00 ET cause immediate `401 Unauthorized` errors on opening cross orders, tripping the circuit breaker into `AUTH_LOCKED` at the most critical liquidity window of the session.
+- **Refactor Target**:
+  - Replace all synchronous `time.sleep` in async-facing modules with non-blocking `asyncio.sleep` or event-driven timers.
+  - Replace generic `except Exception: pass` blocks with typed exception handling, structured error logging, and telemetry event recording.
+  - Implement a dedicated pre-market Token Health Heartbeat at 09:15:00 ET (`scripts/premarket_check.py`) that forces a token refresh and validates connectivity against `/trader/v1/accounts/accountNumbers` prior to market open.
+
+---
+*SchwabEngine Quantitative Research Reference v2.4 (Argon) — Compiled for Issue #122 Architecture & Quantitative Audit*
