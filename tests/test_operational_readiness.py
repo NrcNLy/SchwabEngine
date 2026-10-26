@@ -23,7 +23,7 @@ from typing import Any, Dict
 from zoneinfo import ZoneInfo
 import pytest
 
-from core.auth import OAuthTokenManager
+from core.auth import OAuthTokenManager, SecurityVault
 from core.cold_plane_worker import (
     ColdPlaneWorker,
     ControlSignalPayload,
@@ -377,9 +377,21 @@ def test_preflight_verifier_all_checks_pass(tmp_path: Path):
     async def _run():
         report_file = tmp_path / "preflight_report.json"
         journal_file = tmp_path / "journal.db"
+        vault_file = tmp_path / "schwab_tokens_vault.json"
+
+        # Valid test vault with unexpired refresh token
+        passphrase = "test-passphrase-32bytes-padding"
+        vault = SecurityVault(passphrase=passphrase, iterations=1000, vault_path=vault_file)
+        vault.save({
+            "access_token": "valid_access",
+            "refresh_token": "valid_refresh",
+            "refresh_token_issued_at": datetime.now(timezone.utc).timestamp(),
+            "persisted_at": datetime.now(timezone.utc).isoformat(),
+            "expires_in": 1800,
+        })
 
         ledger = T1CashLedger(settled_cash=Decimal("4400.00"), unsettled_cash=Decimal("0.00"), reserved_cash=Decimal("0.00"))
-        token_manager = OAuthTokenManager(initial_ttl_sec=3600.0)
+        token_manager = OAuthTokenManager(vault=vault, initial_ttl_sec=3600.0)
         rate_limiter = AsyncTokenBucketRateLimiter(burst_capacity=120.0, sustained_rate=1.0, daily_ceiling=3500)
         positions = {"SPY": 10, "QQQ": 5, "SOXL": 0, "TQQQ": 0, "TNA": 0}
 
@@ -392,10 +404,19 @@ def test_preflight_verifier_all_checks_pass(tmp_path: Path):
             report_path=report_file,
         )
 
-        report = await verifier.run_all_checks(dry_run=True, baseline_nlv=4400.0)
-        assert report["overall_passed"] is True
-        assert all(chk["passed"] for chk in report["checks"].values())
-        assert report_file.exists()
+        import os
+        orig_pass = os.environ.get("VAULT_PASSPHRASE")
+        os.environ["VAULT_PASSPHRASE"] = passphrase
+        try:
+            report = await verifier.run_all_checks(dry_run=True, baseline_nlv=4400.0)
+            assert report["overall_passed"] is True
+            assert all(chk["passed"] for chk in report["checks"].values())
+            assert report_file.exists()
+        finally:
+            if orig_pass is not None:
+                os.environ["VAULT_PASSPHRASE"] = orig_pass
+            else:
+                os.environ.pop("VAULT_PASSPHRASE", None)
 
     asyncio.run(_run())
 
@@ -461,5 +482,74 @@ def test_preflight_verifier_fails_on_locked_oauth(tmp_path: Path):
         assert report["overall_passed"] is False
         assert report["checks"]["oauth_pre_market_gate"]["passed"] is False
         assert "AUTH_LOCKED" in report["checks"]["oauth_pre_market_gate"]["detail"]
+
+    asyncio.run(_run())
+
+
+def test_preflight_verifier_fails_closed_on_expired_disk_token(tmp_path: Path):
+    """
+    Workstream (#127): Invariant check must fail closed if token file on disk has expired refresh token,
+    even when dry-run is specified.
+    """
+    async def _run():
+        report_file = tmp_path / "preflight_fail_expired_disk.json"
+        journal_file = tmp_path / "journal.db"
+        vault_file = tmp_path / "schwab_tokens_vault.json"
+
+        # Create expired vault
+        passphrase = "test-passphrase-32bytes-padding"
+        vault = SecurityVault(passphrase=passphrase, iterations=1000, vault_path=vault_file)
+        vault.save({
+            "access_token": "expired_access",
+            "refresh_token": "expired_refresh",
+            "refresh_token_issued_at": 1000000000.0,  # Expired timestamp
+            "persisted_at": "2020-01-01T00:00:00Z",
+            "expires_in": 1800,
+        })
+
+        tm = OAuthTokenManager(vault=vault)
+
+        verifier = PreflightVerifier(
+            token_manager=tm,
+            journal_db_path=journal_file,
+            report_path=report_file,
+        )
+
+        # Set environment for passphrase and run
+        import os
+        orig_pass = os.environ.get("VAULT_PASSPHRASE")
+        os.environ["VAULT_PASSPHRASE"] = passphrase
+        try:
+            report = await verifier.run_all_checks(dry_run=True)
+            assert report["overall_passed"] is False
+            assert report["checks"]["oauth_pre_market_gate"]["passed"] is False
+            assert "Refresh token has expired" in report["checks"]["oauth_pre_market_gate"]["detail"]
+        finally:
+            if orig_pass is not None:
+                os.environ["VAULT_PASSPHRASE"] = orig_pass
+            else:
+                os.environ.pop("VAULT_PASSPHRASE", None)
+
+    asyncio.run(_run())
+
+
+def test_preflight_verifier_fails_on_cli_nlv_discrepancy(tmp_path: Path):
+    """
+    Workstream (#127): Any discrepancy between CLI --nlv and configured baseline fails the gate.
+    """
+    async def _run():
+        report_file = tmp_path / "preflight_fail_nlv.json"
+        journal_file = tmp_path / "journal.db"
+
+        verifier = PreflightVerifier(
+            journal_db_path=journal_file,
+            report_path=report_file,
+        )
+
+        # Discrepancy: pass 4400.00 while configured baseline is 4400.90
+        report = await verifier.run_all_checks(dry_run=True, baseline_nlv=Decimal("4400.90"), cli_nlv=Decimal("4400.00"))
+        assert report["overall_passed"] is False
+        assert report["checks"]["t1_ledger_invariants"]["passed"] is False
+        assert "CLI NLV discrepancy" in report["checks"]["t1_ledger_invariants"]["detail"]
 
     asyncio.run(_run())

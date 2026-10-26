@@ -1,19 +1,19 @@
 {
-  "timestamp_utc": "2026-10-26T00:12:09Z",
+  "timestamp_utc": "2026-10-26T00:53:23Z",
   "dry_run": true,
-  "overall_passed": true,
+  "overall_passed": false,
   "checks": {
     "t1_ledger_invariants": {
       "passed": true,
-      "detail": "Settled=$4400.00, Unsettled=$0.00, Reserved=$0.00, Total=$4400.00"
+      "detail": "Settled=$4400.90, Unsettled=$0.00, Reserved=$0.00, Total=$4400.90"
     },
     "zero_stranded_satellites": {
       "passed": true,
       "detail": "Zero stranded 3x satellite holdings (SOXL, TQQQ, TNA are 0)"
     },
     "oauth_pre_market_gate": {
-      "passed": true,
-      "detail": "OAuth active, simulated dry-run TTL healthy (1800.0s >= 1800.0s)"
+      "passed": false,
+      "detail": "Refresh token has expired (-792371203.2s remaining); re-authorization required"
     },
     "rate_limiter_headroom": {
       "passed": true,

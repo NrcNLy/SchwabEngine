@@ -12,7 +12,8 @@
     "reference_source": "broker_liquidation_value",
     "hard_dollar_ceiling": null,
     "discrete_share_quantization": "floor",
-    "residual_sweep_vehicle": "SWVXX"
+    "residual_sweep_vehicle": "SWVXX",
+    "baseline_nlv": 4400.9
   },
   "target_weights": {
     "core_target": 0.85,
@@ -127,6 +128,6 @@
       }
     }
   },
-  "_updated_at": "2026-10-25T21:58:32.731380+00:00",
+  "_updated_at": "2026-10-26T00:54:02.483629+00:00",
   "_source": "argon_2.4.0_calibration"
 }
