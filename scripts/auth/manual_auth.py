@@ -31,7 +31,7 @@ if not CLIENT_ID or not CLIENT_SECRET or not PASSPHRASE:
     print("ERROR: Missing credentials in .env")
     sys.exit(1)
 
-def exchange_and_save(raw_input_url_or_code, redirect_uri="https://127.0.0.1:5556"):
+def exchange_and_save(raw_input_url_or_code, redirect_uri="https://127.0.0.1"):
     # If a full URL was provided, extract the code and check redirect_uri
     raw = raw_input_url_or_code.strip()
     if "code=" in raw:

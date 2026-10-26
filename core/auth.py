@@ -675,7 +675,7 @@ class WeekendOAuthDaemon:
         self._port:          int = int(auth_cfg.get("callback_port", 5556))
         self._reauth_day:    str = auth_cfg.get("weekend_reauth_day", "Saturday")
         self._reauth_time:   str = auth_cfg.get("weekend_reauth_time", "10:00:00")
-        self._redirect_uri:  str = api_cfg.get("callback_url", f"https://127.0.0.1:{self._port}")
+        self._redirect_uri:  str = api_cfg.get("callback_url", "https://127.0.0.1")
         self._base_url:      str = api_cfg.get("base_url", "https://api.schwabapi.com")
 
         self._stop_event = threading.Event()

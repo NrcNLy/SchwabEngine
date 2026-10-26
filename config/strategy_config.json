@@ -129,5 +129,8 @@
     }
   },
   "_updated_at": "2026-10-26T00:54:02.483629+00:00",
-  "_source": "argon_2.4.0_calibration"
+  "_source": "argon_2.4.0_calibration",
+  "oauth": {
+    "redirect_uri": "https://127.0.0.1"
+  }
 }
