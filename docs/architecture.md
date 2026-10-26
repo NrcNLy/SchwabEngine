@@ -150,9 +150,13 @@ To transition production execution cleanly from the local workstation to `schwab
   source /home/nicho/schwab_engine/.venv/bin/activate
   pip install -r requirements.txt
   ```
-- [ ] **Step 6:** Run pre-flight diagnostic suite in the remote environment:
+- [ ] **Step 6:** Run regression test suite and 5-point Monday preflight invariant verifier:
   ```bash
-  python scripts/preflight.py
+  # Regression test gate
+  pytest tests/ -k "not integration" -q
+
+  # Monday pre-market invariant verifier (09:00:00 - 09:25:00 EDT)
+  python scripts/tools/check_preflight_invariants.py --dry-run --nlv 4400.0
   ```
 
 #### Phase C: Cryptographic Token Vault Synchronization
@@ -274,3 +278,115 @@ Google Cloud Recommender suggests downsizing instance `schwab-trader` from `e2-s
 > In leveraged ETF trading (`SOXL` 3x), an execution delay of just 2 to 3 seconds during a volatility spike can incur hundreds of dollars in slippage, completely erasing the $24.12 monthly infrastructure savings. Hardware determinism and non-burstable CPU guarantees are non-negotiable prerequisites for autonomous quantitative execution.
 >
 > **Cost Optimization Alternative:** If budget reduction is required, purchase a 1-year or 3-year Google Cloud Committed Use Discount (CUD) for `e2-standard-2`, which saves 37% to 55% ($18 to $27/month) while preserving 100% dedicated compute performance.
+
+---
+
+## Cold Plane Vertex AI Ingestion & Signal Persistence (Task #124)
+
+### 1. Decoupled Asynchronous Macro Synthesis Topology
+To insulate the microsecond hot execution loop from network latency, cloud authentication overhead, and variable API response times, macroeconomic analysis is completely segregated into an asynchronous **Cold Plane Worker** (`core/cold_plane_worker.py`).
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        COLD PLANE (Asynchronous)                       │
+│                                                                        │
+│   Vertex AI / Gemini Models:                                           │
+│     - 09:15 EDT Pre-Market Macro Prior Gate: gemini-4-argon            │
+│     - Intraday Periodic Cadence (30m):       gemini-3.8-flash          │
+│     - 15:55 EDT EOD Macro Synthesis:         gemini-4-argon            │
+│                                                                        │
+│                      │ Writes atomic temp file                         │
+│                      ▼                                                 │
+│       state/control_signal.json.tmp (fsync)                           │
+│                      │                                                 │
+│                      ▼ os.replace                                      │
+│           state/control_signal.json ◄────────────────────────┐        │
+└──────────────────────────────────────────────────────────────┼─────────┘
+                                                               │ Read (Fault-Tolerant)
+┌──────────────────────────────────────────────────────────────┼─────────┐
+│                        HOT LOOP (Real-Time)                  │         │
+│                                                              │         │
+│   strategies/regime_governor.py (AsymmetricHMMGovernor)      │         │
+│     - Periodic check: ingest_cold_plane_signal() ────────────┘         │
+│     - Max age staleness check: age <= 3,600s                           │
+│     - If circuit_breaker_override == True:                             │
+│         * Enforces Macro Shock [0.0, 0.0, 1.0]                         │
+│         * Zeroes Satellite Target Weight: W_sat*(t) = 0.00             │
+│         * Activates tail_risk_override_active                          │
+│     - If circuit_breaker_override == False:                            │
+│         * Bayesian Prior Blending: (1 - w)*pi + w*prior_probs          │
+│     - Telemetry audited atomically to state/trading_journal.db         │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### 2. Schema Contract (`ControlSignalPayload`)
+The signal file `state/control_signal.json` adheres to a strict validated contract (`ControlSignalPayload`):
+
+| Field | Type | Invariant / Validation Rule |
+| :--- | :--- | :--- |
+| `timestamp_utc` | `string` | Non-empty ISO-8601 UTC timestamp string (e.g., `"2026-10-26T13:15:00Z"`). |
+| `model_version` | `string` | Must be one of `"gemini-4-argon"`, `"gemini-3.8-flash"`. |
+| `dominant_prior` | `string` | Must be one of `"Goldilocks"`, `"Uncertainty"`, `"Macro Shock"`. |
+| `prior_probabilities` | `dict` | Exact keys `{"goldilocks", "uncertainty", "macro_shock"}`; values $\in [0.0, 1.0]$, $\sum = 1.0 \pm 10^{-3}$. |
+| `credit_spread_z_score` | `float` | Hybrid credit spread anomaly z-score. |
+| `nlp_sentiment_score` | `float` | Macroeconomic NLP sentiment score, clamped to $[-1.0, 1.0]$. |
+| `satellite_target_weight` | `float` | Target satellite allocation weight, clamped to $[0.0, 0.35]$. |
+| `circuit_breaker_override` | `bool` | Deterministic override triggering emergency de-risking when True. |
+
+### 3. Model Tier Routing & Atomic Ingestion Semantics
+- **Model Tier Router (`select_cold_plane_model`):**
+  - **`gemini-4-argon`:** Selected during the critical 09:10:00–09:25:00 EDT pre-market prior gate and $\ge$ 15:55:00 EDT EOD synthesis for deep analytical reasoning.
+  - **`gemini-3.8-flash`:** Selected for all intraday periodic evaluations (30-minute cadence between 09:30:00 and 15:50:00 EDT) for ultra-low latency and computational efficiency.
+- **Atomic File-Drop Writer (`write_control_signal_atomic`):** Serializes to sibling `.tmp`, invokes `f.flush()` and `os.fsync()`, and atomically moves via `os.replace()`. Guarantees zero partially written or torn reads.
+- **Fault-Tolerant Hot-Loop Ingestion (`read_control_signal` & `AsymmetricHMMGovernor.ingest_cold_plane_signal`):**
+  - Safely catches `(OSError, json.JSONDecodeError, ValueError, KeyError)` without interrupting trading loops.
+  - Rejects stale signals older than `max_age_seconds` ($3,600\text{s}$).
+  - Blends fresh priors into the active HMM state vector using blend weight $w = 0.35$, or forces state to `[0.0, 0.0, 1.0]` (`Macro Shock`) and $W_{\text{sat}}^*(t) = 0.00$ on `circuit_breaker_override == True`.
+
+---
+
+## Monday Pre-Market Invariant Verification (Task #124)
+
+Prior to cash equity market open at 09:30:00 EDT, `scripts/tools/check_preflight_invariants.py` (`PreflightVerifier`) executes between 09:00:00 and 09:25:00 EDT to enforce 5 non-negotiable operational invariants:
+
+```
+09:00:00 EDT - Monday Pre-Market Invariant Verification Window Opens
+ │
+ ├── [1] T+1 Cash Ledger Invariants (SEC Rule 15c6-1)
+ │     ├── Settled cash > $0.00
+ │     ├── Unsettled cash == $0.00 (Overnight sweep matured and cleared all prior-day proceeds)
+ │     ├── Reserved cash == $0.00 (Zero hanging overnight limit buy orders)
+ │     └── Three-bucket conservation: Settled + Unsettled + Reserved == Total Cash
+ │
+ ├── [2] Zero Stranded 3x Satellites Invariant
+ │     └── Holdings for SOXL, TQQQ, TNA strictly == 0 shares
+ │
+ ├── [3] OAuth Pre-Market Refresh Gate (09:15:00 EDT Gate)
+ │     ├── Token manager not AUTH_LOCKED
+ │     ├── Pre-market refresh gate executed
+ │     └── Session Token Remaining TTL >= 1,800.0s (30 minutes)
+ │
+ ├── [4] API Rate Limiter Headroom
+ │     ├── Burst capacity == 120.0 RPM (2.0 req/sec headroom)
+ │     ├── Daily ceiling == 3,500 requests
+ │     └── Start-of-day consumed calls < 100
+ │
+ └── [5] Filesystem & Database Persistence
+       ├── state/ and logs/ exist and are writable
+       └── state/trading_journal.db opens cleanly in SQLite WAL mode
+ │
+09:25:00 EDT - Verdict & Atomic Preflight Report Generation
+ └── Persisted to logs/preflight_check_latest.json
+ └── Exit code 0: Authorize Cash Market Open
+ └── Exit code 1: Emergency Operator Halt
+```
+
+### Preflight Execution Commands
+- **Dry-run simulation (CI / Staging / Development):**
+  ```bash
+  python scripts/tools/check_preflight_invariants.py --dry-run --nlv 4400.0
+  ```
+- **Production live execution (09:15:00 EDT on `schwab-trader` VM):**
+  ```bash
+  python scripts/tools/check_preflight_invariants.py --nlv 4400.0
+  ```
