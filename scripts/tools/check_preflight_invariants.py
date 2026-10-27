@@ -403,6 +403,25 @@ def verify_execution_mode_alignment(
     cmdline = proc_cmdline
     source = "injected_cmdline" if cmdline is not None else None
 
+    # If systemd_unit_path was explicitly provided, inspect it directly
+    if cmdline is None and systemd_unit_path is not None:
+        candidate = Path(systemd_unit_path)
+        if candidate.exists():
+            try:
+                content = candidate.read_text(encoding="utf-8")
+                exec_cmd = None
+                for line in content.splitlines():
+                    line = line.strip()
+                    if line.startswith("ExecStart="):
+                        val = line[len("ExecStart="):].strip()
+                        if val:
+                            exec_cmd = val
+                if exec_cmd:
+                    cmdline = shlex.split(exec_cmd)
+                    source = f"systemd_unit ({candidate.name})"
+            except Exception:
+                pass
+
     # Check /proc
     if cmdline is None:
         proc_dir = Path("/proc")
@@ -427,16 +446,13 @@ def verify_execution_mode_alignment(
 
     # Fallback to systemd unit definition
     if cmdline is None:
-        if systemd_unit_path is not None:
-            unit_candidates = [Path(systemd_unit_path)]
-        else:
-            unit_candidates = [
-                Path("/etc/systemd/system/schwab-trader.service.d/live.conf"),
-                Path("/etc/systemd/system/schwab-trader.service"),
-                PROJECT_ROOT / "systemd" / "schwab-trader.service",
-                PROJECT_ROOT / "scripts" / "systemd" / "schwab-trader.service",
-                PROJECT_ROOT / "scripts" / "systemd" / "schwab-trader.service.d" / "live.conf",
-            ]
+        unit_candidates = [
+            Path("/etc/systemd/system/schwab-trader.service.d/live.conf"),
+            Path("/etc/systemd/system/schwab-trader.service"),
+            PROJECT_ROOT / "systemd" / "schwab-trader.service",
+            PROJECT_ROOT / "scripts" / "systemd" / "schwab-trader.service",
+            PROJECT_ROOT / "scripts" / "systemd" / "schwab-trader.service.d" / "live.conf",
+        ]
 
         for candidate in unit_candidates:
             if candidate.exists():
@@ -461,6 +477,7 @@ def verify_execution_mode_alignment(
 
     # 3. Analyze commandline arguments
     has_live_flag = "--live" in cmdline
+    has_headless_flag = "--headless-trader" in cmdline
     has_mode_live = False
     has_mode_shadow = False
     for i, arg in enumerate(cmdline):
@@ -477,7 +494,8 @@ def verify_execution_mode_alignment(
             elif val == "shadow":
                 has_mode_shadow = True
 
-    is_live_routing = has_live_flag or has_mode_live
+    is_live_routing = has_live_flag or has_mode_live or (has_headless_flag and config_mode == "live")
+    is_shadow_bypass = has_mode_shadow and not has_live_flag
     is_shadow_bypass = has_mode_shadow and not has_live_flag
 
     # 4. Assert alignment between config mode and execution mode
