@@ -157,15 +157,16 @@ def test_shadow_rebalancer_cold_plane_wiring_blend_and_override(tmp_path: Path):
         }
     })
 
-    # Cycle 1: No cold signal yet -> INITIAL_DEPLOYMENT to Goldilocks target 0.25
-    summary1 = rebalancer.evaluate()
+    # Cycle 1: No cold signal yet -> INITIAL_DEPLOYMENT to Goldilocks target 0.25 (evaluated midday 11:00 EDT)
+    midday = datetime(2026, 10, 26, 11, 0, 0, tzinfo=EDT)
+    summary1 = rebalancer.evaluate(now=midday)
     assert summary1["decision"] == "INITIAL_DEPLOYMENT"
     assert summary1["dominant_regime"] == "Goldilocks"
     assert summary1["target_satellite_weight"] == 0.25
     assert summary1["ntz_band"] == [0.21, 0.29]
 
     # Cycle 2: Same state inside NTZ -> HOLD_INSIDE_NTZ
-    summary2 = rebalancer.evaluate()
+    summary2 = rebalancer.evaluate(now=midday)
     assert summary2["decision"] == "HOLD_INSIDE_NTZ"
 
     # Step 3: Publish Cold Plane Macro Shock with circuit breaker override
@@ -183,7 +184,7 @@ def test_shadow_rebalancer_cold_plane_wiring_blend_and_override(tmp_path: Path):
     write_control_signal_atomic(shock_payload, signal_file)
 
     # Cycle 3: Ingests cold plane signal -> triggers emergency de-risking
-    summary3 = rebalancer.evaluate()
+    summary3 = rebalancer.evaluate(now=midday)
     assert summary3["dominant_regime"] == "Shock"
     assert summary3["target_satellite_weight"] == 0.0
     assert summary3["ntz_band"] == [0.0, 0.0]

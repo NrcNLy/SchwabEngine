@@ -25,7 +25,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -212,10 +212,24 @@ class ShadowRebalancer:
 
     # -- main cycle --------------------------------------------------------------
 
-    def evaluate(self) -> Dict[str, Any]:
+    def evaluate(self, now: Optional[datetime] = None) -> Dict[str, Any]:
         """Runs one shadow rebalance cycle. Returns the summary record that was written."""
         if self._cash is None:
             self._adopt_broker_book()
+
+        now_et = now or datetime.now(ET)
+        if now_et.tzinfo is None:
+            now_et = now_et.replace(tzinfo=ET)
+        else:
+            now_et = now_et.astimezone(ET)
+
+        # 15:50 EDT Mandatory Satellite Liquidation Gate (#132)
+        is_eod = now_et.time() >= dtime(15, 50, 0)
+        held_satellites = {
+            sym: self._book.get(sym, (0, 0.0))[0]
+            for sym in DEFAULT_SATELLITE_SYMBOLS
+            if self._book.get(sym, (0, 0.0))[0] > 0
+        }
 
         # Step 1: Ingest Cold Plane Macro Prior if available and fresh (#130)
         cold_signal = None
@@ -241,7 +255,11 @@ class ShadowRebalancer:
         pi = self.hmm.update(macro_vec)
 
         # Step 2: Determine Dominant Regime, Target Weight, and Leland NTZ Band
-        if self.governor.tail_risk_override_active or (cold_signal and cold_signal.circuit_breaker_override):
+        if is_eod:
+            dominant = "Shock" if self.governor.tail_risk_override_active or (cold_signal and cold_signal.circuit_breaker_override) else self._regime_key(self.hmm.get_dominant_regime())
+            target_sat = 0.0
+            lo, hi = 0.0, 0.0
+        elif self.governor.tail_risk_override_active or (cold_signal and cold_signal.circuit_breaker_override):
             dominant = "Shock"
             target_sat = 0.0
             lo, hi = 0.0, 0.0
@@ -260,8 +278,6 @@ class ShadowRebalancer:
         credit = self.sync.get_credit_proxy_state()
 
         quotes = {s: self.sync.get_latest_quote(s) for s in SHADOW_UNIVERSE}
-        missing = [s for s, q in quotes.items() if q is None or q.ask <= 0.0 or q.bid <= 0.0]
-        stale = [s for s, q in quotes.items() if q is not None and q.is_stale]
 
         base = {
             "nlv": round(nlv, 2),
@@ -278,6 +294,55 @@ class ShadowRebalancer:
             base["cold_plane_prior"] = cold_signal.dominant_prior
             base["cold_plane_model"] = cold_signal.model_version
             base["cold_plane_cb_override"] = cold_signal.circuit_breaker_override
+
+        # Mandatory EOD Liquidation Event (#132)
+        if is_eod and held_satellites:
+            orders: List[Dict[str, Any]] = []
+            for sym in sorted(held_satellites.keys()):
+                held = held_satellites[sym]
+                q = quotes.get(sym) or self.sync.get_latest_quote(sym)
+                px = (
+                    q.bid if (q is not None and q.bid > 0.0)
+                    else (q.microprice if (q is not None and q.microprice > 0.0) else self._book[sym][1])
+                )
+                self._order_seq += 1
+                orders.append({
+                    "order_id": f"SHADOW-{now_et.strftime('%y%m%d')}-{self._order_seq:04d}",
+                    "symbol": sym,
+                    "side": "SELL",
+                    "shares": held,
+                    "price": round(px, 4),
+                    "notional": round(held * px, 2),
+                    "sleeve": "SATELLITE",
+                    "target_shares": 0,
+                    "broker_submitted": False,
+                })
+            self._apply_orders(orders)
+            self._push_book_to_sync(nlv)
+            for order in orders:
+                self.sink.write("SHADOW_REBALANCE_ORDER", **order)
+            state = self.sync.get_live_portfolio_state()
+            logger.info(
+                "ShadowRebalancer: EOD mandatory satellite liquidation executed (%d orders, settled cash=%.2f)",
+                len(orders),
+                state.cash_buffer,
+            )
+            residual = float(state.cash_buffer)
+            rec = dict(
+                base,
+                decision="EOD_MANDATORY_LIQUIDATION",
+                orders=len(orders),
+                post_core_weight=round(float(state.core_weight), 4),
+                post_satellite_weight=round(float(state.satellite_weight), 4),
+                post_cash=round(residual, 2),
+                post_cash_pct_nlv=round(residual / nlv, 4) if nlv > 0 else 0.0,
+                satellite_target_gap=round(float(state.satellite_weight) - target_sat, 4),
+            )
+            self.sink.write("SHADOW_REBALANCE_SUMMARY", **rec)
+            return rec
+
+        missing = [s for s, q in quotes.items() if q is None or q.ask <= 0.0 or q.bid <= 0.0]
+        stale = [s for s, q in quotes.items() if q is not None and q.is_stale]
 
         if missing or stale:
             rec = dict(base, decision="SKIP_NO_LIVE_QUOTES", missing=missing, stale=stale)
@@ -297,7 +362,7 @@ class ShadowRebalancer:
 
         orders: List[Dict[str, Any]] = []
         if decision in ("INITIAL_DEPLOYMENT", "REBALANCE_OUTSIDE_NTZ"):
-            orders = self._plan_orders(nlv, target_sat, quotes)
+            orders = self._plan_orders(nlv, target_sat, quotes, date_str=now_et.strftime('%y%m%d'))
             self._apply_orders(orders)
             self._push_book_to_sync(nlv)
             for order in orders:
@@ -318,7 +383,13 @@ class ShadowRebalancer:
         self.sink.write("SHADOW_REBALANCE_SUMMARY", **rec)
         return rec
 
-    def _plan_orders(self, nlv: float, target_sat: float, quotes: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _plan_orders(
+        self,
+        nlv: float,
+        target_sat: float,
+        quotes: Dict[str, Any],
+        date_str: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         sleeves: List[Tuple[str, float, Dict[str, float]]] = [
             ("SATELLITE", target_sat, self.satellite_vector),
             ("CORE", 1.0 - target_sat, self.routing_vector),
@@ -330,6 +401,7 @@ class ShadowRebalancer:
                 desired[sym] = int(math.floor((nlv * sleeve_w * w_c) / ask)) if sleeve_w > 0 else 0
 
         orders: List[Dict[str, Any]] = []
+        d_str = date_str or datetime.now(ET).strftime("%y%m%d")
         for sym in SHADOW_UNIVERSE:
             held = self._book.get(sym, (0, 0.0))[0]
             diff = desired.get(sym, 0) - held
@@ -339,7 +411,7 @@ class ShadowRebalancer:
             px = quotes[sym].ask if diff > 0 else quotes[sym].bid
             self._order_seq += 1
             orders.append({
-                "order_id": f"SHADOW-{datetime.now(ET).strftime('%y%m%d')}-{self._order_seq:04d}",
+                "order_id": f"SHADOW-{d_str}-{self._order_seq:04d}",
                 "symbol": sym,
                 "side": side,
                 "shares": abs(diff),
