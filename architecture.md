@@ -393,6 +393,51 @@ Prior to cash equity market open at 09:30:00 EDT, `scripts/tools/check_preflight
 
 ---
 
+## 14. Operational Remediation & Live Broker Cutover (#129–#136)
+
+### 1. Diagnostic & Cold Plane Wiring (#129–#131)
+- **Isolated IPC Namespaces:**
+  - Resolved namespace collisions by isolating command/kill-switch controls (`state/ipc_control.json` / `schwab_state/ipc_control.json`) from macroeconomic quantitative priors (`/home/nicho/schwab_state/macro_prior.json`).
+  - Signal exchange follows strict serialization guarantees: `TraderIPCServer` manages interactive runtime commands without tearing or overwriting Cold Plane synthesis signals.
+- **Automated Cold Plane Scheduling:**
+  - Configured and activated `schwab-coldplane.timer` on systemd:
+    - `09:15:00 EDT`: Mandatory pre-market prior synthesis gate (`gemini-4-argon`) seeding initial regime priors ahead of cash open.
+    - `09:30:00 – 15:50:00 EDT`: Intraday 30-minute evaluation cadence (`gemini-3.8-flash`) updating credit spread $Z$-scores and NLP sentiment vectors.
+- **Dynamic Session Telemetry Log Rotation:**
+  - Standardized local session telemetry file paths to `logs/session_telemetry_YYMMDD.jsonl` using dynamic `America/New_York` session date calculation, preventing stale overnight file handles or collisions across trading days.
+
+### 2. EOD Satellite Liquidation Parity (#132)
+- **Deterministic 15:50:00 EDT Flatten Gate:**
+  - Hardcoded `EOD_MANDATORY_LIQUIDATION` parity within `core/shadow.py` and `core/engine.py`.
+  - When Eastern Time reaches $\ge \text{15:50:00 EDT}$, all 3x leveraged satellite holdings (`SOXL`, `TQQQ`, `TNA`) are 100% liquidated to settled cash via limit and market sweeps.
+  - Zero 3x satellite inventory is carried overnight, enforcing strict compliance with SEC Rule 15c6-1 cash preservation and LETF volatility drag constraints.
+  - Core sleeve holdings (`SPY`, `QQQ`, `IWM`, `HYG`, `IEF`) are preserved across the close according to target capital allocations.
+
+### 3. Live Entrypoint Binding & Invariant 6 (#133–#136)
+- **Strategy Config Direct Binding:**
+  - Bound `--headless-trader` entrypoint in `main.py` directly to `config/strategy_config.json` (`ave.mode`).
+  - When `ave.mode == "live"`: initializes `build_live()`, activates live broker execution with `OrderManager` and `SchwabOrderClient(live_trading=True)`, and emits `[CRITICAL] RUNTIME EXECUTION MODE: LIVE BROKER ROUTING ARMED`.
+  - When `ave.mode == "shadow"`: instantiates `build_shadow()` and logs `[INFO] RUNTIME EXECUTION MODE: SHADOW SIMULATION`.
+- **Explicit `--live` Flag Enforcement:**
+  - Added dedicated `--live` CLI argument ensuring live broker order routing is forced and rejecting shadow fallback if config specifies shadow mode (fails closed with exit code 2).
+  - Updated systemd unit definition (`systemd/schwab-trader.service` and `scripts/systemd/schwab-trader.service`) to `ExecStart=/home/nicho/schwab_engine/.venv/bin/python main.py --headless-trader --live`.
+- **Invariant 6 (`verify_execution_mode_alignment`):**
+  - Incorporated Invariant 6 into `scripts/tools/check_preflight_invariants.py`.
+  - Inspects `config/strategy_config.json` (`ave.mode`) alongside active runtime `/proc/<pid>/cmdline` and systemd unit definitions.
+  - Asserts that when `ave.mode == "live"`, live broker routing is strictly active without shadow bypass, failing preflight gates with exit code 1 on any configuration or process discrepancy.
+
+### 4. Deterministic Live Session Execution Lifecycle (Account `***4015` — $4,400.90 Baseline)
+
+| Timestamp (EDT) | Execution Lifecycle Stage | Operational Actions & Verification |
+| :--- | :--- | :--- |
+| **09:15:00 EDT** | **Cold Plane Macro Prior Gate** | `schwab-coldplane.timer` triggers `core.cold_plane_worker` (`gemini-4-argon`), evaluating FRED yields, credit spreads, and pre-market financial sentiment. Persists normalized posterior regime probabilities and hybrid credit spread $Z$-score to `macro_prior.json`. |
+| **09:25:00 EDT** | **Pre-Market Invariant & Token Gate** | `scripts/tools/check_preflight_invariants.py` executes all 6 invariants against $4,400.90 NLV. Enforces OAuth access token refresh (TTL $\ge 1,800\text{s}$), verifies zero stranded overnight satellites, confirms rate limiter headroom ($120\text{ RPM}$ burst / $3,500$ daily), and validates execution mode alignment. |
+| **09:30:00 EDT** | **Cash Equity Open Deployment** | Market opens. Headless trading engine routes live opening target allocation orders to Charles Schwab for Cash Account `***4015`: `~60–65%` Core Index sleeve (`SPY`, `QQQ`, `IWM`), `~22–25%` Tactical 3x Satellites (`SOXL`, `TQQQ`, `TNA` capped at $W_{\text{sat}}^* \le 0.35$), and `~15–18%` T+1 settled cash buffer ($0\text{ GFV}$). |
+| **09:30:30 – 15:49:30 EDT** | **Dynamic Hot-Loop Rebalancing** | 30-second rebalancing loop evaluates portfolio weights against the $\pm 4\%$ Leland No-Trade Zone band (`[0.21, 0.29]`). Rebalance orders are dispatched only on boundary breach. Blends Cold Plane priors every 30 minutes ($w = 0.35$) while continuously monitoring high-frequency intraday credit proxy (`HYG`/`IEF` ratio). |
+| **15:50:00 EDT** | **Mandatory EOD Satellite Liquidation** | Terminal flush gate fires. 100% of open 3x satellite positions (`SOXL`, `TQQQ`, `TNA`) are aggressively flattened to settled cash via market/marketable limit orders. Rebalancing disarms, leaving only Core assets and cash for overnight T+1 conservation. |
+
+---
+
 
 ## Repository Layout & Google Drive Sync (Task #120)
 
