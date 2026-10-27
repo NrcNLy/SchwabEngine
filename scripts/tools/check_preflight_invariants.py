@@ -2,7 +2,7 @@
 """
 scripts/tools/check_preflight_invariants.py
 ==========================================
-Workstream 2 (#124, #127): Automated Monday Pre-Market Invariant Verifier.
+Workstream 2 (#124, #127, #135): Automated Monday Pre-Market Invariant Verifier.
 
 Executes between 09:00:00 and 09:25:00 EDT prior to the 09:30:00 EDT cash open:
 1. Validates SEC Rule 15c6-1 T+1 Cash Ledger invariants:
@@ -15,6 +15,7 @@ Executes between 09:00:00 and 09:25:00 EDT prior to the 09:30:00 EDT cash open:
    Fails closed: if token file is missing, expired, or invalid, fails even on --dry-run.
 4. Confirms token bucket rate limiter headroom (120 RPM, 3500 daily ceiling, < 100 used).
 5. Validates write access to state/ and logs/ and checks SQLite WAL mode.
+6. Verifies execution mode alignment between config/strategy_config.json (ave.mode) and daemon runtime / systemd unit.
 """
 
 from __future__ import annotations
@@ -97,6 +98,9 @@ class PreflightVerifier:
         positions: Optional[Dict[str, int]] = None,
         journal_db_path: Path = TRADING_JOURNAL_DB_PATH,
         report_path: Path = PREFLIGHT_REPORT_PATH,
+        strategy_config_path: Optional[Path] = None,
+        systemd_unit_path: Optional[Path] = None,
+        proc_cmdline: Optional[List[str]] = None,
     ) -> None:
         self.ledger = ledger
         self.token_manager = token_manager
@@ -104,6 +108,9 @@ class PreflightVerifier:
         self.positions = positions if positions is not None else {}
         self.journal_db_path = Path(journal_db_path)
         self.report_path = Path(report_path)
+        self.strategy_config_path = Path(strategy_config_path) if strategy_config_path is not None else None
+        self.systemd_unit_path = Path(systemd_unit_path) if systemd_unit_path is not None else None
+        self.proc_cmdline = proc_cmdline
 
     def check_t1_ledger_invariants(
         self,
@@ -293,6 +300,17 @@ class PreflightVerifier:
         except Exception as exc:
             return False, f"Filesystem/database check failed: {exc}"
 
+    def verify_execution_mode_alignment(self) -> Tuple[bool, str]:
+        """
+        Confirm execution mode alignment between config/strategy_config.json
+        (ave.mode) and daemon runtime or systemd unit definition.
+        """
+        return verify_execution_mode_alignment(
+            strategy_config_path=self.strategy_config_path,
+            systemd_unit_path=self.systemd_unit_path,
+            proc_cmdline=self.proc_cmdline,
+        )
+
     async def run_all_checks(
         self,
         dry_run: bool = False,
@@ -318,6 +336,7 @@ class PreflightVerifier:
         c3_ok, c3_msg = await self.check_oauth_pre_market_gate(dry_run=dry_run)
         c4_ok, c4_msg = self.check_rate_limiter_headroom()
         c5_ok, c5_msg = self.check_sqlite_journal_and_state_dir()
+        c6_ok, c6_msg = self.verify_execution_mode_alignment()
 
         checks = {
             "t1_ledger_invariants": {"passed": c1_ok, "detail": c1_msg},
@@ -325,6 +344,7 @@ class PreflightVerifier:
             "oauth_pre_market_gate": {"passed": c3_ok, "detail": c3_msg},
             "rate_limiter_headroom": {"passed": c4_ok, "detail": c4_msg},
             "sqlite_journal_and_state_dir": {"passed": c5_ok, "detail": c5_msg},
+            "execution_mode_alignment": {"passed": c6_ok, "detail": c6_msg},
         }
 
         overall_passed = all(check_data["passed"] for check_data in checks.values())
@@ -347,6 +367,157 @@ class PreflightVerifier:
         os.replace(tmp_report, self.report_path)
 
         return report
+
+
+def verify_execution_mode_alignment(
+    strategy_config_path: Optional[Path] = None,
+    systemd_unit_path: Optional[Path] = None,
+    proc_cmdline: Optional[List[str]] = None,
+) -> Tuple[bool, str]:
+    """
+    Workstream (#135): Invariant 6 - Verify execution mode alignment.
+    1. Reads config/strategy_config.json (ave.mode).
+    2. Inspects running process /proc/<pid>/cmdline or systemd unit definition.
+    3. Asserts that if config is live, the broker router is enabled and the daemon
+       is not running a shadow-only bypass.
+    4. Fails if there is any mismatch between config and execution mode.
+    """
+    import shlex
+
+    # 1. Read config/strategy_config.json
+    cfg_file = strategy_config_path
+    if cfg_file is None:
+        cfg_file = STRATEGY_CONFIG_FILE if STRATEGY_CONFIG_FILE.exists() else (CONFIG_DIR / "strategy_config.json")
+        if not cfg_file.exists():
+            cfg_file = PROJECT_ROOT / "config" / "strategy_config.json"
+
+    config_mode = "shadow"
+    if cfg_file and Path(cfg_file).exists():
+        try:
+            strat_data = json.loads(Path(cfg_file).read_text(encoding="utf-8"))
+            config_mode = str(strat_data.get("ave", {}).get("mode", "shadow")).strip().lower()
+        except Exception as exc:
+            return False, f"Failed to parse strategy_config.json at {cfg_file}: {exc}"
+
+    # 2. Inspect running process /proc/<pid>/cmdline or systemd unit definition
+    cmdline = proc_cmdline
+    source = "injected_cmdline" if cmdline is not None else None
+
+    # Check /proc
+    if cmdline is None:
+        proc_dir = Path("/proc")
+        if proc_dir.exists() and proc_dir.is_dir():
+            try:
+                for entry in proc_dir.iterdir():
+                    if entry.name.isdigit():
+                        cmdline_file = entry / "cmdline"
+                        if cmdline_file.exists():
+                            try:
+                                raw = cmdline_file.read_bytes()
+                                if raw:
+                                    parts = [p for p in raw.decode("utf-8", errors="ignore").split("\x00") if p]
+                                    if any("main.py" in p for p in parts):
+                                        cmdline = parts
+                                        source = f"/proc/{entry.name}/cmdline"
+                                        break
+                            except (PermissionError, ProcessLookupError, FileNotFoundError):
+                                continue
+            except Exception:
+                pass
+
+    # Fallback to systemd unit definition
+    if cmdline is None:
+        if systemd_unit_path is not None:
+            unit_candidates = [Path(systemd_unit_path)]
+        else:
+            unit_candidates = [
+                Path("/etc/systemd/system/schwab-trader.service.d/live.conf"),
+                Path("/etc/systemd/system/schwab-trader.service"),
+                PROJECT_ROOT / "systemd" / "schwab-trader.service",
+                PROJECT_ROOT / "scripts" / "systemd" / "schwab-trader.service",
+                PROJECT_ROOT / "scripts" / "systemd" / "schwab-trader.service.d" / "live.conf",
+            ]
+
+        for candidate in unit_candidates:
+            if candidate.exists():
+                try:
+                    content = candidate.read_text(encoding="utf-8")
+                    exec_cmd = None
+                    for line in content.splitlines():
+                        line = line.strip()
+                        if line.startswith("ExecStart="):
+                            val = line[len("ExecStart="):].strip()
+                            if val:
+                                exec_cmd = val
+                    if exec_cmd:
+                        cmdline = shlex.split(exec_cmd)
+                        source = f"systemd_unit ({candidate.name})"
+                        break
+                except Exception:
+                    continue
+
+    if cmdline is None:
+        return False, "Could not inspect running process /proc or systemd unit definition (no unit found)"
+
+    # 3. Analyze commandline arguments
+    has_live_flag = "--live" in cmdline
+    has_mode_live = False
+    has_mode_shadow = False
+    for i, arg in enumerate(cmdline):
+        if arg == "--mode" and i + 1 < len(cmdline):
+            val = cmdline[i + 1].strip().lower()
+            if val == "live":
+                has_mode_live = True
+            elif val == "shadow":
+                has_mode_shadow = True
+        elif arg.startswith("--mode="):
+            val = arg.split("=", 1)[1].strip().lower()
+            if val == "live":
+                has_mode_live = True
+            elif val == "shadow":
+                has_mode_shadow = True
+
+    is_live_routing = has_live_flag or has_mode_live
+    is_shadow_bypass = has_mode_shadow and not has_live_flag
+
+    # 4. Assert alignment between config mode and execution mode
+    if config_mode == "live":
+        if is_shadow_bypass:
+            return (
+                False,
+                f"Execution mode mismatch: config ave.mode is 'live', but {source} runs a shadow-only bypass: {' '.join(cmdline)}",
+            )
+        if not is_live_routing:
+            return (
+                False,
+                f"Execution mode mismatch: config ave.mode is 'live', but {source} does not enable broker router (--live missing): {' '.join(cmdline)}",
+            )
+        return (
+            True,
+            f"Execution mode aligned: config ave.mode is 'live' and broker router is enabled ({source}: {' '.join(cmdline)})",
+        )
+    elif config_mode == "shadow":
+        if is_live_routing:
+            return (
+                False,
+                f"Execution mode mismatch: config ave.mode is 'shadow', but {source} routes live orders: {' '.join(cmdline)}",
+            )
+        return (
+            True,
+            f"Execution mode aligned: config ave.mode is 'shadow' and shadow simulation active ({source}: {' '.join(cmdline)})",
+        )
+    else:
+        if config_mode == "off":
+            if is_live_routing:
+                return (
+                    False,
+                    f"Execution mode mismatch: config ave.mode is 'off', but {source} routes live orders: {' '.join(cmdline)}",
+                )
+            return True, f"Execution mode aligned: ave.mode is off and live router disabled ({source})"
+        return (
+            False,
+            f"Unknown config ave.mode '{config_mode}' cannot be aligned with daemon execution",
+        )
 
 
 def main() -> None:

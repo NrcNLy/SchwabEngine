@@ -44,7 +44,7 @@ MIN_LIVE_SETTLED_FUNDS = Decimal("2000.00")
 from core.atomic_io import read_json
 from core.engine import EngineSettings, LiveEngine, SimEngine
 from core.liquidity_models import CollateralInvariantState, MacroLiquidityEvent, PromotionalDebt, extract_snapshot
-from core.paths import MACRO_STATE_FILE
+from core.paths import MACRO_STATE_FILE, STRATEGY_CONFIG_FILE
 from core.runtime import EngineContext, build_ledger, ledger_buying_power, load_config
 from execution.risk_manager import RiskEngine
 from execution.bracket_manager import MultiTrancheBracket, MultiTrancheBracketManager
@@ -126,8 +126,8 @@ async def handle_liquidity_event(event: Any) -> None:
 # ---------------------------------------------------------------------------
 
 def resolve_live(args: argparse.Namespace, cfg: dict) -> bool:
-    """LIVE only when --mode live (or the legacy --live alias) was explicitly requested."""
-    return str(getattr(args, "mode", "shadow")).lower() == "live"
+    """LIVE only when --mode live or --live was explicitly requested."""
+    return str(getattr(args, "mode", "shadow")).lower() == "live" or bool(getattr(args, "live", False))
 
 
 def make_governor() -> Optional[Any]:
@@ -396,6 +396,12 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
         raise StartupError(f"Account firewall failed: {exc}") from exc
     ctx.order_manager = om
 
+    from execution.order_client import SchwabOrderClient
+    from execution.router import ExecutionRouter
+    router = ExecutionRouter(order_client=SchwabOrderClient(auth_manager=auth, live_trading=True))
+    ctx.execution_router = router
+    ctx.router = router
+
     sync = BrokerSync(rest, ledger, ctx.anchors["active"], cfg)
     try:
         await asyncio.to_thread(sync.sync_once)
@@ -485,6 +491,7 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
     strategy = StrategyEngine(cfg, ledger, mask)
     ctx.strategy_engine = strategy
     engine = LiveEngine(ctx, cfg, ledger, settings, om, strategy, loop)
+    engine.router = router
 
     for sym in sorted(mask.universe):
         strategy.register_symbol(sym)
@@ -600,11 +607,52 @@ async def run(args: argparse.Namespace) -> int:
     if getattr(args, "headless_trader", False):
         args.no_api = True
     cfg = load_active_config()
-    live = resolve_live(args, cfg)
+
+    # Read config/strategy_config.json ave.mode
+    strat_cfg_path = STRATEGY_CONFIG_FILE if STRATEGY_CONFIG_FILE.exists() else (PROJECT_ROOT / "config" / "strategy_config.json")
+    ave_mode = "shadow"
+    if strat_cfg_path.exists():
+        try:
+            strat_data = read_json(strat_cfg_path, {})
+            ave_mode = str(strat_data.get("ave", {}).get("mode", "shadow")).strip().lower()
+        except Exception as exc:
+            logger.warning("Could not read strategy_config.json: %s", exc)
+
+    if getattr(args, "headless_trader", False):
+        if getattr(args, "live", False):
+            if ave_mode == "shadow":
+                logger.critical("Explicit --live CLI flag supplied but config/strategy_config.json ave.mode is 'shadow'. Rejecting shadow fallback.")
+                return 2
+            live = True
+            args.mode = "live"
+            args.confirm_live = True
+            logger.critical("RUNTIME EXECUTION MODE: LIVE BROKER ROUTING ARMED")
+        else:
+            if ave_mode == "live":
+                live = True
+                args.mode = "live"
+                args.confirm_live = True
+                logger.critical("RUNTIME EXECUTION MODE: LIVE BROKER ROUTING ARMED")
+            else:
+                live = False
+                args.mode = "shadow"
+                logger.info("RUNTIME EXECUTION MODE: SHADOW SIMULATION")
+    else:
+        if getattr(args, "live", False):
+            if ave_mode == "shadow":
+                logger.critical("Explicit --live CLI flag supplied but config/strategy_config.json ave.mode is 'shadow'. Rejecting shadow fallback.")
+                return 2
+            live = True
+            args.mode = "live"
+            args.confirm_live = True
+            logger.critical("RUNTIME EXECUTION MODE: LIVE BROKER ROUTING ARMED")
+        else:
+            live = resolve_live(args, cfg)
+
     cfg.setdefault("engine", {})["live_trading"] = live
     if live and not getattr(args, "confirm_live", False):
         logger.critical("--mode live requires explicit confirmation: re-run with --confirm-live "
-                        "(or use --mode shadow).")
+                        "(or use --live / --mode shadow).")
         return 2
     if live and args.ignore_session:
         logger.critical("--ignore-session is refused in LIVE mode.")
@@ -825,7 +873,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="Path to the engine YAML configuration (default: config/config.yaml).")
     p.add_argument("--confirm-live", action="store_true",
                    help="Explicit confirmation required for --mode live.")
-    p.add_argument("--live", action="store_true", help="Deprecated alias for --mode live.")
+    p.add_argument("--live", action="store_true",
+                   help="Dedicated CLI flag: explicitly force live execution mode (real Schwab order routing) and reject shadow fallback.")
     p.add_argument("--headless-trader", action="store_true", help="Run high-priority headless execution daemon without API server.")
     p.add_argument("--ignore-session", action="store_true", help="Dry-run only: allow entries outside market hours.")
     p.add_argument("--governor", action="store_true", help="Dry-run: also run the Vertex AI governor schedule.")
@@ -838,7 +887,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def _post_parse(args: argparse.Namespace) -> argparse.Namespace:
-    """Normalizes the legacy --live alias and publishes the selected config path."""
+    """Normalizes the CLI flags and publishes the selected config path."""
     global _ACTIVE_CONFIG_PATH
     if args.live:
         args.mode = "live"
