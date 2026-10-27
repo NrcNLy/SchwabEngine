@@ -385,6 +385,11 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
     from execution.strategies import StrategyEngine
     from services.broker_sync import BrokerSync
 
+    from core.ipc import write_control_signal
+    ctx.is_halted = False
+    (cfg.setdefault("trading", {}))["kill_switch"] = False
+    await asyncio.to_thread(write_control_signal, "RESUME", "Live mode startup: broker routing armed (Account ***4015)")
+
     auth, rest = await _bootstrap_auth(ctx, cfg, handles)
     ledger = build_ledger(cfg, live=True)
     ctx.ledgers["active"] = ledger
