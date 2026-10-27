@@ -286,6 +286,8 @@ Google Cloud Recommender suggests downsizing instance `schwab-trader` from `e2-s
 ### 1. Decoupled Asynchronous Macro Synthesis Topology
 To insulate the microsecond hot execution loop from network latency, cloud authentication overhead, and variable API response times, macroeconomic analysis is completely segregated into an asynchronous **Cold Plane Worker** (`core/cold_plane_worker.py`).
 
+Trader IPC signals (`HALT`, `RESUME`, `LIQUIDATE_ALL`) operate via `state/ipc_control.json`, strictly separated from macroeconomic prior payloads persisted to `state/macro_prior.json`.
+
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        COLD PLANE (Asynchronous)                       │
@@ -297,10 +299,10 @@ To insulate the microsecond hot execution loop from network latency, cloud authe
 │                                                                        │
 │                      │ Writes atomic temp file                         │
 │                      ▼                                                 │
-│       state/control_signal.json.tmp (fsync)                           │
+│       state/macro_prior.json.tmp (fsync)                              │
 │                      │                                                 │
 │                      ▼ os.replace                                      │
-│           state/control_signal.json ◄────────────────────────┐        │
+│           state/macro_prior.json ◄───────────────────────────┐        │
 └──────────────────────────────────────────────────────────────┼─────────┘
                                                                │ Read (Fault-Tolerant)
 ┌──────────────────────────────────────────────────────────────┼─────────┐
@@ -320,7 +322,7 @@ To insulate the microsecond hot execution loop from network latency, cloud authe
 ```
 
 ### 2. Schema Contract (`ControlSignalPayload`)
-The signal file `state/control_signal.json` adheres to a strict validated contract (`ControlSignalPayload`):
+The signal file `state/macro_prior.json` adheres to a strict validated contract (`ControlSignalPayload`):
 
 | Field | Type | Invariant / Validation Rule |
 | :--- | :--- | :--- |

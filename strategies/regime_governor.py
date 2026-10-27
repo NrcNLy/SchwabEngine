@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from core.cold_plane_worker import ControlSignalPayload, read_control_signal
-from core.paths import CONTROL_SIGNAL_PATH, TRADING_JOURNAL_DB_PATH
+from core.paths import MACRO_PRIOR_PATH, TRADING_JOURNAL_DB_PATH
 
 logger = logging.getLogger("regime_governor")
 
@@ -603,7 +603,7 @@ class AsymmetricHMMGovernor:
 
     def ingest_cold_plane_signal(
         self,
-        signal_path: Path = CONTROL_SIGNAL_PATH,
+        signal_path: Path = MACRO_PRIOR_PATH,
         max_age_seconds: float = 3600.0,
         blend_weight: float = 0.35,
         now_utc: Optional[datetime] = None,

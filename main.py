@@ -247,6 +247,7 @@ async def build_shadow(ctx: EngineContext, cfg: dict, settings: EngineSettings, 
     from execution.risk_manager import MetaGovernorHMM
     from execution.router import ExecutionRouter
     from indicators.microstructure import MicrostructureHub
+    from strategies.regime_governor import AsymmetricHMMGovernor
 
     auth, rest = await _bootstrap_auth(ctx, cfg, handles)
 
@@ -310,7 +311,9 @@ async def build_shadow(ctx: EngineContext, cfg: dict, settings: EngineSettings, 
         market_data="LIVE_SCHWAB_WEBSOCKET",
     )
 
-    rebalancer = ShadowRebalancer(sync, sink, hmm, load_strategy_targets(PROJECT_ROOT))
+    governor = AsymmetricHMMGovernor(initial_pi=cold.hmm_posterior_vector)
+    ctx.regime_governor = governor
+    rebalancer = ShadowRebalancer(sync, sink, hmm, load_strategy_targets(PROJECT_ROOT), governor=governor)
     last_logged: dict = {}
 
     def on_tick(sym: str, fields: dict) -> None:

@@ -1,10 +1,10 @@
 """
 core/cold_plane_worker.py
 =========================
-Workstream 1 (#124): Cold Plane Vertex AI Ingestion Pipeline & Signal Persistence.
+Workstream 1 (#124 / #130): Cold Plane Vertex AI Ingestion Pipeline & Signal Persistence.
 
 Decouples asynchronous LLM macroeconomic synthesis from the hot execution loop via
-atomic file-drop semantics to ``state/control_signal.json``:
+atomic file-drop semantics to ``state/macro_prior.json``:
 1. Validated schema contract: ``ControlSignalPayload``.
 2. Time-aware model tier router: ``select_cold_plane_model``.
 3. Atomic fsync-backed file-drop writer: ``write_control_signal_atomic``.
@@ -14,6 +14,7 @@ atomic file-drop semantics to ``state/control_signal.json``:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 from zoneinfo import ZoneInfo
 
-from core.paths import CONTROL_SIGNAL_PATH
+from core.paths import MACRO_PRIOR_PATH, MACRO_PRIOR_FILE
 
 logger = logging.getLogger("cold_plane_worker")
 EDT = ZoneInfo("America/New_York")
@@ -144,7 +145,7 @@ def select_cold_plane_model(now_et: Optional[datetime] = None) -> str:
 
 def write_control_signal_atomic(
     payload: ControlSignalPayload,
-    target_path: Path = CONTROL_SIGNAL_PATH,
+    target_path: Path = MACRO_PRIOR_PATH,
 ) -> Path:
     """
     Atomically write serialized ControlSignalPayload JSON to disk.
@@ -165,8 +166,11 @@ def write_control_signal_atomic(
     return target_path
 
 
+write_macro_prior_atomic = write_control_signal_atomic
+
+
 def read_control_signal(
-    target_path: Path = CONTROL_SIGNAL_PATH,
+    target_path: Path = MACRO_PRIOR_PATH,
     max_age_seconds: float = 3600.0,
     now_utc: Optional[datetime] = None,
 ) -> Optional[ControlSignalPayload]:
@@ -213,6 +217,9 @@ def read_control_signal(
         return None
 
 
+read_macro_prior = read_control_signal
+
+
 class ColdPlaneWorker:
     """
     Worker orchestrator for periodic macroeconomic and news synthesis.
@@ -222,7 +229,7 @@ class ColdPlaneWorker:
     def __init__(
         self,
         llm_provider: Optional[Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None,
-        signal_path: Path = CONTROL_SIGNAL_PATH,
+        signal_path: Path = MACRO_PRIOR_PATH,
     ) -> None:
         self.llm_provider = llm_provider
         self.signal_path = Path(signal_path)
@@ -291,3 +298,53 @@ class ColdPlaneWorker:
 
         write_control_signal_atomic(payload, self.signal_path)
         return payload
+
+
+async def run_cold_plane_cycle(
+    signal_path: Path = MACRO_PRIOR_PATH,
+    now_et: Optional[datetime] = None,
+) -> ControlSignalPayload:
+    """CLI and autonomous entrypoint for periodic cold plane macro synthesis."""
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    if now_et is None:
+        now_et = datetime.now(EDT)
+
+    context: Dict[str, Any] = {}
+
+    # Ingest SES snapshot if available
+    ses_file = Path("data/exports/latest_ses_snapshot.json")
+    if ses_file.exists():
+        try:
+            with open(ses_file, "r", encoding="utf-8") as f:
+                ses_data = json.load(f)
+                ses_score = float(ses_data.get("ses_score", 0.0))
+                context["nlp_sentiment_score"] = float(ses_score)
+        except Exception as exc:
+            logger.debug("Could not read SES snapshot: %s", exc)
+
+    worker = ColdPlaneWorker(signal_path=signal_path)
+    payload = await worker.execute_synthesis_cycle(context, now_et=now_et)
+    logger.info(
+        "ColdPlaneWorker: cycle complete -> model=%s, dominant=%s, w_sat=%.2f, cb_override=%s, path=%s",
+        payload.model_version,
+        payload.dominant_prior,
+        payload.satellite_target_weight,
+        payload.circuit_breaker_override,
+        signal_path,
+    )
+    return payload
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    )
+    asyncio.run(run_cold_plane_cycle())
+
+
+if __name__ == "__main__":
+    main()
+

@@ -1,0 +1,20 @@
+[Unit]
+Description=Schwab Cold Plane Macro Synthesis Worker (Vertex AI / Quantitative Prior)
+After=network.target
+
+[Service]
+Type=oneshot
+User=nicho
+Group=nicho
+WorkingDirectory=/home/nicho/schwab_engine
+EnvironmentFile=-/home/nicho/schwab_engine/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=ENGINE_STATE_DIR=/home/nicho/schwab_state
+
+Nice=5
+
+ExecStart=/home/nicho/schwab_engine/.venv/bin/python -m core.cold_plane_worker
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=schwab-coldplane

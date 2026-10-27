@@ -35,7 +35,9 @@ from data.multi_rate_sync import (
     DEFAULT_SATELLITE_SYMBOLS,
     MultiRateStateSynchronizer,
 )
+from core.paths import MACRO_PRIOR_PATH
 from execution.risk_manager import MetaGovernorHMM
+from strategies.regime_governor import AsymmetricHMMGovernor
 
 logger = logging.getLogger("shadow")
 
@@ -87,15 +89,37 @@ def load_strategy_targets(project_root: Path) -> Dict[str, Any]:
 
 
 class ShadowTelemetrySink:
-    """Thread-safe append-only JSONL telemetry sink. Streamer-thread and asyncio-safe."""
+    """
+    Thread-safe append-only JSONL telemetry sink with dynamic daily rotation (#130).
+    Streamer-thread and asyncio-safe. Automatically rolls the active JSONL file handle
+    when the date changes in US/Eastern time, rather than binding permanently to the
+    daemon boot timestamp.
+    """
 
-    def __init__(self, path: Path) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path_or_root: Path, dynamic_rotation: bool = True) -> None:
+        p = Path(path_or_root)
+        if p.suffix == ".jsonl":
+            self._explicit_path: Optional[Path] = p
+            self._project_root: Path = p.parent.parent if p.parent.name == "logs" else p.parent
+        else:
+            self._explicit_path = None
+            self._project_root = p
+        self.dynamic_rotation = dynamic_rotation
         self._lock = threading.Lock()
         self.records_written = 0
 
+    @property
+    def path(self) -> Path:
+        """Dynamically resolves the log file for the current ET trading date."""
+        if not self.dynamic_rotation and self._explicit_path is not None:
+            return self._explicit_path
+        if self._explicit_path is not None and not self._explicit_path.name.startswith("session_telemetry_"):
+            return self._explicit_path
+        return session_telemetry_path(self._project_root)
+
     def write(self, event: str, **payload: Any) -> None:
+        target_path = self.path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
         record: Dict[str, Any] = {
             "event": event,
             "timestamp_iso": datetime.now(ET).isoformat(timespec="milliseconds"),
@@ -105,7 +129,7 @@ class ShadowTelemetrySink:
         record.update(payload)
         line = json.dumps(record, default=str)
         with self._lock:
-            with open(self.path, "a", encoding="utf-8") as fh:
+            with open(target_path, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
             self.records_written += 1
 
@@ -127,10 +151,15 @@ class ShadowRebalancer:
         sink: ShadowTelemetrySink,
         hmm: MetaGovernorHMM,
         targets: Dict[str, Any],
+        governor: Optional[AsymmetricHMMGovernor] = None,
+        macro_prior_path: Optional[Path] = None,
     ) -> None:
         self.sync = sync
         self.sink = sink
         self.hmm = hmm
+        self.governor: AsymmetricHMMGovernor = governor if governor is not None else AsymmetricHMMGovernor()
+        self.macro_prior_path: Path = Path(macro_prior_path) if macro_prior_path is not None else MACRO_PRIOR_PATH
+        self._last_cold_signal_ts: Optional[str] = None
         self.regime_targets: Dict[str, Any] = targets["regime_targets"]
         self.routing_vector: Dict[str, float] = targets["routing_vector"]
         self.tau_band: float = float(targets.get("tau_band", 0.03))
@@ -188,15 +217,42 @@ class ShadowRebalancer:
         if self._cash is None:
             self._adopt_broker_book()
 
+        # Step 1: Ingest Cold Plane Macro Prior if available and fresh (#130)
+        cold_signal = None
+        try:
+            cold_signal = self.governor.ingest_cold_plane_signal(
+                signal_path=self.macro_prior_path,
+                max_age_seconds=3600.0,
+            )
+            if cold_signal is not None and cold_signal.timestamp_utc != self._last_cold_signal_ts:
+                self._last_cold_signal_ts = cold_signal.timestamp_utc
+                self.hmm.pi = list(self.governor.pi)
+                logger.info(
+                    "ShadowRebalancer: fresh cold plane signal ingested (model=%s dominant=%s w_sat=%.2f cb_override=%s)",
+                    cold_signal.model_version,
+                    cold_signal.dominant_prior,
+                    cold_signal.satellite_target_weight,
+                    cold_signal.circuit_breaker_override,
+                )
+        except Exception as exc:
+            logger.debug("ShadowRebalancer: cold plane ingestion error: %s", exc)
+
         macro_vec = self.sync.get_macro_feature_vector()
         pi = self.hmm.update(macro_vec)
-        dominant = self._regime_key(self.hmm.get_dominant_regime())
-        target_sat = self.hmm.calculate_target_satellite_weight(regime_targets=self.regime_targets)
-        band_cfg = (self.regime_targets.get(dominant) or {}).get("ntz_band")
-        if band_cfg and len(band_cfg) == 2:
-            lo, hi = float(band_cfg[0]), float(band_cfg[1])
+
+        # Step 2: Determine Dominant Regime, Target Weight, and Leland NTZ Band
+        if self.governor.tail_risk_override_active or (cold_signal and cold_signal.circuit_breaker_override):
+            dominant = "Shock"
+            target_sat = 0.0
+            lo, hi = 0.0, 0.0
         else:
-            lo, hi = max(0.0, target_sat - self.tau_band), target_sat + self.tau_band
+            dominant = self._regime_key(self.hmm.get_dominant_regime())
+            target_sat = self.hmm.calculate_target_satellite_weight(regime_targets=self.regime_targets)
+            band_cfg = (self.regime_targets.get(dominant) or {}).get("ntz_band")
+            if band_cfg and len(band_cfg) == 2:
+                lo, hi = float(band_cfg[0]), float(band_cfg[1])
+            else:
+                lo, hi = max(0.0, target_sat - self.tau_band), target_sat + self.tau_band
 
         state = self.sync.get_live_portfolio_state()
         nlv = float(state.net_liquidation_value)
@@ -218,6 +274,10 @@ class ShadowRebalancer:
             "cash": round(float(state.cash_buffer), 2),
             "credit_proxy": credit,
         }
+        if cold_signal is not None:
+            base["cold_plane_prior"] = cold_signal.dominant_prior
+            base["cold_plane_model"] = cold_signal.model_version
+            base["cold_plane_cb_override"] = cold_signal.circuit_breaker_override
 
         if missing or stale:
             rec = dict(base, decision="SKIP_NO_LIVE_QUOTES", missing=missing, stale=stale)

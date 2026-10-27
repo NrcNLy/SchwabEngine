@@ -1,0 +1,18 @@
+[Unit]
+Description=Timer for Schwab Cold Plane Macro Synthesis (09:15 EDT Pre-Market Gate & 30m Intraday Cadence)
+PartOf=schwab-trader.service
+
+[Timer]
+# 09:15:00 EDT Pre-Market Prior Gate
+OnCalendar=Mon..Fri *-*-* 09:15:00 America/New_York
+
+# 30-minute intraday cadence between 09:30 and 16:00 EDT
+OnCalendar=Mon..Fri *-*-* 09:30:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 10..15:00,30:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 16:00:00 America/New_York
+
+Persistent=true
+Unit=schwab-coldplane.service
+
+[Install]
+WantedBy=timers.target

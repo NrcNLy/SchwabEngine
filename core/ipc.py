@@ -2,7 +2,7 @@
 core/ipc.py
 ===========
 Inter-Process Communication (IPC) layer between schwab-trader and schwab-web:
-1. Atomic file control signaling (state/control_signal.json).
+1. Atomic file control signaling (state/ipc_control.json).
 2. Dynamic policy overrides (state/dynamic_policy.json).
 3. Local streaming relay (Unix domain socket / local IPC stream).
 """
@@ -19,7 +19,7 @@ import socket
 import tempfile
 from typing import Any, AsyncIterator, Dict, List, Optional, Set, Union
 
-from core.paths import CONTROL_SIGNAL_FILE, DYNAMIC_POLICY_FILE, TRADER_IPC_SOCKET
+from core.paths import IPC_CONTROL_FILE, DYNAMIC_POLICY_FILE, TRADER_IPC_SOCKET
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +57,10 @@ def write_control_signal(
     **extra: Any,
 ) -> Dict[str, Any]:
     """
-    Atomically writes state/control_signal.json to request HALT, RESUME, LIQUIDATE_ALL, or SET_AVE_MODE.
+    Atomically writes state/ipc_control.json to request HALT, RESUME, LIQUIDATE_ALL, or SET_AVE_MODE.
     Enforces monotonic sequence_id tracking and preserves unacknowledged LIQUIDATE_ALL.
     """
-    target_path = Path(file_path) if file_path is not None else CONTROL_SIGNAL_FILE
+    target_path = Path(file_path) if file_path is not None else IPC_CONTROL_FILE
     now_utc = datetime.now(timezone.utc).isoformat()
     if sequence_id is None:
         sequence_id = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -92,7 +92,7 @@ def write_control_signal(
 
 
 def read_control_signal(file_path: Optional[Path | str] = None) -> Optional[Dict[str, Any]]:
-    target = Path(file_path) if file_path is not None else CONTROL_SIGNAL_FILE
+    target = Path(file_path) if file_path is not None else IPC_CONTROL_FILE
     if not target.exists():
         return None
     for attempt in range(5):
@@ -115,7 +115,7 @@ def acknowledge_control_signal(
     current_signal: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Mark the current control signal as acknowledged by the trading daemon."""
-    target_path = Path(file_path) if file_path is not None else CONTROL_SIGNAL_FILE
+    target_path = Path(file_path) if file_path is not None else IPC_CONTROL_FILE
     sig = current_signal if current_signal is not None else read_control_signal(target_path)
     if sig is None or sig.get("acknowledged_by_trader"):
         return sig
