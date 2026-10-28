@@ -158,7 +158,16 @@ class _EngineBase:
             return "kill switch engaged"
         # Autonomous Recovery Safety Invariant: halt new entries across session
         if bool((self.cfg.get("recovery", {}) or {}).get("halt_new_entries", False)):
-            return "recovery protocol active: all new entries halted"
+            rec_sym = str((self.cfg.get("recovery", {}) or {}).get("symbol", "SOXL")).upper()
+            rec_pos = self.ledger.positions.get(rec_sym)
+            has_rec_pos = rec_pos is not None and getattr(rec_pos, "quantity", 0) > 0
+            rec_sup = getattr(self, "recovery", None)
+            is_rec_active = getattr(rec_sup, "is_active", True) if rec_sup is not None else True
+            exit_reason = getattr(rec_sup, "exit_reason", None) if rec_sup is not None else None
+
+            # Only halt entries if the recovery asset is actively held in portfolio and supervisor is active and not cleared
+            if has_rec_pos and is_rec_active and exit_reason not in ("CLEARED_BY_OPERATOR", "NO_POSITION_HELD"):
+                return "recovery protocol active: all new entries halted"
         if not self.ignore_session:
             t_phase = get_session_phase(now_et(), self.cfg)
             permitted, _, reason = is_entry_permitted(t_phase, self.cfg)
@@ -453,9 +462,9 @@ class LiveEngine(_EngineBase):
                         bid_price=float(fields.get("bid_price", px)),
                     )
 
-            if pos is not None:
-                # Dedicated autonomous recovery supervisor bypass hook
-                if getattr(pos, "recovery_locked", False) and hasattr(self, "recovery") and self.recovery is not None:
+            if hasattr(self, "recovery") and self.recovery is not None:
+                rec_sym = getattr(self.recovery, "symbol", None)
+                if rec_sym is None or sym == rec_sym:
                     self.recovery.on_tick(
                         symbol=sym,
                         price=float(px),
@@ -463,6 +472,10 @@ class LiveEngine(_EngineBase):
                         ask_price=float(fields.get("ask_price", px)),
                         volume=int(fields.get("total_volume", 0)),
                     )
+
+            if pos is not None:
+                # Dedicated autonomous recovery supervisor bypass hook
+                if getattr(pos, "recovery_locked", False) and hasattr(self, "recovery") and self.recovery is not None:
                     return
 
                 # MicrostructureSentinel virtual stop evaluation (#54)

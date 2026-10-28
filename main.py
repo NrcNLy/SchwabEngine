@@ -532,12 +532,20 @@ async def build_live(ctx: EngineContext, cfg: dict, settings: EngineSettings, lo
             if pos_soxl:
                 basis_val = float(pos_soxl.entry_price)
             supervisor = RecoverySupervisor(config=r_cfg, engine=engine, basis=basis_val)
-            supervisor.state = "PREOPEN_ARMED"
+            has_pos = pos_soxl is not None and getattr(pos_soxl, "quantity", 0) > 0
+            if has_pos:
+                if supervisor.state not in ("DONE", "DISARMED"):
+                    supervisor.state = "PREOPEN_ARMED"
+            else:
+                supervisor.state = "DONE"
+                supervisor.exit_latched = False
+                supervisor.exit_reason = "NO_POSITION_HELD"
+                supervisor.persist_state()
             supervisor.start(loop)
             engine.recovery = supervisor
             ctx.recovery_supervisor = supervisor
-            logger.info("Autonomous Recovery Supervisor wired for %s (basis=$%.2f, state=PREOPEN_ARMED).",
-                        rec_sym, basis_val)
+            logger.info("Autonomous Recovery Supervisor wired for %s (basis=$%.2f, state=%s).",
+                        rec_sym, basis_val, supervisor.state)
         except Exception as exc:
             logger.error("Failed to initialize RecoverySupervisor: %s", exc)
 

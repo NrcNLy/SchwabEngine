@@ -201,3 +201,85 @@ def test_f2_recovery_locked_hook_in_engine():
         assert len(om.calls) == 0
 
     asyncio.run(scenario())
+
+
+def test_recovery_s0_sampling_fallback_to_strategy_orb():
+    """Verify S0 samples from StrategyEngine ORB midpoint when streamer L1 ticks are absent."""
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        engine, ctx, ledger, om = make_test_engine(loop)
+        cfg = RecoveryConfig(floor=99.75, symbol="SOXL")
+
+        from types import SimpleNamespace
+        sym_state = SimpleNamespace(
+            orb_high=104.72,
+            orb_low=102.79,
+            orb_finalized=True,
+            bars=[],
+            last_price=103.50,
+        )
+        engine.strategy = SimpleNamespace(states={"SOXL": sym_state})
+
+        from execution.recovery_supervisor import RecoverySupervisor
+        supervisor = RecoverySupervisor(config=cfg, engine=engine, basis=110.42, rehydrate=False)
+
+        s0 = await supervisor.sample_s0()
+        assert s0 == 103.75  # round((104.72 + 102.79) / 2.0, 2)
+
+    asyncio.run(scenario())
+
+
+def test_recovery_s0_sampling_zero_position_does_not_latch_floor():
+    """Verify S0 failure when asset is not held (0 shares) does NOT latch RECOVERY_FLOOR or block entries."""
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        engine, ctx, ledger, om = make_test_engine(loop)
+        engine.cfg = {"recovery": {"enabled": True, "symbol": "SOXL", "halt_new_entries": True}}
+        cfg = RecoveryConfig(floor=99.75, symbol="SOXL")
+
+        # Zero positions held in ledger
+        assert len(ledger.positions) == 0
+
+        from execution.recovery_supervisor import RecoverySupervisor, RecoveryMachineState
+        supervisor = RecoverySupervisor(config=cfg, engine=engine, basis=110.42, rehydrate=False)
+        supervisor.state = RecoveryMachineState.SENTINEL_SHADOW
+        engine.recovery = supervisor
+
+        # Execute recalibration with no price data available
+        await supervisor._execute_recalibration(datetime.now(_EDT))
+
+        assert supervisor.state == RecoveryMachineState.DONE
+        assert supervisor.exit_latched is False
+        assert supervisor.exit_reason == "NO_POSITION_HELD"
+        assert supervisor.is_active is False
+
+        # Crucial check: engine does NOT halt new entries for other symbols
+        block_reason = engine.entry_block_reason("TQQQ")
+        assert block_reason is None, f"Expected None but got: {block_reason}"
+
+    asyncio.run(scenario())
+
+
+def test_entry_block_reason_permits_when_recovery_cleared_by_operator():
+    """Verify engine permits entry if supervisor exit_reason is CLEARED_BY_OPERATOR."""
+    loop = asyncio.new_event_loop()
+    try:
+        engine, ctx, ledger, om = make_test_engine(loop)
+        engine.cfg = {"recovery": {"enabled": True, "symbol": "SOXL", "halt_new_entries": True}}
+
+        # Even if a position exists
+        ledger.adopt_position(
+            symbol="SOXL", quantity=18, entry_price=110.42, current_price=103.60,
+            stop_price=99.75, target_price=None, regime="RECOVERY", simulated=False,
+        )
+
+        from execution.recovery_supervisor import RecoverySupervisor, RecoveryMachineState
+        supervisor = RecoverySupervisor(config=RecoveryConfig(symbol="SOXL"), engine=engine, rehydrate=False)
+        supervisor.state = RecoveryMachineState.DONE
+        supervisor.exit_reason = "CLEARED_BY_OPERATOR"
+        supervisor.exit_latched = False
+        engine.recovery = supervisor
+
+        assert engine.entry_block_reason("TQQQ") is None
+    finally:
+        loop.close()

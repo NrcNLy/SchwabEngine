@@ -259,10 +259,43 @@ class RecoverySupervisor:
         if rehydrate:
             self._load_persisted_state()
 
+    def has_open_position(self) -> bool:
+        """Returns True if the supervised symbol is actively held in the ledger."""
+        if self.engine is not None and getattr(self.engine, "ledger", None) is not None:
+            pos = self.engine.ledger.positions.get(self.symbol)
+            return pos is not None and getattr(pos, "quantity", 0) > 0
+        return False
+
+    @property
+    def is_active(self) -> bool:
+        """Indicates whether recovery protocol is actively managing an open position."""
+        if self.state in (RecoveryMachineState.DISARMED, RecoveryMachineState.DONE):
+            return False
+        if self.exit_reason in ("CLEARED_BY_OPERATOR", "NO_POSITION_HELD"):
+            return False
+        if self.engine is not None and getattr(self.engine, "ledger", None) is not None:
+            pos = self.engine.ledger.positions.get(self.symbol)
+            if pos is None or getattr(pos, "quantity", 0) <= 0:
+                return False
+        return True
+
     def _load_persisted_state(self) -> None:
         if RECOVERY_STATE_FILE.exists():
             try:
                 data = json.loads(RECOVERY_STATE_FILE.read_text(encoding="utf-8"))
+                if (
+                    data.get("is_active") is False
+                    or data.get("recovery_protocol_active") is False
+                    or data.get("exit_reason") in ("CLEARED_BY_OPERATOR", "NO_POSITION_HELD")
+                ):
+                    self.state = RecoveryMachineState.DONE
+                    self.exit_latched = False
+                    self.exit_reason = data.get("exit_reason") or "CLEARED_BY_OPERATOR"
+                    self.exit_order_id = data.get("exit_order_id")
+                    self.broker_stop_order_id = data.get("broker_stop_order_id")
+                    logger.info("[%s] Loaded persisted recovery state as INACTIVE/CLEARED (state=DONE, latched=False).", self.symbol)
+                    return
+
                 self.state = data.get("state", RecoveryMachineState.DISARMED)
                 self.exit_latched = data.get("exit_latched", False)
                 self.exit_reason = data.get("exit_reason")
@@ -285,6 +318,8 @@ class RecoverySupervisor:
         data = {
             "symbol": self.symbol,
             "state": self.state,
+            "is_active": self.is_active,
+            "recovery_protocol_active": self.is_active,
             "exit_latched": self.exit_latched,
             "exit_reason": self.exit_reason,
             "exit_order_id": self.exit_order_id,
@@ -304,6 +339,8 @@ class RecoverySupervisor:
         status = {
             "symbol": self.symbol,
             "state": self.state,
+            "is_active": self.is_active,
+            "recovery_protocol_active": self.is_active,
             "exit_latched": self.exit_latched,
             "exit_reason": self.exit_reason,
             "last_price": self.last_tick_price,
@@ -386,8 +423,14 @@ class RecoverySupervisor:
                 t_str = now_edt.strftime("%H:%M:%S")
 
                 if self.state == RecoveryMachineState.PREOPEN_ARMED and t_str >= "09:30:00":
-                    self.state = RecoveryMachineState.SENTINEL_SHADOW
-                    logger.info("[%s] 09:30:00 EDT Cash Open: Transitioned to SENTINEL_SHADOW.", self.symbol)
+                    if self.has_open_position():
+                        self.state = RecoveryMachineState.SENTINEL_SHADOW
+                        logger.info("[%s] 09:30:00 EDT Cash Open: Transitioned to SENTINEL_SHADOW.", self.symbol)
+                    else:
+                        self.state = RecoveryMachineState.DONE
+                        self.exit_latched = False
+                        self.exit_reason = "NO_POSITION_HELD"
+                        logger.info("[%s] 09:30:00 EDT Cash Open: No position held (0 shares). Transitioned to DONE.", self.symbol)
                     self.persist_state()
 
                 if self.state in (RecoveryMachineState.SENTINEL_SHADOW, RecoveryMachineState.SHADOW_FLOOR_ONLY):
@@ -440,6 +483,10 @@ class RecoverySupervisor:
 
         # Invariant Safety Guard: NEVER execute orders before 09:30:00 EDT
         if t_str < "09:30:00":
+            return
+
+        # If symbol is not held in portfolio, do not evaluate exit floors
+        if not self.has_open_position():
             return
 
         # 1. Microstructure Sentinel Floor Breach Check (#54)
@@ -528,25 +575,81 @@ class RecoverySupervisor:
             self.persist_state()
 
         logger.info("[%s] 09:45:00 EDT: Beginning dynamic bracket recalibration...", self.symbol)
+
+        has_pos = self.has_open_position()
         s0 = await self.sample_s0()
 
         if s0 is None:
-            logger.error("[%s] S0 reference sampling failed. Falling back to SHADOW_FLOOR_ONLY.", self.symbol)
-            self.state = RecoveryMachineState.SHADOW_FLOOR_ONLY
-            self.persist_state()
-            self._dispatch_ntfy(
-                title=f"Recovery [{self.symbol}]: S0 CORRUPTED",
-                message=f"Failed to sample 09:45 cash reference. Mode remains SHADOW with $99.75 floor safeguard.",
-                priority="urgent",
-                tags=["warning", "rotating_light"],
-            )
-            return
+            # If asset is NOT held in portfolio (0 shares), do NOT latch RECOVERY_FLOOR or halt entries
+            if not has_pos:
+                logger.info(
+                    "[%s] S0 sampling unavailable, but symbol is not held in portfolio (0 shares). "
+                    "Skipping RECOVERY_FLOOR latch and setting state=DONE.",
+                    self.symbol,
+                )
+                self.state = RecoveryMachineState.DONE
+                self.exit_latched = False
+                self.exit_reason = "NO_POSITION_HELD"
+                self.persist_state()
+                self._promote_config_live()
+                return
+
+            # Check if genuine margin/drawdown breach
+            is_breach = False
+            if self.engine is not None and hasattr(self.engine, "drawdown_tripped"):
+                try:
+                    is_breach = bool(self.engine.drawdown_tripped())
+                except Exception:
+                    is_breach = False
+
+            if is_breach:
+                logger.error("[%s] Genuine drawdown/margin breach detected. Falling back to SHADOW_FLOOR_ONLY.", self.symbol)
+                self.state = RecoveryMachineState.SHADOW_FLOOR_ONLY
+                self.exit_latched = True
+                self.exit_reason = "RECOVERY_FLOOR"
+                self.persist_state()
+                self._dispatch_ntfy(
+                    title=f"Recovery [{self.symbol}]: DRAWDOWN BREACH",
+                    message=f"Drawdown breach confirmed at 09:45 EDT. Mode remains SHADOW with ${self.cfg.floor:.2f} floor safeguard.",
+                    priority="urgent",
+                    tags=["warning", "rotating_light"],
+                )
+                return
+
+            # Transient quote miss without margin/drawdown breach: retry until s0_retry_until
+            t_str = now_edt.strftime("%H:%M:%S")
+            if t_str < self.cfg.s0_retry_until:
+                logger.warning(
+                    "[%s] Transient S0 quote miss without drawdown breach. Reverting to SENTINEL_SHADOW to retry until %s.",
+                    self.symbol, self.cfg.s0_retry_until,
+                )
+                self.state = RecoveryMachineState.SENTINEL_SHADOW
+                self.persist_state()
+                return
+            else:
+                logger.error("[%s] S0 reference sampling retry window expired. Falling back to SHADOW_FLOOR_ONLY.", self.symbol)
+                self.state = RecoveryMachineState.SHADOW_FLOOR_ONLY
+                self.exit_latched = True
+                self.exit_reason = "RECOVERY_FLOOR"
+                self.persist_state()
+                self._dispatch_ntfy(
+                    title=f"Recovery [{self.symbol}]: S0 CORRUPTED",
+                    message=f"Failed to sample 09:45 cash reference. Mode remains SHADOW with ${self.cfg.floor:.2f} floor safeguard.",
+                    priority="urgent",
+                    tags=["warning", "rotating_light"],
+                )
+                return
 
         try:
             bracket = compute_bracket(s0=s0, basis=self.basis, cfg=self.cfg)
             self.bracket = bracket
             self.gate.reference_price = s0
-            self.state = RecoveryMachineState.TRACKING_LIVE
+            if has_pos:
+                self.state = RecoveryMachineState.TRACKING_LIVE
+            else:
+                self.state = RecoveryMachineState.DONE
+                self.exit_latched = False
+                self.exit_reason = "NO_POSITION_HELD"
             self.persist_state()
 
             # Mutate strategy_config.json on disk and in memory
@@ -558,22 +661,32 @@ class RecoverySupervisor:
                 f"Mode: SHADOW -> LIVE"
             )
             logger.info("[%s] Dynamic Recalibration COMPLETE: %s", self.symbol, msg)
-            self._dispatch_ntfy(
-                title=f"SOXL Autonomous Recalibration: LIVE",
-                message=msg,
-                priority="high",
-                tags=["chart_with_upwards_trend", "rocket"],
-            )
+            if has_pos:
+                self._dispatch_ntfy(
+                    title=f"{self.symbol} Autonomous Recalibration: LIVE",
+                    message=msg,
+                    priority="high",
+                    tags=["chart_with_upwards_trend", "rocket"],
+                )
         except Exception as exc:
             logger.critical("[%s] Bracket computation failed: %s", self.symbol, exc)
-            self.state = RecoveryMachineState.SHADOW_FLOOR_ONLY
+            if has_pos:
+                self.state = RecoveryMachineState.SHADOW_FLOOR_ONLY
+                self.exit_latched = True
+                self.exit_reason = "RECOVERY_FLOOR"
+            else:
+                self.state = RecoveryMachineState.DONE
+                self.exit_latched = False
+                self.exit_reason = "NO_POSITION_HELD"
             self.persist_state()
 
     async def sample_s0(self) -> Optional[float]:
-        """Samples S0 median over 09:44:55-09:45:10 window using validated quotes with backoff."""
+        """Samples S0 median over 09:44:55-09:45:10 window using validated quotes with backoff,
+        falling back to StrategyEngine ORB/candles, REST quotes, or streamer L1 cache."""
         delays = [0.25, 0.5, 1.0, 2.0]
         samples: List[float] = []
 
+        # 1. Primary: Streamer ticks via QuoteGate
         for attempt in range(6):
             q = self.gate.latest_valid(max_age_s=15.0)
             if q is not None and q.mid > 0.0:
@@ -584,10 +697,83 @@ class RecoverySupervisor:
                         return round(s0, 2)
             await asyncio.sleep(delays[min(attempt, len(delays) - 1)])
 
-        # Fallback to last valid tick if available
-        q = self.gate.latest_valid(max_age_s=60.0)
+        # 1b. Fallback to last valid tick in QuoteGate up to 300s
+        q = self.gate.latest_valid(max_age_s=300.0)
         if q is not None and q.last > self.cfg.floor * 1.003:
             return round(q.last, 2)
+
+        # 2. Fallback to StrategyEngine ORB / minute bars / last price
+        if self.engine is not None and hasattr(self.engine, "strategy") and self.engine.strategy is not None:
+            strat = self.engine.strategy
+            sym_state = strat.states.get(self.symbol) if hasattr(strat, "states") else None
+            if sym_state is not None:
+                # 2a. ORB midpoint if finalized or tracking
+                orb_h = getattr(sym_state, "orb_high", 0.0) or getattr(sym_state, "orb_tracking_high", 0.0) or 0.0
+                orb_l = getattr(sym_state, "orb_low", 0.0) or getattr(sym_state, "orb_tracking_low", 0.0) or 0.0
+                if orb_h > 0.0 and orb_l > 0.0 and orb_l < float("inf"):
+                    orb_mid = (orb_h + orb_l) / 2.0
+                    if orb_mid > self.cfg.floor * 1.003:
+                        logger.info("[%s] S0 sampled from StrategyEngine ORB midpoint: $%.2f", self.symbol, orb_mid)
+                        return round(orb_mid, 2)
+
+                # 2b. Recent candle close
+                if getattr(sym_state, "bars", None) and len(sym_state.bars) > 0:
+                    bar_close = float(sym_state.bars[-1].close)
+                    if bar_close > self.cfg.floor * 1.003:
+                        logger.info("[%s] S0 sampled from StrategyEngine last bar close: $%.2f", self.symbol, bar_close)
+                        return round(bar_close, 2)
+
+                # 2c. Last price print on strategy state
+                last_px = float(getattr(sym_state, "last_price", 0.0) or 0.0)
+                if last_px > self.cfg.floor * 1.003:
+                    logger.info("[%s] S0 sampled from StrategyEngine last_price: $%.2f", self.symbol, last_px)
+                    return round(last_px, 2)
+
+        # 3. Fallback to REST Quote Client
+        rest_client = None
+        if self.engine is not None:
+            rest_client = getattr(getattr(self.engine, "ctx", None), "rest_client", None)
+            if rest_client is None:
+                om = getattr(self.engine, "om", None)
+                rest_client = getattr(om, "client", None) or getattr(om, "rest_client", None)
+
+        if rest_client is not None:
+            try:
+                quotes = None
+                if hasattr(rest_client, "get_quotes"):
+                    quotes = await asyncio.to_thread(rest_client.get_quotes, [self.symbol])
+                elif hasattr(rest_client, "get_quote"):
+                    quotes = await asyncio.to_thread(rest_client.get_quote, self.symbol)
+
+                if quotes:
+                    quote_entry = quotes.get(self.symbol, {})
+                    quote_data = quote_entry.get("quote", {}) if isinstance(quote_entry, dict) else {}
+                    px = (
+                        quote_data.get("lastPrice")
+                        or quote_data.get("closePrice")
+                        or (
+                            (quote_data.get("bidPrice", 0.0) + quote_data.get("askPrice", 0.0)) / 2.0
+                            if quote_data.get("bidPrice", 0.0) > 0 and quote_data.get("askPrice", 0.0) > 0
+                            else None
+                        )
+                    )
+                    if px and float(px) > self.cfg.floor * 1.003:
+                        logger.info("[%s] S0 sampled from REST quote client: $%.2f", self.symbol, float(px))
+                        return round(float(px), 2)
+            except Exception as exc:
+                logger.warning("[%s] REST quote fallback failed during S0 sampling: %s", self.symbol, exc)
+
+        # 4. Fallback to Streamer or Engine latest known mark
+        if self.engine is not None and hasattr(self.engine, "streamer") and self.engine.streamer is not None:
+            marks = getattr(self.engine.streamer, "_last_prices", {})
+            mark = marks.get(self.symbol)
+            if mark and float(mark) > self.cfg.floor * 1.003:
+                logger.info("[%s] S0 sampled from streamer mark cache: $%.2f", self.symbol, float(mark))
+                return round(float(mark), 2)
+
+        if self.last_tick_price and self.last_tick_price > self.cfg.floor * 1.003:
+            return round(self.last_tick_price, 2)
+
         return None
 
     def _promote_config_live(self) -> None:
@@ -664,8 +850,16 @@ class RecoverySupervisor:
         qty = self.cfg.expected_qty
         if self.engine is not None and getattr(self.engine, "ledger", None) is not None:
             pos = self.engine.ledger.positions.get(self.symbol)
-            if pos is not None:
-                qty = pos.quantity
+            if pos is None or getattr(pos, "quantity", 0) <= 0:
+                logger.info(
+                    "[%s] _trigger_exit invoked but symbol is not held in ledger (0 shares). Skipping exit submission.",
+                    self.symbol,
+                )
+                self.exit_latched = False
+                self.state = RecoveryMachineState.DONE
+                self.persist_state()
+                return
+            qty = pos.quantity
 
         # 3. Submit Order
         order_id = None
