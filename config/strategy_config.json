@@ -16,23 +16,22 @@
     "baseline_nlv": 4400.9
   },
   "target_weights": {
-    "core_target": 0.85,
-    "satellite_target": 0.15,
-    "cash_sweep_target": 0
+    "satellite_target": 0.75,
+    "cash_sweep_target": 0.25
   },
   "regime_satellite_targets": {
     "Goldilocks": {
-      "target": 0.25,
+      "target": 0.75,
       "ntz_band": [
-        0.21,
-        0.29
+        0.65,
+        0.8
       ]
     },
     "Uncertainty": {
-      "target": 0.1,
+      "target": 0.35,
       "ntz_band": [
-        0.08,
-        0.12
+        0.3,
+        0.4
       ]
     },
     "Shock": {
@@ -44,9 +43,9 @@
     }
   },
   "leland_ntz": {
-    "tau_band": 0.03,
-    "drift_upper_cutoff": 0.18,
-    "drift_lower_cutoff": 0.12,
+    "tau_band": 0.05,
+    "drift_upper_cutoff": 0.8,
+    "drift_lower_cutoff": 0.3,
     "friction_cost_rate": 0.0002
   },
   "circuit_breaker": {
@@ -54,7 +53,6 @@
     "drawdown_tier1_exposure": 0.5,
     "drawdown_tier2_stepout": 0.1,
     "recovery_hysteresis": 0.03,
-    "kappa_core": 0.5,
     "lambda_0": 0.03
   },
   "letf_drag_cutoffs": {
@@ -132,5 +130,18 @@
   "_source": "recovery_supervisor",
   "oauth": {
     "redirect_uri": "https://127.0.0.1"
-  }
+  },
+  "tactical_satellite_max_capacity": 0.75,
+  "bracket_floors": {
+    "min_stop_distance_pct": 0.01,
+    "min_tp1_pct": 0.012,
+    "min_tp2_pct": 0.025,
+    "breakeven_delay_pct": 0.008,
+    "min_position_size": 50.0
+  },
+  "min_stop_distance_pct": 0.01,
+  "min_tp1_pct": 0.012,
+  "min_tp2_pct": 0.025,
+  "breakeven_delay_pct": 0.008,
+  "min_position_size": 50.0
 }

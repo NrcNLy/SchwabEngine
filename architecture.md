@@ -57,6 +57,27 @@ SchwabEngine is an autonomous, quantitative day-trading system engineered for th
 
 ---
 
+## 3. Portfolio Partitioning & Sizing (Pure Tactical Model - #140)
+
+### 1. Decommissioning of Legacy Core Sleeve
+- **Removal of Static Core Allocation:** The legacy 65% Core sleeve (`SPY`, `QQQ`, `IWM`, `HYG`, `IEF`) is formally decommissioned. The engine maintains zero static index holdings.
+- **Dedicated Tactical Capital Allocation:** 100% of trading capacity is reallocated to high-conviction, intraday 3x leveraged equity ETF satellites (`SOXL`, `TQQQ`, `TNA`).
+
+### 2. Pure Tactical Intraday Capital Lifecycle
+- **100% Settled Cash Baseline at 09:30 EDT Open:**
+  - Account `***4015` opens every trading day with a 100% settled cash baseline ($4,400.90 baseline) and 0.00% equity exposure.
+  - Sizing algorithms strictly bind to cleared settled cash ($S(t)$) under live broker Net Liquidation Value (NLV), guaranteeing zero Good Faith Violations (GFV).
+- **0.00% Overnight Equity Exposure & SEC Rule 15c6-1 T+1 Compliance:**
+  - A mandatory 15:50:00 EDT terminal liquidation gate aggressively flattens 100% of open 3x leveraged satellites to settled cash via marketable limit and market sweeps.
+  - Zero equity inventory (0.00%) is carried overnight, fully eliminating LETF overnight volatility drag and compound drift while ensuring clean T+1 settlement under SEC Rule 15c6-1.
+- **Macro Regime Priors Governing Intraday Deployment Capacity:**
+  - Cold Plane Bayesian macro regime probabilities dictate aggregate intraday tactical deployment capacity:
+    * **Goldilocks Regime:** Up to 75% gross tactical deployment capacity ($W_{\text{sat}}^* \le 0.75$).
+    * **Uncertainty Regime:** Throttled to 35% gross deployment capacity ($W_{\text{sat}}^* \le 0.35$).
+    * **Macro Shock Regime:** 0.00% deployment capacity ($W_{\text{sat}}^* = 0.00$); trading engine is immediately locked out and all tactical exposures remain in 100% cash.
+
+---
+
 ## Production Cloud Topology & Migration Status (Task #119)
 
 ### 1. Topology Split (Current vs. Target)
@@ -286,6 +307,8 @@ Google Cloud Recommender suggests downsizing instance `schwab-trader` from `e2-s
 ### 1. Decoupled Asynchronous Macro Synthesis Topology
 To insulate the microsecond hot execution loop from network latency, cloud authentication overhead, and variable API response times, macroeconomic analysis is completely segregated into an asynchronous **Cold Plane Worker** (`core/cold_plane_worker.py`).
 
+Trader IPC signals (`HALT`, `RESUME`, `LIQUIDATE_ALL`) operate via `state/ipc_control.json`, strictly separated from macroeconomic prior payloads persisted to `state/macro_prior.json`.
+
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        COLD PLANE (Asynchronous)                       │
@@ -297,10 +320,10 @@ To insulate the microsecond hot execution loop from network latency, cloud authe
 │                                                                        │
 │                      │ Writes atomic temp file                         │
 │                      ▼                                                 │
-│       state/control_signal.json.tmp (fsync)                           │
+│       state/macro_prior.json.tmp (fsync)                              │
 │                      │                                                 │
 │                      ▼ os.replace                                      │
-│           state/control_signal.json ◄────────────────────────┐        │
+│           state/macro_prior.json ◄───────────────────────────┐        │
 └──────────────────────────────────────────────────────────────┼─────────┘
                                                                │ Read (Fault-Tolerant)
 ┌──────────────────────────────────────────────────────────────┼─────────┐
@@ -320,7 +343,7 @@ To insulate the microsecond hot execution loop from network latency, cloud authe
 ```
 
 ### 2. Schema Contract (`ControlSignalPayload`)
-The signal file `state/control_signal.json` adheres to a strict validated contract (`ControlSignalPayload`):
+The signal file `state/macro_prior.json` adheres to a strict validated contract (`ControlSignalPayload`):
 
 | Field | Type | Invariant / Validation Rule |
 | :--- | :--- | :--- |
@@ -411,7 +434,7 @@ Prior to cash equity market open at 09:30:00 EDT, `scripts/tools/check_preflight
   - Hardcoded `EOD_MANDATORY_LIQUIDATION` parity within `core/shadow.py` and `core/engine.py`.
   - When Eastern Time reaches $\ge \text{15:50:00 EDT}$, all 3x leveraged satellite holdings (`SOXL`, `TQQQ`, `TNA`) are 100% liquidated to settled cash via limit and market sweeps.
   - Zero 3x satellite inventory is carried overnight, enforcing strict compliance with SEC Rule 15c6-1 cash preservation and LETF volatility drag constraints.
-  - Core sleeve holdings (`SPY`, `QQQ`, `IWM`, `HYG`, `IEF`) are preserved across the close according to target capital allocations.
+  - Legacy Core sleeve is fully decommissioned; zero equity positions (0.00%) are held overnight, preserving 100% settled cash under SEC Rule 15c6-1 T+1 settlement.
 
 ### 3. Live Entrypoint Binding & Invariant 6 (#133–#136)
 - **Strategy Config Direct Binding:**
@@ -432,30 +455,6 @@ Prior to cash equity market open at 09:30:00 EDT, `scripts/tools/check_preflight
 | :--- | :--- | :--- |
 | **09:15:00 EDT** | **Cold Plane Macro Prior Gate** | `schwab-coldplane.timer` triggers `core.cold_plane_worker` (`gemini-4-argon`), evaluating FRED yields, credit spreads, and pre-market financial sentiment. Persists normalized posterior regime probabilities and hybrid credit spread $Z$-score to `macro_prior.json`. |
 | **09:25:00 EDT** | **Pre-Market Invariant & Token Gate** | `scripts/tools/check_preflight_invariants.py` executes all 6 invariants against $4,400.90 NLV. Enforces OAuth access token refresh (TTL $\ge 1,800\text{s}$), verifies zero stranded overnight satellites, confirms rate limiter headroom ($120\text{ RPM}$ burst / $3,500$ daily), and validates execution mode alignment. |
-| **09:30:00 EDT** | **Cash Equity Open Deployment** | Market opens. Headless trading engine routes live opening target allocation orders to Charles Schwab for Cash Account `***4015`: `~60–65%` Core Index sleeve (`SPY`, `QQQ`, `IWM`), `~22–25%` Tactical 3x Satellites (`SOXL`, `TQQQ`, `TNA` capped at $W_{\text{sat}}^* \le 0.35$), and `~15–18%` T+1 settled cash buffer ($0\text{ GFV}$). |
-| **09:30:30 – 15:49:30 EDT** | **Dynamic Hot-Loop Rebalancing** | 30-second rebalancing loop evaluates portfolio weights against the $\pm 4\%$ Leland No-Trade Zone band (`[0.21, 0.29]`). Rebalance orders are dispatched only on boundary breach. Blends Cold Plane priors every 30 minutes ($w = 0.35$) while continuously monitoring high-frequency intraday credit proxy (`HYG`/`IEF` ratio). |
-| **15:50:00 EDT** | **Mandatory EOD Satellite Liquidation** | Terminal flush gate fires. 100% of open 3x satellite positions (`SOXL`, `TQQQ`, `TNA`) are aggressively flattened to settled cash via market/marketable limit orders. Rebalancing disarms, leaving only Core assets and cash for overnight T+1 conservation. |
-
----
-
-
-## Repository Layout & Google Drive Sync (Task #120)
-
-### Root layout
-| Area | Contents |
-|---|---|
-| Core packages | `api/ config/ core/ execution/ indicators/ macro/ news/ portfolio/ reconciliation/ research/ services/ src/ strategies/ telemetry/ web/ workers/` |
-| Data & storage | `data/` (`exports/` generated datasets, `fixtures/` static test/replay inputs), `docs/` (`architecture/` holds the mathematical architecture and Argon plan), `logs/`, `state/` |
-| Tooling & tests | `scripts/` (`dev/`, `auth/`, `tools/`), `tests/` |
-| Root invariants | `architecture.md`, `research_context.md`, `main.py`, `server.py`, `governor.py`, `Dockerfile` (plus frontend/build config) |
-
-Path resolution is centralised in `core/paths.py` (`STRATEGY_CONFIG_FILE` -> `config/strategy_config.json`, `TELEMETRY_FIXTURE_FILE`, `EXPORTS_DIR`, `REMOTE_VM_STATE_DIR` -> `state/remote_vm_state/`). Do not hard-code root-relative asset paths.
-
-### Drive mirror (`scripts/sync_engine_drive.py`)
-One-way, authoritative **Local -> `G:\My Drive\Projects\SchwabEngine\`**. Mirrored: `docs/ state/ data/ config/ strategies/ indicators/`, `architecture.md`, `research_context.md`.
-
-- **Never mirrored:** `.git/ .venv/ node_modules/`, `logs/*.jsonl`, `*token*.json`, `*.vault.json`, `.env*`, `*~ *.tmp *.wal *.shm`.
-- **SQLite:** every `*.db` is snapshotted with the online backup API + `VACUUM` and published as `<name>_backup.db` (e.g. `state/trading_journal_backup.db`); live DB files are never raw-copied.
-- **Writes** go through a temp file + `os.replace`. Drive-side deletions only happen with an explicit `--prune`.
-- **Modes:** `--once` (single pass) or the daemon (15 s poll, 2 s debounce). Start/stop/status with `scripts/start_drive_sync.ps1 [-Stop|-Status]`; logs in `logs/drive_sync.log`.
-- **Engine hooks:** `main.py` `shadow_cycle` triggers a pass every 10 minutes and the shutdown handler (EOD digest) runs a final pass via `core/shadow.py::run_drive_sync`. Hosts without a Drive mount (the Linux VM) skip silently.
+| **09:30:00 EDT** | **Pure Tactical Intraday Open** | Market opens with 100% settled cash baseline ($4,400.90 baseline). Headless trading engine evaluates pure tactical 3x satellite entries (`SOXL`, `TQQQ`, `TNA`) up to macro regime capacity (Goldilocks: up to 75%; Uncertainty: 35%; Shock: 0%) with 0% Core allocation ($0\text{ GFV}$). |
+| **09:30:30 – 15:49:30 EDT** | **Dynamic Hot-Loop Rebalancing** | 30-second rebalancing loop evaluates portfolio weights against Leland No-Trade Zone bands governed by macro regime capacity. Blends Cold Plane priors every 30 minutes ($w = 0.35$) while continuously monitoring high-frequency intraday credit proxy (`HYG`/`IEF` ratio). |
+| **15:50:00 EDT** | **Mandatory EOD Tactical Liquidation** | Terminal flush gate fires. 100% of open 3x satellite positions (`SOXL`, `TQQQ`, `TNA`) are aggressively flattened to settled cash via market/marketable limit sweeps. Guarantees 0.00% overnight equity exposure and 100% settled cash under SEC Rule 15c6-1 T+1 settlement. |

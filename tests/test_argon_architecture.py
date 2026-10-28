@@ -560,20 +560,23 @@ def test_multi_rate_sync_hot_warm_cold_planes_and_hot_boot():
 
 def test_argon_240_strategy_config_sync():
     """
-    Verifies that strategy_config.json is synced with the calibrated_config_payload
-    from data/schwab_engine_argon_dossier.json (#98).
+    Verifies that strategy_config.json is synced with Pure Tactical Model (#140).
     """
     import json
     from pathlib import Path
 
     cfg = json.loads(Path("config/strategy_config.json").read_text(encoding="utf-8"))
     assert cfg["system_metadata"]["config_version"] == "2.4.0-argon"
-    assert cfg["target_weights"]["core_target"] == 0.85
-    assert cfg["target_weights"]["satellite_target"] == 0.15
-    assert cfg["leland_ntz"]["tau_band"] == 0.03
-    assert cfg["leland_ntz"]["drift_lower_cutoff"] == 0.12
-    assert cfg["leland_ntz"]["drift_upper_cutoff"] == 0.18
-    assert cfg["circuit_breaker"]["kappa_core"] == 0.5
+    assert "core_target" not in cfg["target_weights"]
+    assert cfg["target_weights"]["satellite_target"] == 0.75
+    assert cfg["tactical_satellite_max_capacity"] == 0.75
+    assert cfg["leland_ntz"]["tau_band"] == 0.05
+    assert cfg["leland_ntz"]["drift_lower_cutoff"] == 0.30
+    assert cfg["leland_ntz"]["drift_upper_cutoff"] == 0.80
+    assert cfg["bracket_floors"]["min_stop_distance_pct"] == 0.010
+    assert cfg["bracket_floors"]["min_tp1_pct"] == 0.012
+    assert cfg["bracket_floors"]["min_tp2_pct"] == 0.025
+    assert cfg["bracket_floors"]["breakeven_delay_pct"] == 0.0080
     assert cfg["circuit_breaker"]["lambda_0"] == 0.03
     assert cfg["letf_drag_cutoffs"]["volatility_gate_trigger"] == 0.15
     assert cfg["letf_drag_cutoffs"]["rolling_vol_window_bars"] == 32

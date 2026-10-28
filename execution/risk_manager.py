@@ -52,12 +52,12 @@ DEFAULT_CORE_PRICES: Dict[str, float] = {
 
 DEFAULT_REGIME_SATELLITE_TARGETS: Dict[str, Dict[str, Any]] = {
     "Goldilocks": {
-        "target": 0.25,
-        "ntz_band": [0.21, 0.29],
+        "target": 0.75,
+        "ntz_band": [0.65, 0.80],
     },
     "Uncertainty": {
-        "target": 0.10,
-        "ntz_band": [0.08, 0.12],
+        "target": 0.35,
+        "ntz_band": [0.30, 0.40],
     },
     "Shock": {
         "target": 0.00,
@@ -271,31 +271,34 @@ class MetaGovernorHMM:
         w_base: Optional[float] = None,
         w_c: Optional[float] = None,
         drawdown_damper: float = 1.0,
-        w_max_a: float = 0.35,
-        w_goldilocks: float = 0.25,
-        w_uncertainty: float = 0.10,
+        w_max_a: float = 0.75,
+        w_goldilocks: Optional[float] = None,
+        w_uncertainty: Optional[float] = None,
         w_shock: float = 0.00,
         regime_targets: Optional[Dict[str, Any]] = None,
     ) -> float:
         """
-        Regime-Dynamic Satellite Target Weight (#111):
-        W_sat*(t) = (pi_Goldilocks * 0.25) + (pi_Uncertainty * 0.10) + (pi_Shock * 0.00)
+        Regime-Dynamic Satellite Target Weight (#111, #140):
+        W_sat*(t) = (pi_Goldilocks * 0.75) + (pi_Uncertainty * 0.35) + (pi_Shock * 0.00)
         Under Macro Shock (pi_shock >= 0.60 or dominant regime == 'Macro Shock'), overrides W_sat*(t) = 0.0.
         """
         if self.pi_shock >= 0.60 or self.get_dominant_regime() == "Macro Shock":
             return 0.0
 
+        target_goldilocks = w_goldilocks if w_goldilocks is not None else (w_base if w_base is not None else 0.75)
+        target_uncertainty = w_uncertainty if w_uncertainty is not None else 0.35
+
         if regime_targets:
-            wg = regime_targets.get("Goldilocks", w_goldilocks)
-            w_goldilocks = float(wg.get("target", wg) if isinstance(wg, dict) else wg)
-            wu = regime_targets.get("Uncertainty", w_uncertainty)
-            w_uncertainty = float(wu.get("target", wu) if isinstance(wu, dict) else wu)
+            wg = regime_targets.get("Goldilocks", target_goldilocks)
+            target_goldilocks = float(wg.get("target", wg) if isinstance(wg, dict) else wg)
+            wu = regime_targets.get("Uncertainty", target_uncertainty)
+            target_uncertainty = float(wu.get("target", wu) if isinstance(wu, dict) else wu)
             ws = regime_targets.get("Shock", w_shock)
             w_shock = float(ws.get("target", ws) if isinstance(ws, dict) else ws)
 
         raw_target = (
-            self.pi_goldilocks * w_goldilocks
-            + self.pi_uncertainty * w_uncertainty
+            self.pi_goldilocks * target_goldilocks
+            + self.pi_uncertainty * target_uncertainty
             + self.pi_shock * w_shock
         ) * drawdown_damper
         return round(min(w_max_a, max(0.0, raw_target)), 4)
@@ -305,19 +308,19 @@ class MetaGovernorHMM:
         w_sat_target: Optional[float] = None,
     ) -> Tuple[float, float, float]:
         """
-        Dynamically compute Leland NTZ lower and upper bounds around W_sat*(t) (#111):
-        tau_band = 0.04 if pi_Goldilocks > 0.70 else 0.02
+        Dynamically compute Leland NTZ lower and upper bounds around W_sat*(t) (#111, #140):
+        tau_band = 0.05 if pi_Goldilocks > 0.70 else 0.03
         lower_bound = max(0.0, W_sat* - tau_band)
-        upper_bound = min(0.35, W_sat* + tau_band)
+        upper_bound = min(0.85, W_sat* + tau_band)
         Returns (tau_band, lower_bound, upper_bound).
         """
         if w_sat_target is None:
             w_sat_target = self.calculate_target_satellite_weight()
         if w_sat_target <= 0.0 or self.pi_shock >= 0.60 or self.get_dominant_regime() == "Macro Shock":
             return 0.0, 0.0, 0.0
-        tau_band = 0.04 if self.pi_goldilocks > 0.70 else 0.02
+        tau_band = 0.05 if self.pi_goldilocks > 0.70 else 0.03
         lower_bound = round(max(0.0, w_sat_target - tau_band), 4)
-        upper_bound = round(min(0.35, w_sat_target + tau_band), 4)
+        upper_bound = round(min(0.85, w_sat_target + tau_band), 4)
         return tau_band, lower_bound, upper_bound
 
 
@@ -392,11 +395,11 @@ class DualSleeveRouter:
             pi_g, pi_u, pi_s = float(pi[0]), float(pi[1]), float(pi[2])
             if pi_s >= 0.60:
                 return 0.0
-            raw = (pi_g * 0.25) + (pi_u * 0.10) + (pi_s * 0.00)
-            return round(min(0.35, max(0.0, raw)), 4)
+            raw = (pi_g * 0.75) + (pi_u * 0.35) + (pi_s * 0.00)
+            return round(min(0.75, max(0.0, raw)), 4)
         if active_hmm is not None:
             return active_hmm.calculate_target_satellite_weight(regime_targets=self.regime_targets)
-        return 0.25
+        return 0.75
 
     def compute_dynamic_leland_bounds(
         self,
@@ -405,10 +408,10 @@ class DualSleeveRouter:
         tau_band: Optional[float] = None,
     ) -> Tuple[float, float, float]:
         """
-        Dynamically compute Leland NTZ lower and upper bounds around W_sat*(t) (#111):
-        tau_band = 0.04 if pi_Goldilocks > 0.70 else 0.02
+        Dynamically compute Leland NTZ lower and upper bounds around W_sat*(t) (#111, #140):
+        tau_band = 0.05 if pi_Goldilocks > 0.70 else 0.03
         lower_bound = max(0.0, W_sat* - tau_band)
-        upper_bound = min(0.35, W_sat* + tau_band)
+        upper_bound = min(0.85, W_sat* + tau_band)
         Returns (tau_band, lower_bound, upper_bound).
         """
         active_hmm = hmm or self.hmm
@@ -429,12 +432,12 @@ class DualSleeveRouter:
         elif self.tau_band is not None:
             tau = float(self.tau_band)
         elif active_hmm is not None:
-            tau = 0.04 if active_hmm.pi_goldilocks > 0.70 else 0.02
+            tau = 0.05 if active_hmm.pi_goldilocks > 0.70 else 0.03
         else:
-            tau = 0.02
+            tau = 0.03
 
         lower_bound = round(max(0.0, w_sat - tau), 4)
-        upper_bound = round(min(0.35, w_sat + tau), 4)
+        upper_bound = round(min(0.85, w_sat + tau), 4)
         return tau, lower_bound, upper_bound
 
     compute_leland_bounds = compute_dynamic_leland_bounds
@@ -990,9 +993,13 @@ class RiskEngine:
         entry_price: float,
         s0_reference: Optional[float] = None,
         trade_store: Optional[Any] = None,
+        min_stop_distance_pct: float = 0.010,
+        min_tp1_pct: float = 0.012,
+        min_tp2_pct: float = 0.025,
+        breakeven_delay_pct: float = 0.0080,
     ) -> Any:
         """
-        Instantiates MultiTrancheBracket upon confirmed breakout entry (#62).
+        Instantiates MultiTrancheBracket upon confirmed breakout entry (#62, #140).
         Records initial state to active positions and trade_store if available.
         """
         from execution.bracket_manager import MultiTrancheBracket
@@ -1001,6 +1008,10 @@ class RiskEngine:
             total_shares=total_shares,
             entry_price=entry_price,
             s0_reference=s0_reference,
+            min_stop_distance_pct=min_stop_distance_pct,
+            min_tp1_pct=min_tp1_pct,
+            min_tp2_pct=min_tp2_pct,
+            breakeven_delay_pct=breakeven_delay_pct,
         )
         sym = symbol.upper()
         self.brackets[sym] = bracket
@@ -2014,7 +2025,7 @@ class RiskEngine:
         k_stop: float = 2.0,
         dt_days: Optional[float] = None,
         intraday_fraction: float = 15.0 / 390.0,
-        min_stop_distance_pct: float = 0.005,
+        min_stop_distance_pct: float = 0.010,
     ) -> float:
         """
         Calculates the volatility buffer distance for a trailing stop:
@@ -2022,7 +2033,7 @@ class RiskEngine:
             where time_factor = math.sqrt(intraday_fraction / 252.0)
 
         If yz_vol is 0 or uninitialized, falls back to a 2% default floor to avoid zero distance.
-        Maintains a mathematical floor (min_stop_distance_pct = 0.005 or 0.5%) so low-volatility
+        Maintains a mathematical floor (min_stop_distance_pct = 0.010 or 1.0% #140) so low-volatility
         compression cannot collapse the stop distance into the bid-ask spread.
         """
         if high_water_mark <= 0:
@@ -2041,7 +2052,7 @@ class RiskEngine:
         time_factor = math.sqrt(max(fraction, 1e-8) / 252.0)
         distance = high_water_mark * (float(k_stop) * vol * time_factor)
         floor_distance = high_water_mark * float(min_stop_distance_pct)
-        return max(distance, floor_distance, 0.01)  # minimum 0.5% buffer, bounded at 1 tick ($0.01)
+        return max(distance, floor_distance, 0.01)  # minimum 1.0% buffer, bounded at 1 tick ($0.01)
 
     def evaluate_trailing_stop(
         self,
@@ -2052,7 +2063,7 @@ class RiskEngine:
         dt_days: Optional[float] = None,
         intraday_fraction: float = 15.0 / 390.0,
         hurst_exponent: Optional[float] = None,
-        min_stop_distance_pct: float = 0.005,
+        min_stop_distance_pct: float = 0.010,
     ) -> tuple[float, bool]:
         """
         Calculates the stop distance and updates the position's monotonic stop ratchet

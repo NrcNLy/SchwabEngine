@@ -381,3 +381,89 @@ def test_risk_engine_bracket_integration(tmp_path):
     trades = store.fetch_trades_today()
     assert trades[0]["tranche_1_filled"] == 1
     assert trades[0]["breakeven_latched"] == 1
+
+
+def test_minimum_bracket_floors():
+    """
+    Test Minimum Bracket Floors Enforcement on 3x Leveraged ETFs (#140):
+    - Minimum stop distance floor: 1.0% (min_stop_distance_pct = 0.010).
+    - Minimum Take-Profit 1 floor: 1.2% (min_tp1_pct = 0.012).
+    - Runner Take-Profit 2 floor: 2.5% (min_tp2_pct = 0.025).
+    """
+    entry_price = 100.00
+    # Attempt sub-threshold brackets: initial_stop_pct = 0.005 (0.5%), custom tranches at 0.5% and 1.0%
+    sub_tranches = {
+        1: {"name": "Scale-Out Bank", "pct_shares": 0.35, "shares": 35, "target_pct": 0.005, "target_price": 100.50, "filled": False},
+        2: {"name": "Core Target", "pct_shares": 0.35, "shares": 35, "target_pct": 0.010, "target_price": 101.00, "filled": False},
+        3: {"name": "Runner", "pct_shares": 0.30, "shares": 30, "target_pct": None, "target_price": None, "filled": False},
+    }
+
+    bracket = MultiTrancheBracket(
+        symbol="SOXL",
+        total_shares=100,
+        entry_price=entry_price,
+        initial_stop_pct=0.005,  # Sub-floor 0.5%
+        min_stop_distance_pct=0.010,  # Floor 1.0%
+        min_tp1_pct=0.012,  # Floor 1.2%
+        min_tp2_pct=0.025,  # Floor 2.5%
+        tranches=sub_tranches,
+    )
+
+    # Stop price must be floored at Entry - 1.0% = $99.00
+    assert bracket.initial_stop_price <= 99.00
+    assert (entry_price - bracket.initial_stop_price) / entry_price >= 0.010
+
+    # TP1 target price must be floored at Entry + 1.2% = $101.20
+    assert bracket.tranches[1]["target_price"] >= 101.20
+
+    # TP2 target price must be floored at Entry + 2.5% = $102.50
+    assert bracket.tranches[2]["target_price"] >= 102.50
+
+
+def test_delayed_breakeven_ratchet():
+    """
+    Test Delayed Breakeven Ratchet (+0.80% gain threshold #140):
+    - Trailing stop only moves to breakeven after unrealized gain exceeds +0.80%.
+    - If price excursion is only +0.50%, stop remains at initial stop and does NOT ratchet to breakeven.
+    - When price excursion crosses +0.80% (e.g. +1.00%), stop is ratcheted to breakeven ($100.02).
+    """
+    entry_price = 100.00
+    # Custom tranches with TP1 at +0.50%
+    sub_tranches = {
+        1: {"name": "Scale-Out Bank", "pct_shares": 0.35, "shares": 35, "target_pct": 0.012, "target_price": 100.50, "filled": False},
+        2: {"name": "Core Target", "pct_shares": 0.35, "shares": 35, "target_pct": 0.025, "target_price": 102.50, "filled": False},
+        3: {"name": "Runner", "pct_shares": 0.30, "shares": 30, "target_pct": None, "target_price": None, "filled": False},
+    }
+
+    bracket = MultiTrancheBracket(
+        symbol="SOXL",
+        total_shares=100,
+        entry_price=entry_price,
+        initial_stop_pct=0.015,  # $98.50
+        min_tp1_pct=0.005,  # Allow test TP1 at 100.50 (+0.50%)
+        breakeven_delay_pct=0.0080,  # +0.80%
+        tranches=sub_tranches,
+    )
+
+    # 1. Price advances to $100.50 (+0.50% gain < +0.80% threshold)
+    t1 = datetime(2026, 10, 15, 10, 5, 0, tzinfo=_EDT)
+    actions = bracket.update_state(100.50, t1)
+
+    # Tranche 1 filled, but breakeven ratchet is delayed because gain (+0.50%) < +0.80%
+    assert bracket.tranche_1_filled is True
+    assert bracket.breakeven_latched is False
+    assert bracket.current_stop_price == 98.50  # Unchanged from initial stop
+    # Verify no RATCHET_BREAKEVEN action was emitted
+    ratchet_actions = [a for a in actions if a.reason == "RATCHET_BREAKEVEN"]
+    assert len(ratchet_actions) == 0
+
+    # 2. Price advances to $100.90 (+0.90% gain > +0.80% threshold)
+    t2 = datetime(2026, 10, 15, 10, 10, 0, tzinfo=_EDT)
+    actions_2 = bracket.update_state(100.90, t2)
+
+    # Delayed breakeven threshold crossed: stop ratchets to breakeven + $0.02
+    assert bracket.breakeven_latched is True
+    assert bracket.current_stop_price == 100.02
+    ratchet_actions_2 = [a for a in actions_2 if a.reason == "RATCHET_BREAKEVEN"]
+    assert len(ratchet_actions_2) == 1
+    assert ratchet_actions_2[0].stop_price == 100.02

@@ -73,11 +73,14 @@ class EngineSettings:
         )
 
 
-def size_entry(signal_qty: int, entry_price: Decimal, bp: BuyingPowerBreakdown) -> int:
-    """Shares = min(strategy size, floor(max_order_notional / price)); never negative."""
+def size_entry(signal_qty: int, entry_price: Decimal, bp: BuyingPowerBreakdown, max_notional_cap: Optional[Decimal] = None) -> int:
+    """Shares = min(strategy size, floor(effective_notional / price)); never negative."""
     if entry_price <= 0 or signal_qty < 1:
         return 0
-    ceiling = int(math.floor(bp.max_order_notional / entry_price))
+    notional = bp.max_order_notional
+    if max_notional_cap is not None:
+        notional = min(notional, max_notional_cap)
+    ceiling = int(math.floor(notional / entry_price))
     return max(min(int(signal_qty), ceiling), 0)
 
 
@@ -140,6 +143,45 @@ class _EngineBase:
         self._in_flight: Set[str] = set()
         self._exiting: Set[str] = set()
         self._last_flatten_attempt = 0.0
+
+    def _get_tactical_capacity(self, regime: str) -> float:
+        """
+        Calculates aggregate intraday tactical deployment capacity governed by macro regime priors (#140):
+        - Goldilocks / Regime A: up to 0.75 (75% gross deployment)
+        - Uncertainty / Regime B: up to 0.35 (35% gross deployment)
+        - Macro Shock / Shock / Regime C: 0.00 (0% gross deployment)
+        """
+        r = str(regime).upper()
+        rst = self.cfg.get("regime_satellite_targets", {})
+        if r in ("GOLDILOCKS", "A", "REGIME_A") and "Goldilocks" in rst:
+            return float(rst["Goldilocks"].get("target", 0.75))
+        if r in ("UNCERTAINTY", "B", "REGIME_B") and "Uncertainty" in rst:
+            return float(rst["Uncertainty"].get("target", 0.35))
+        if r in ("SHOCK", "MACRO SHOCK", "C", "REGIME_C") or (r in rst and "Shock" in r):
+            return 0.0
+
+        if r in ("GOLDILOCKS", "A", "REGIME_A"):
+            return 0.75
+        if r in ("UNCERTAINTY", "B", "REGIME_B"):
+            return 0.35
+        if r in ("SHOCK", "MACRO SHOCK", "C", "REGIME_C"):
+            return 0.0
+        return float(self.cfg.get("tactical_satellite_max_capacity", 0.75))
+
+    def calculate_remaining_tactical_budget(self, regime: str) -> Tuple[Decimal, Decimal, Decimal]:
+        """
+        Calculates (remaining_cash_budget, total_tactical_budget, current_open_satellite_notional)
+        preventing concurrent orders from independently sizing against total account NLV (#140).
+        """
+        capacity = Decimal(str(self._get_tactical_capacity(regime)))
+        settled_cash = self.ledger.settled_cash
+        total_tactical_budget = q(settled_cash * capacity)
+
+        # Current open satellite positions + committed locked cash from working/in-flight orders
+        open_notional = q(sum((p.notional for p in self.ledger.get_positions()), ZERO))
+        current_open_satellite_notional = q(open_notional + self.ledger.locked_cash)
+        remaining_cash_budget = max(ZERO, q(total_tactical_budget - current_open_satellite_notional))
+        return remaining_cash_budget, total_tactical_budget, current_open_satellite_notional
 
     def on_book(self, snap: Any) -> None:
         """Called from the streamer thread with Level 2 order book snapshot."""
@@ -673,14 +715,29 @@ class LiveEngine(_EngineBase):
                 logger.info("[%s] Signal blocked by microstructure gate: %s (%s)", sym, dec.code, dec.reason)
                 return False
 
+        # --- Pure Tactical LETF Sizing & Concurrent Sizing Collision Prevention (#140) ---
+        regime_code = getattr(sig.regime, "value", str(sig.regime)) if hasattr(sig, "regime") else "A"
+        remaining_budget, total_budget, open_notional = self.calculate_remaining_tactical_budget(regime_code)
+
+        min_position_size = Decimal(str(self.cfg.get("min_position_size", 50.0)))
+        entry = Decimal(str(sig.entry_price))
+        effective_min_size = max(min_position_size, entry)
+
+        if remaining_budget < effective_min_size:
+            logger.warning(
+                "[%s] Tactical budget exhausted: remaining budget ($%s) < min position size ($%s) "
+                "(total budget $%s, open satellite notional $%s). Rejecting entry.",
+                sym, remaining_budget, effective_min_size, total_budget, open_notional
+            )
+            return False
+
         self._in_flight.add(sym)
         try:
             posterior = self.ctx.risk_manager.posterior_win_rate() if self.ctx.risk_manager else None
-            bp = ledger_buying_power(self.ctx, "active", regime=sig.regime.value, posterior=posterior)
+            bp = ledger_buying_power(self.ctx, "active", regime=regime_code, posterior=posterior)
             if bp is None:
                 return False
-            entry = Decimal(str(sig.entry_price))
-            qty = size_entry(int(sig.quantity), entry, bp)
+            qty = size_entry(int(sig.quantity), entry, bp, max_notional_cap=remaining_budget)
             # Apply temporal gate sizing multiplier (e.g. 50% during POWER_HOUR)
             if not self.ignore_session:
                 t_phase = get_session_phase(now_et(), self.cfg)
@@ -1131,6 +1188,18 @@ class SimEngine(_EngineBase):
             logger.debug("[%s] Sim entry blocked: %s", sym, reason)
             return
 
+        # --- Pure Tactical LETF Sizing & Concurrent Sizing Collision Prevention (#140) ---
+        remaining_budget, total_budget, open_notional = self.calculate_remaining_tactical_budget(code)
+        min_position_size = Decimal(str(self.cfg.get("min_position_size", 50.0)))
+        effective_min_size = max(min_position_size, price)
+
+        if remaining_budget < effective_min_size:
+            logger.info(
+                "[%s] Sim tactical budget exhausted: remaining budget ($%s) < min position size ($%s). Rejecting entry.",
+                sym, remaining_budget, effective_min_size
+            )
+            return
+
         self._in_flight.add(sym)
         try:
             risk = self.ctx.risk_manager
@@ -1138,9 +1207,10 @@ class SimEngine(_EngineBase):
             bp = ledger_buying_power(self.ctx, "sandbox", regime=code, posterior=posterior)
             if bp is None:
                 return
+            effective_notional = min(bp.max_order_notional, remaining_budget)
             shares = risk.determine_position_size(
                 sym, float(event.atr), float(self.ledger.nlv),
-                price=float(price), max_notional=float(bp.max_order_notional),
+                price=float(price), max_notional=float(effective_notional),
             )
             if not self.ignore_session:
                 t_phase = get_session_phase(now_et(), self.cfg)

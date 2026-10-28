@@ -48,8 +48,8 @@ SHADOW_UNIVERSE: Tuple[str, ...] = ("SPY", "QQQ", "IWM", "HYG", "IEF", "SOXL", "
 
 DEFAULT_ROUTING_VECTOR: Dict[str, float] = {"SPY": 0.35, "QQQ": 0.25, "IWM": 0.10, "HYG": 0.15, "IEF": 0.15}
 DEFAULT_REGIME_TARGETS: Dict[str, Dict[str, Any]] = {
-    "Goldilocks": {"target": 0.25, "ntz_band": [0.21, 0.29]},
-    "Uncertainty": {"target": 0.10, "ntz_band": [0.08, 0.12]},
+    "Goldilocks": {"target": 0.75, "ntz_band": [0.65, 0.80]},
+    "Uncertainty": {"target": 0.35, "ntz_band": [0.30, 0.40]},
     "Shock": {"target": 0.0, "ntz_band": [0.0, 0.0]},
 }
 

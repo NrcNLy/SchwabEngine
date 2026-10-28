@@ -626,10 +626,10 @@ def test_regime_dynamic_satellite_sizing_and_leland_bounds():
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert "regime_satellite_targets" in cfg
     rst = cfg["regime_satellite_targets"]
-    assert rst["Goldilocks"]["target"] == 0.25
-    assert rst["Goldilocks"]["ntz_band"] == [0.21, 0.29]
-    assert rst["Uncertainty"]["target"] == 0.10
-    assert rst["Uncertainty"]["ntz_band"] == [0.08, 0.12]
+    assert rst["Goldilocks"]["target"] == 0.75
+    assert rst["Goldilocks"]["ntz_band"] == [0.65, 0.80]
+    assert rst["Uncertainty"]["target"] == 0.35
+    assert rst["Uncertainty"]["ntz_band"] == [0.30, 0.40]
     assert rst["Shock"]["target"] == 0.00
     assert rst["Shock"]["ntz_band"] == [0.00, 0.00]
     assert cfg["system_metadata"]["scale_invariant"] is True
@@ -641,21 +641,21 @@ def test_regime_dynamic_satellite_sizing_and_leland_bounds():
 
     # Pure Goldilocks: pi = [1.0, 0.0, 0.0]
     hmm.pi = [1.0, 0.0, 0.0]
-    assert hmm.calculate_target_satellite_weight() == 0.25
-    assert router.calculate_target_satellite_weight() == 0.25
+    assert hmm.calculate_target_satellite_weight() == 0.75
+    assert router.calculate_target_satellite_weight() == 0.75
     tau, l_bound, u_bound = hmm.calculate_dynamic_leland_bounds()
-    assert tau == 0.04
-    assert l_bound == 0.21
-    assert u_bound == 0.29
+    assert tau == 0.05
+    assert l_bound == 0.70
+    assert u_bound == 0.80
 
     # Pure Uncertainty: pi = [0.0, 1.0, 0.0]
     hmm.pi = [0.0, 1.0, 0.0]
-    assert hmm.calculate_target_satellite_weight() == 0.10
-    assert router.calculate_target_satellite_weight() == 0.10
+    assert hmm.calculate_target_satellite_weight() == 0.35
+    assert router.calculate_target_satellite_weight() == 0.35
     tau, l_bound, u_bound = hmm.calculate_dynamic_leland_bounds()
-    assert tau == 0.02
-    assert l_bound == 0.08
-    assert u_bound == 0.12
+    assert tau == 0.03
+    assert l_bound == 0.32
+    assert u_bound == 0.38
 
     # Pure Shock: pi = [0.0, 0.0, 1.0]
     hmm.pi = [0.0, 0.0, 1.0]
@@ -667,36 +667,36 @@ def test_regime_dynamic_satellite_sizing_and_leland_bounds():
     assert u_bound == 0.00
 
     # Mixed posterior: pi = [0.50, 0.40, 0.10]
-    # W_sat* = (0.50 * 0.25) + (0.40 * 0.10) + (0.10 * 0.00) = 0.125 + 0.040 = 0.165
+    # W_sat* = (0.50 * 0.75) + (0.40 * 0.35) + (0.10 * 0.00) = 0.375 + 0.140 = 0.515
     hmm.pi = [0.50, 0.40, 0.10]
     w_mixed = hmm.calculate_target_satellite_weight()
-    assert w_mixed == 0.165
+    assert w_mixed == 0.515
     tau_mixed, l_mixed, u_mixed = hmm.calculate_dynamic_leland_bounds(w_mixed)
-    assert tau_mixed == 0.02  # pi_goldilocks <= 0.70
-    assert l_mixed == pytest.approx(0.145, abs=1e-4)
-    assert u_mixed == pytest.approx(0.185, abs=1e-4)
+    assert tau_mixed == 0.03  # pi_goldilocks <= 0.70
+    assert l_mixed == pytest.approx(0.485, abs=1e-4)
+    assert u_mixed == pytest.approx(0.545, abs=1e-4)
 
     # Mixed posterior with pi_Goldilocks > 0.70: pi = [0.80, 0.15, 0.05]
-    # W_sat* = (0.80 * 0.25) + (0.15 * 0.10) + (0.05 * 0.00) = 0.20 + 0.015 = 0.215
+    # W_sat* = (0.80 * 0.75) + (0.15 * 0.35) + (0.05 * 0.00) = 0.60 + 0.0525 = 0.6525
     hmm.pi = [0.80, 0.15, 0.05]
     w_high_gold = hmm.calculate_target_satellite_weight()
-    assert w_high_gold == 0.215
+    assert w_high_gold == 0.6525
     tau_hg, l_hg, u_hg = hmm.calculate_dynamic_leland_bounds(w_high_gold)
-    assert tau_hg == 0.04  # pi_goldilocks > 0.70
-    assert l_hg == pytest.approx(0.175, abs=1e-4)
-    assert u_hg == pytest.approx(0.255, abs=1e-4)
+    assert tau_hg == 0.05  # pi_goldilocks > 0.70
+    assert l_hg == pytest.approx(0.6025, abs=1e-4)
+    assert u_hg == pytest.approx(0.7025, abs=1e-4)
 
     # 3. Verify allocate_from_live_nlv breach evaluation against dynamic bounds
     eng = RiskEngine(account_base=100000.0)
     # Set HMM to Goldilocks
     eng.hmm.pi = [0.95, 0.04, 0.01]
 
-    # Initialize dynamically (without passing target_satellite_weight)
+    # Initialize dynamically (without passing target_satellite_weight) (#140)
     alloc = eng.allocate_from_live_nlv(nlv=100000.0)
-    assert alloc["target_satellite_weight"] == pytest.approx(0.2415, abs=0.01)
-    assert alloc["tau_band"] == 0.04
-    assert alloc["lower_bound"] == pytest.approx(alloc["target_satellite_weight"] - 0.04, abs=1e-4)
-    assert alloc["upper_bound"] == pytest.approx(alloc["target_satellite_weight"] + 0.04, abs=1e-4)
+    assert alloc["target_satellite_weight"] == pytest.approx(0.7265, abs=0.01)
+    assert alloc["tau_band"] == 0.05
+    assert alloc["lower_bound"] == pytest.approx(alloc["target_satellite_weight"] - 0.05, abs=1e-4)
+    assert alloc["upper_bound"] == pytest.approx(alloc["target_satellite_weight"] + 0.05, abs=1e-4)
     assert alloc["is_breached"] is False
     assert alloc["breach_status"] == "NO_BREACH"
     assert abs((alloc["core_mv"] + alloc["sat_mv"] + alloc["swvxx_cash"]) - 100000.0) < 0.01
@@ -708,12 +708,12 @@ def test_regime_dynamic_satellite_sizing_and_leland_bounds():
         target_satellite_weight=0.05,  # Force satellite to be tiny (0.05)
         hmm=eng.hmm,
     )
-    # With eng.hmm.pi_goldilocks = 0.95, target = 0.05, tau = 0.04 -> lower = 0.01, upper = 0.09
+    # With eng.hmm.pi_goldilocks = 0.95, target = 0.05, tau = 0.05 -> lower = 0.00, upper = 0.10
     assert alloc_lower["is_breached"] is False
 
     # Force a breach: evaluate breach when satellite holding is above upper_bound
     sat_large = {
-        "SOXL": {"quantity": 800, "current_price": 50.0, "market_value": 40000.0},  # $40k on $100k = 40% > 29%
+        "SOXL": {"quantity": 1760, "current_price": 50.0, "market_value": 88000.0},  # $88k on $100k = 88% > 77.65%
     }
     plan_upper = eng.plan_dual_sleeve_reallocation(
         nlv=100000.0,
@@ -721,5 +721,5 @@ def test_regime_dynamic_satellite_sizing_and_leland_bounds():
     )
     assert plan_upper.action == "HARVEST_TO_CORE"
     assert plan_upper.band_upper == pytest.approx(alloc["upper_bound"], abs=1e-2)
-    assert plan_upper.active_satellite_weight == 0.40
+    assert plan_upper.active_satellite_weight == 0.88
 

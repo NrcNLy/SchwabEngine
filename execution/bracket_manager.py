@@ -99,6 +99,10 @@ class MultiTrancheBracket:
         initial_stop_pct: float = 0.018,
         breakeven_offset: float = 0.02,
         tranches: Optional[Dict[int, Dict]] = None,
+        min_stop_distance_pct: float = 0.010,
+        min_tp1_pct: float = 0.012,
+        min_tp2_pct: float = 0.025,
+        breakeven_delay_pct: float = 0.0080,
     ) -> None:
         if total_shares < 1:
             raise ValueError(f"total_shares must be >= 1, got {total_shares}")
@@ -109,7 +113,11 @@ class MultiTrancheBracket:
         self.total_shares: int = int(total_shares)
         self.entry_price: float = float(entry_price)
         self.s0_reference: float = float(s0_reference) if s0_reference is not None else float(entry_price)
-        self.initial_stop_pct: float = float(initial_stop_pct)
+        self.min_stop_distance_pct: float = float(min_stop_distance_pct)
+        self.min_tp1_pct: float = float(min_tp1_pct)
+        self.min_tp2_pct: float = float(min_tp2_pct)
+        self.breakeven_delay_pct: float = float(breakeven_delay_pct)
+        self.initial_stop_pct: float = max(float(initial_stop_pct), self.min_stop_distance_pct)
         self.breakeven_offset: float = float(breakeven_offset)
 
         # Allocate shares across the 3 tranches: 35% / 35% / 30%
@@ -133,17 +141,28 @@ class MultiTrancheBracket:
             t2_shares = 0
             t3_shares = 0
 
-        # Build default or adopt custom tranches
+        # Build default or adopt custom tranches (enforcing minimum profit floors #140)
+        t1_target_pct = max(0.025, self.min_tp1_pct)
+        t2_target_pct = max(0.045, self.min_tp2_pct)
+        t1_target_px = round(self.entry_price * (1.0 + t1_target_pct), 2)
+        t2_target_px = round(self.entry_price * (1.0 + t2_target_pct), 2)
+
         if tranches is not None:
             self.tranches = tranches
+            if 1 in self.tranches and "target_price" in self.tranches[1] and self.tranches[1]["target_price"] is not None:
+                floor_tp1 = round(self.entry_price * (1.0 + self.min_tp1_pct), 2)
+                self.tranches[1]["target_price"] = max(self.tranches[1]["target_price"], floor_tp1)
+            if 2 in self.tranches and "target_price" in self.tranches[2] and self.tranches[2]["target_price"] is not None:
+                floor_tp2 = round(self.entry_price * (1.0 + self.min_tp2_pct), 2)
+                self.tranches[2]["target_price"] = max(self.tranches[2]["target_price"], floor_tp2)
         else:
             self.tranches = {
                 1: {
                     "name": "Scale-Out Bank",
                     "pct_shares": 0.35,
                     "shares": t1_shares,
-                    "target_pct": 0.025,
-                    "target_price": round(self.entry_price * 1.025, 2),
+                    "target_pct": t1_target_pct,
+                    "target_price": t1_target_px,
                     "filled": False,
                     "fill_price": None,
                     "fill_time": None,
@@ -152,8 +171,8 @@ class MultiTrancheBracket:
                     "name": "Core Target",
                     "pct_shares": 0.35,
                     "shares": t2_shares,
-                    "target_pct": 0.045,
-                    "target_price": round(self.entry_price * 1.045, 2),
+                    "target_pct": t2_target_pct,
+                    "target_price": t2_target_px,
                     "filled": False,
                     "fill_price": None,
                     "fill_time": None,
@@ -170,8 +189,10 @@ class MultiTrancheBracket:
                 },
             }
 
-        # Pricing anchors
-        self.initial_stop_price: float = round(self.entry_price * (1.0 - self.initial_stop_pct), 2)
+        # Pricing anchors - enforce minimum stop distance floor
+        initial_stop_raw = round(self.entry_price * (1.0 - self.initial_stop_pct), 2)
+        max_allowed_stop = round(self.entry_price * (1.0 - self.min_stop_distance_pct), 2)
+        self.initial_stop_price: float = min(initial_stop_raw, max_allowed_stop)
         self.breakeven_stop_price: float = round(self.entry_price + self.breakeven_offset, 2)
         self.current_stop_price: float = self.initial_stop_price
 
@@ -294,6 +315,9 @@ class MultiTrancheBracket:
         actions: List[BracketAction] = []
 
         # --- Tranche 1: Scale-Out Bank (+2.5%) ---
+        unrealized_gain_pct = (self.high_water_mark - self.entry_price) / self.entry_price
+        breakeven_permitted = unrealized_gain_pct >= self.breakeven_delay_pct
+
         t1 = self.tranches[1]
         if not self.tranche_1_filled and t1["shares"] > 0:
             target_1 = t1["target_price"]
@@ -303,19 +327,25 @@ class MultiTrancheBracket:
                 t1["fill_time"] = current_time
                 self.tranche_1_filled = True
                 self.is_risk_free = True
-                self.breakeven_latched = True
 
                 sold_qty = t1["shares"]
                 self.remaining_shares -= sold_qty
                 self.realized_pnl += round(sold_qty * (px - self.entry_price), 2)
 
-                # Move stop on remaining 65% of shares to Breakeven (Entry Price + $0.02)
-                self.current_stop_price = max(self.current_stop_price, self.breakeven_stop_price)
+                # Move stop to Breakeven (Entry Price + $0.02) only after unrealized gain exceeds +0.80% (#140)
+                if breakeven_permitted:
+                    self.breakeven_latched = True
+                    self.current_stop_price = max(self.current_stop_price, self.breakeven_stop_price)
+                    logger.info(
+                        "[%s] Tranche 1 Filled @ $%.2f! Sold %d shares. Ratcheted stop to Breakeven $%.2f (gain +%.2f%% >= +%.2f%%). State: Risk-Free.",
+                        self.symbol, px, sold_qty, self.current_stop_price, unrealized_gain_pct * 100, self.breakeven_delay_pct * 100,
+                    )
+                else:
+                    logger.info(
+                        "[%s] Tranche 1 Filled @ $%.2f! Sold %d shares. Breakeven ratchet delayed (gain +%.2f%% < +%.2f%%). State: Risk-Free.",
+                        self.symbol, px, sold_qty, unrealized_gain_pct * 100, self.breakeven_delay_pct * 100,
+                    )
 
-                logger.info(
-                    "[%s] Tranche 1 Filled @ $%.2f! Sold %d shares. Ratcheted stop to Breakeven $%.2f. State: Risk-Free.",
-                    self.symbol, px, sold_qty, self.current_stop_price,
-                )
                 actions.append(
                     BracketAction(
                         action_type=ActionType.SELL.value,
@@ -327,18 +357,40 @@ class MultiTrancheBracket:
                         timestamp=current_time,
                     )
                 )
-                actions.append(
-                    BracketAction(
-                        action_type=ActionType.UPDATE_STOP.value,
-                        symbol=self.symbol,
-                        shares=self.remaining_shares,
-                        price=px,
-                        reason="RATCHET_BREAKEVEN",
-                        stop_price=self.current_stop_price,
-                        tranche_id=1,
-                        timestamp=current_time,
+                if self.breakeven_latched:
+                    actions.append(
+                        BracketAction(
+                            action_type=ActionType.UPDATE_STOP.value,
+                            symbol=self.symbol,
+                            shares=self.remaining_shares,
+                            price=px,
+                            reason="RATCHET_BREAKEVEN",
+                            stop_price=self.current_stop_price,
+                            tranche_id=1,
+                            timestamp=current_time,
+                        )
                     )
+
+        # Check delayed breakeven ratchet if Tranche 1 already filled but gain just crossed +0.80%
+        if self.tranche_1_filled and not self.breakeven_latched and breakeven_permitted and self.remaining_shares > 0:
+            self.breakeven_latched = True
+            self.current_stop_price = max(self.current_stop_price, self.breakeven_stop_price)
+            logger.info(
+                "[%s] Delayed breakeven threshold crossed (+%.2f%% >= +%.2f%%)! Ratcheted stop to Breakeven $%.2f.",
+                self.symbol, unrealized_gain_pct * 100, self.breakeven_delay_pct * 100, self.current_stop_price,
+            )
+            actions.append(
+                BracketAction(
+                    action_type=ActionType.UPDATE_STOP.value,
+                    symbol=self.symbol,
+                    shares=self.remaining_shares,
+                    price=px,
+                    reason="RATCHET_BREAKEVEN",
+                    stop_price=self.current_stop_price,
+                    tranche_id=1,
+                    timestamp=current_time,
                 )
+            )
 
         # --- Tranche 2: Core Target (+4.5%) ---
         t2 = self.tranches[2]
@@ -394,8 +446,12 @@ class MultiTrancheBracket:
                 vol = yz_vol * math.sqrt(252.0) if yz_vol < 0.20 else yz_vol
                 time_factor = math.sqrt((15.0 / 390.0) / 252.0)
                 dist = self.high_water_mark * (2.0 * vol * time_factor)
-                dist = max(dist, self.high_water_mark * 0.005)
+                dist = max(dist, self.high_water_mark * self.min_stop_distance_pct)
                 candidate_stop = round(self.high_water_mark - dist, 2)
+
+                # Delayed breakeven ratchet: Trailing stop cannot ratchet to or above breakeven until gain > +0.80%
+                if candidate_stop >= self.entry_price and not breakeven_permitted:
+                    candidate_stop = round(self.entry_price * (1.0 - self.min_stop_distance_pct), 2)
 
                 # Regime Gating via Hurst Exponent if supplied
                 ratchet_permitted = True
@@ -410,7 +466,7 @@ class MultiTrancheBracket:
                 if self.tranche_2_filled:
                     t1_target = self.tranches[1]["target_price"]
                     candidate_stop = max(candidate_stop, t1_target)
-                elif self.tranche_1_filled:
+                elif self.tranche_1_filled and self.breakeven_latched:
                     candidate_stop = max(candidate_stop, self.breakeven_stop_price)
 
                 if candidate_stop > self.current_stop_price and ratchet_permitted:
@@ -467,12 +523,20 @@ class MultiTrancheBracketManager:
         total_shares: int,
         entry_price: float,
         s0_reference: Optional[float] = None,
+        min_stop_distance_pct: float = 0.010,
+        min_tp1_pct: float = 0.012,
+        min_tp2_pct: float = 0.025,
+        breakeven_delay_pct: float = 0.0080,
     ) -> MultiTrancheBracket:
         bracket = MultiTrancheBracket(
             symbol=symbol,
             total_shares=total_shares,
             entry_price=entry_price,
             s0_reference=s0_reference,
+            min_stop_distance_pct=min_stop_distance_pct,
+            min_tp1_pct=min_tp1_pct,
+            min_tp2_pct=min_tp2_pct,
+            breakeven_delay_pct=breakeven_delay_pct,
         )
         self.add_bracket(bracket)
         return bracket

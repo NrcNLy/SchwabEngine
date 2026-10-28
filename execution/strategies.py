@@ -564,6 +564,8 @@ def update_trailing_stop(
     current_price: float,
     stop_distance: float,
     hurst_exponent: Optional[float] = None,
+    min_stop_distance_pct: float = 0.010,
+    breakeven_delay_pct: float = 0.0080,
 ) -> tuple[float, bool]:
     """
     Updates the position's high-water-mark and ratchets stop_price upward monotonically.
@@ -573,12 +575,20 @@ def update_trailing_stop(
     """
     px = float(current_price)
     dist = float(stop_distance)
-    hwm = float(getattr(position, "high_water_mark", getattr(position, "entry_price", px)))
+    entry_px = float(getattr(position, "entry_price", px))
+    hwm = float(getattr(position, "high_water_mark", entry_px))
     hwm = max(hwm, px)
     if hasattr(position, "high_water_mark"):
         position.high_water_mark = Decimal(str(round(hwm, 4)))
 
+    # Floor stop distance to at least min_stop_distance_pct of high-water-mark (#140)
+    dist = max(dist, hwm * min_stop_distance_pct)
     candidate = round(hwm - dist, 2)
+
+    # Delay breakeven ratchet: Trailing stop only moves to breakeven after unrealized gain exceeds +0.80% (#140)
+    if candidate >= entry_px and ((hwm - entry_px) / entry_px) < breakeven_delay_pct:
+        candidate = round(entry_px * (1.0 - min_stop_distance_pct), 2)
+
     cur_stop = float(position.stop_price) if getattr(position, "stop_price", None) is not None else None
 
     # Monotonic upward ratchets of the stop price must NEVER be blocked by hurst <= 0.50
@@ -1486,7 +1496,16 @@ class StrategyEngine:
         if risk_per_shr <= 0:
             return None   # ORB low ≥ current price — data anomaly
 
+        # Enforce Minimum Bracket Floors (#140)
+        min_stop_dist = float(entry) * 0.010
+        if risk_per_shr < min_stop_dist:
+            risk_per_shr = min_stop_dist
+            stop_price = entry - risk_per_shr
+
         target_price = entry + self._orb_rr_target * risk_per_shr
+        min_tp1 = float(entry) * 1.012
+        if target_price < min_tp1:
+            target_price = min_tp1
         quantity     = quarter_kelly_size(entry, stop_price, self._max_risk)
 
         if quantity < _MIN_SIGNAL_QUANTITY:
@@ -1585,7 +1604,7 @@ class StrategyEngine:
         # Entry: use the current bid (conservative — we buy at the lower band)
         entry = bid
 
-        # Stop: 1× ATR below entry — natural volatility-based stop
+        # Stop: 1× ATR below entry, floored at 1.0% (#140)
         atr_stop_dist = metrics.atr14_dollars
         if atr_stop_dist <= 0:
             logger.debug(
@@ -1593,10 +1612,16 @@ class StrategyEngine:
                 state.symbol,
             )
             return None
+        min_stop_dist = float(entry) * 0.010
+        if atr_stop_dist < min_stop_dist:
+            atr_stop_dist = min_stop_dist
         stop_price  = entry - atr_stop_dist
 
-        # Target: VWAP midline
+        # Target: VWAP midline, floored at 1.2% (#140)
         target_price = metrics.vwap
+        min_tp1 = float(entry) * 1.012
+        if target_price < min_tp1:
+            target_price = min_tp1
 
         if target_price <= entry:
             # Price already above VWAP — no mean-reversion room

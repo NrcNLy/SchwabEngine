@@ -269,3 +269,115 @@ def test_order_manager_wire_and_dynamic_sizing(tmp_path):
     assert t["posterior_alpha"] == pytest.approx(10.0)
     assert t["posterior_beta"] == pytest.approx(10.0)
     assert t["kelly_fraction"] == pytest.approx(0.025, abs=0.005)
+
+
+def test_sizing_concurrent_collision_prevention():
+    """
+    Test Pure Tactical Concurrent Sizing Collision Prevention (#140):
+    - When evaluating a new entry signal, calculate remaining_cash_budget = total_tactical_budget - current_open_satellite_notional.
+    - Prevent concurrent orders from independently sizing against total account NLV.
+    - If remaining_cash_budget < min_position_size, reject additional entries.
+    """
+    governor = BayesianSizingGovernor(alpha_0=10.0, beta_0=10.0, win_loss_ratio=1.25)
+    nlv = 4400.90
+    settled_cash = 4400.90
+
+    # Total tactical budget under Goldilocks (75% gross capacity) = $3,300.675 -> $3,300.68
+    total_tactical_budget = 4400.90 * 0.75  # $3,300.675
+    
+    # 1. First order evaluated (e.g. SOXL): zero open satellite notional
+    open_satellite_notional = 0.0
+    remaining_budget_1 = total_tactical_budget - open_satellite_notional  # $3,300.68
+    verdict_1 = governor.calculate_position_size(
+        symbol="SOXL",
+        price=25.0,
+        atr=0.50,
+        settled_cash=settled_cash,
+        total_nlv=nlv,
+        remaining_budget=remaining_budget_1,
+        min_position_size=50.0,
+    )
+    assert verdict_1.shares > 0
+    # Bound 1: 0.33 * 4400.90 = $1452.29 -> 58 shares @ $25 = $1450.00
+    assert verdict_1.shares == 58
+    assert verdict_1.notional_usd == 1450.00
+
+    # 2. Second concurrent order evaluated (e.g. TQQQ) while SOXL committed/open:
+    open_satellite_notional = verdict_1.notional_usd  # $1,450.00
+    remaining_budget_2 = total_tactical_budget - open_satellite_notional  # $1,850.68
+    verdict_2 = governor.calculate_position_size(
+        symbol="TQQQ",
+        price=70.0,
+        atr=1.20,
+        settled_cash=settled_cash,
+        total_nlv=nlv,
+        remaining_budget=remaining_budget_2,
+        min_position_size=50.0,
+    )
+    assert verdict_2.shares > 0
+    # Sizing capped by remaining_budget_2 ($1,850.68) rather than full account NLV
+    assert verdict_2.notional_usd <= remaining_budget_2
+
+    # 3. Third concurrent order when budget is nearly exhausted (< min_position_size $50.0)
+    open_satellite_notional = total_tactical_budget - 30.0  # only $30 remaining
+    remaining_budget_3 = total_tactical_budget - open_satellite_notional
+    verdict_3 = governor.calculate_position_size(
+        symbol="TNA",
+        price=40.0,
+        atr=1.0,
+        settled_cash=settled_cash,
+        total_nlv=nlv,
+        remaining_budget=remaining_budget_3,
+        min_position_size=50.0,
+    )
+    assert verdict_3.shares == 0
+    assert verdict_3.notional_usd == 0.0
+    assert verdict_3.bottleneck_reason == "REMAINING_BUDGET_EXHAUSTED"
+
+
+def test_portfolio_pure_tactical_budget():
+    """
+    Test Pure Tactical Portfolio Regime Capacities (#140):
+    - Goldilocks: 75% gross tactical capacity ($3,300.68 on $4,400.90).
+    - Uncertainty: 35% gross tactical capacity ($1,540.32 on $4,400.90).
+    - Macro Shock: 0% gross tactical capacity ($0.00 on $4,400.90).
+    """
+    from decimal import Decimal
+    from core.engine import _EngineBase
+    from core.ledger import SettlementLedger
+
+    ledger = SettlementLedger(baseline_settled=Decimal("4400.90"))
+    cfg = {
+        "tactical_satellite_max_capacity": 0.75,
+        "regime_satellite_targets": {
+            "Goldilocks": {"target": 0.75, "ntz_band": [0.65, 0.80]},
+            "Uncertainty": {"target": 0.35, "ntz_band": [0.30, 0.40]},
+            "Shock": {"target": 0.0, "ntz_band": [0.0, 0.0]},
+        },
+    }
+
+    class DummyCtx:
+        pass
+
+    engine = _EngineBase(
+        ctx=DummyCtx(),
+        cfg=cfg,
+        ledger=ledger,
+        settings=None,
+    )
+
+    # Goldilocks
+    rem, total, open_notional = engine.calculate_remaining_tactical_budget("Goldilocks")
+    assert total == Decimal("3300.68")
+    assert rem == Decimal("3300.68")
+    assert open_notional == Decimal("0.00")
+
+    # Uncertainty
+    rem_u, total_u, _ = engine.calculate_remaining_tactical_budget("Uncertainty")
+    assert total_u == Decimal("1540.32")
+    assert rem_u == Decimal("1540.32")
+
+    # Macro Shock
+    rem_s, total_s, _ = engine.calculate_remaining_tactical_budget("Shock")
+    assert total_s == Decimal("0.00")
+    assert rem_s == Decimal("0.00")

@@ -127,12 +127,13 @@ class BayesianSizingGovernor:
         )
         self.config: Dict[str, Any] = config or {}
 
-        # Argon 2.4.0 Calibrated Dual-Sleeve & HMM Parameters (#98)
-        self.core_target_weight: float = 0.85
-        self.satellite_target_weight: float = 0.15
+        # Pure Tactical 100% LETF Model Parameters (#140)
+        self.core_target_weight: float = 0.0
+        self.satellite_target_weight: float = 0.75
+        self.tactical_max_capacity: float = 0.75
         self.tau_band: float = float(tau_band)
-        self.drift_lower_cutoff: float = round(max(0.0, self.satellite_target_weight - self.tau_band), 4)
-        self.drift_upper_cutoff: float = round(self.satellite_target_weight + self.tau_band, 4)
+        self.drift_lower_cutoff: float = 0.30
+        self.drift_upper_cutoff: float = 0.80
         self.friction_cost_rate: float = 0.0002
         self.churn_reduction_target_pct: float = 99.6
         self.volatility_gate_trigger: float = float(volatility_gate_trigger)
@@ -239,11 +240,13 @@ class BayesianSizingGovernor:
         settled_cash: float,
         total_nlv: float,
         enforce_settled_cash_gate: bool = True,
+        remaining_budget: Optional[float] = None,
+        min_position_size: float = 50.0,
     ) -> SizingVerdict:
         """
         Calculates optimal position size enforcing Bayesian Quarter-Kelly,
         ATR volatility risk budget, single-ticker cap, optional dollar ceiling,
-        and settled cash reserve gating.
+        remaining tactical cash budget, and settled cash reserve gating.
 
         Args:
             symbol: Ticker symbol (e.g. "SOXL").
@@ -253,6 +256,8 @@ class BayesianSizingGovernor:
             total_nlv: Account Net Liquidation Value.
             enforce_settled_cash_gate: If True, enforces strict settled cash limit (zero GFV).
                                       If False, permits instantaneous Dual-Sleeve reallocation.
+            remaining_budget: Optional remaining tactical cash budget to prevent concurrent sizing collisions (#140).
+            min_position_size: Minimum dollar notional for an allowable position entry.
 
         Returns:
             SizingVerdict with shares, notional_usd, kelly_fraction, risk_usd, bottleneck_reason.
@@ -263,6 +268,23 @@ class BayesianSizingGovernor:
         cash = max(0.0, float(settled_cash))
         nlv = max(0.0, float(total_nlv))
         f_qk = self.kelly_fraction
+
+        if remaining_budget is not None:
+            rem_cash = max(0.0, float(remaining_budget))
+            effective_min = max(float(min_position_size), px)
+            if rem_cash < effective_min:
+                logger.warning(
+                    "[%s] Sizing rejected: remaining budget ($%.2f) < min position size ($%.2f)",
+                    sym, rem_cash, effective_min
+                )
+                return SizingVerdict(
+                    shares=0,
+                    notional_usd=0.0,
+                    kelly_fraction=round(f_qk, 6),
+                    risk_usd=0.0,
+                    bottleneck_reason="REMAINING_BUDGET_EXHAUSTED",
+                )
+            cash = min(cash, rem_cash)
 
         if px <= 0.0 or nlv <= 0.0:
             logger.warning("[%s] Sizing failed: non-positive price ($%.2f) or NLV ($%.2f)", sym, px, nlv)
