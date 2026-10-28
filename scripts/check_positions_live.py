@@ -1,5 +1,6 @@
 import os
 import sys
+import requests
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -46,7 +47,11 @@ def main():
     auth.load_tokens()
 
     rest = SchwabRestClient.from_config(cfg, auth)
-    acct_nums = rest._get(f"{rest._trader_base}/accounts/accountNumbers", is_essential=True, action="CRITICAL_EXIT").json()
+    headers = rest._auth_headers()
+    
+    # 1. Fetch account numbers
+    r = requests.get(f"{rest._trader_base}/accounts/accountNumbers", headers=headers, timeout=10)
+    acct_nums = r.json()
     target_hash = None
     for entry in acct_nums:
         if str(entry.get("accountNumber", "")).endswith("015"):
@@ -55,15 +60,27 @@ def main():
     if not target_hash:
         target_hash = acct_nums[0].get("hashValue")
 
-    resp = rest._get(f"{rest._trader_base}/accounts/{target_hash}?fields=positions", is_essential=True, action="CRITICAL_EXIT")
-    sec_acct = resp.json().get("securitiesAccount", {})
+    # 2. Fetch account positions
+    r2 = requests.get(f"{rest._trader_base}/accounts/{target_hash}?fields=positions", headers=headers, timeout=10)
+    sec_acct = r2.json().get("securitiesAccount", {})
     balances = sec_acct.get("currentBalances", {})
-    print("Account NLV:", balances.get("liquidationValue"))
-    print("Settled Cash:", balances.get("settledCash"))
+    print("=== LIVE SCHWAB ACCOUNT 4015 ===")
+    print("Account NLV: $", balances.get("liquidationValue"))
+    print("Settled Cash: $", balances.get("settledCash"))
+    print("Cash Balance: $", balances.get("cashBalance"))
     positions = sec_acct.get("positions", [])
     print("Schwab Actual Positions Count:", len(positions))
     for p in positions:
-        print("  Symbol:", p.get("instrument", {}).get("symbol"), "Qty:", p.get("longQuantity"), "MktVal:", p.get("marketValue"))
+        print("  Symbol:", p.get("instrument", {}).get("symbol"), "| Qty:", p.get("longQuantity"), "| MktVal: $", p.get("marketValue"))
+
+    # 3. Fetch open orders
+    r3 = requests.get(f"{rest._trader_base}/accounts/{target_hash}/orders?status=WORKING", headers=headers, timeout=10)
+    print("Working Orders Status:", r3.status_code)
+    if r3.status_code == 200:
+        orders = r3.json()
+        print("Working Orders Count:", len(orders))
+        for o in orders:
+            print("  Order ID:", o.get("orderId"), "| Symbol:", o.get("orderLegCollection", [{}])[0].get("instrument", {}).get("symbol"), "| Type:", o.get("orderType"), "| Qty:", o.get("quantity"), "| Status:", o.get("status"))
 
 if __name__ == "__main__":
     main()
